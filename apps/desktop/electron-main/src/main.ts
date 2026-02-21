@@ -77,6 +77,24 @@ interface CodexHistorySyncSummary {
   importedSessions: number;
 }
 
+interface GitStatusSummary {
+  insideRepo: boolean;
+  branch: string | null;
+  head: string | null;
+  stagedCount: number;
+  unstagedCount: number;
+  untrackedCount: number;
+  changedFiles: string[];
+}
+
+interface GitCommitSummary {
+  hash: string;
+  author: string;
+  ts: string;
+  message: string;
+  files: string[];
+}
+
 const defaultState: CodaphDesktopState = {
   projects: [],
   lastProjectPath: null,
@@ -185,6 +203,40 @@ function parsePatchChanges(rawText: string): Array<{ path: string; kind: PatchCh
   // eslint-disable-next-line no-cond-assign
   while ((match = updateRegex.exec(rawText)) !== null) {
     changes.push({ path: match[1].trim(), kind: "update" });
+  }
+
+  const unique = new Map<string, { path: string; kind: PatchChangeKind }>();
+  for (const change of changes) {
+    unique.set(`${change.kind}:${change.path}`, change);
+  }
+
+  return [...unique.values()];
+}
+
+function parseChangedFilesFromToolOutput(rawOutput: string): Array<{ path: string; kind: PatchChangeKind }> {
+  const changes: Array<{ path: string; kind: PatchChangeKind }> = [];
+  const lines = rawOutput.split("\n");
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed.length < 3) {
+      continue;
+    }
+
+    const marker = trimmed[0];
+    if (!["M", "A", "D"].includes(marker) || trimmed[1] !== " ") {
+      continue;
+    }
+
+    const rawPath = trimmed.slice(2).trim();
+    if (!rawPath) {
+      continue;
+    }
+
+    changes.push({
+      path: rawPath,
+      kind: marker === "A" ? "add" : marker === "D" ? "delete" : "update",
+    });
   }
 
   const unique = new Map<string, { path: string; kind: PatchChangeKind }>();
@@ -405,17 +457,35 @@ function projectHistoryLine(line: CodexHistoryLine): ProjectedEvent[] {
   }
 
   if (responseType === "function_call_output") {
+    const outputText = extractText(payload.output);
     projected.push({
       eventType: "item.completed",
       payload: {
         item: {
           type: "tool_result",
           call_id: payload.call_id ?? null,
-          output: payload.output ?? null,
+          output: outputText ?? payload.output ?? null,
         },
       },
       ts: normalizeIsoTs(line.timestamp),
     });
+
+    if (outputText) {
+      const outputChanges = parseChangedFilesFromToolOutput(outputText);
+      if (outputChanges.length > 0) {
+        projected.push({
+          eventType: "item.completed",
+          payload: {
+            item: {
+              type: "file_change",
+              changes: outputChanges,
+            },
+          },
+          ts: normalizeIsoTs(line.timestamp),
+        });
+      }
+    }
+
     return projected;
   }
 
@@ -577,6 +647,196 @@ function getMirrorRoot(projectPath: string): string {
 
 function createQueryService(projectPath: string): QueryService {
   return new QueryService(getMirrorRoot(projectPath));
+}
+
+async function runProcess(
+  command: string,
+  args: string[],
+  cwd?: string,
+): Promise<{ code: number; stdout: string; stderr: string }> {
+  return new Promise((resolvePromise) => {
+    const child = spawn(command, args, {
+      cwd,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    const stdoutChunks: string[] = [];
+    const stderrChunks: string[] = [];
+
+    child.stdout.on("data", (chunk: Buffer) => {
+      stdoutChunks.push(chunk.toString("utf8"));
+    });
+
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderrChunks.push(chunk.toString("utf8"));
+    });
+
+    child.once("error", (error: Error) => {
+      resolvePromise({
+        code: 1,
+        stdout: "",
+        stderr: error.message,
+      });
+    });
+
+    child.once("close", (code: number | null) => {
+      resolvePromise({
+        code: code ?? 1,
+        stdout: stdoutChunks.join(""),
+        stderr: stderrChunks.join(""),
+      });
+    });
+  });
+}
+
+function parseGitStatusPorcelain(porcelain: string): {
+  stagedCount: number;
+  unstagedCount: number;
+  untrackedCount: number;
+  changedFiles: string[];
+} {
+  let stagedCount = 0;
+  let unstagedCount = 0;
+  let untrackedCount = 0;
+  const changed = new Set<string>();
+
+  const lines = porcelain
+    .split("\n")
+    .map((line) => line.trimEnd())
+    .filter((line) => line.length > 0);
+
+  for (const line of lines) {
+    if (line.startsWith("##")) {
+      continue;
+    }
+
+    if (line.startsWith("?? ")) {
+      untrackedCount += 1;
+      changed.add(line.slice(3).trim());
+      continue;
+    }
+
+    const x = line[0] ?? " ";
+    const y = line[1] ?? " ";
+    const pathPart = line.slice(3).trim();
+    const finalPath = pathPart.includes(" -> ")
+      ? pathPart.split(" -> ").at(-1)?.trim() ?? pathPart
+      : pathPart;
+
+    if (x !== " " && x !== "?") {
+      stagedCount += 1;
+    }
+    if (y !== " " && y !== "?") {
+      unstagedCount += 1;
+    }
+    if (finalPath) {
+      changed.add(finalPath);
+    }
+  }
+
+  return {
+    stagedCount,
+    unstagedCount,
+    untrackedCount,
+    changedFiles: [...changed].sort((a, b) => a.localeCompare(b)),
+  };
+}
+
+async function getGitStatus(projectPath: string): Promise<GitStatusSummary> {
+  const normalized = normalizeProjectPath(projectPath);
+
+  const insideCheck = await runProcess("git", ["rev-parse", "--is-inside-work-tree"], normalized);
+  if (insideCheck.code !== 0 || insideCheck.stdout.trim() !== "true") {
+    return {
+      insideRepo: false,
+      branch: null,
+      head: null,
+      stagedCount: 0,
+      unstagedCount: 0,
+      untrackedCount: 0,
+      changedFiles: [],
+    };
+  }
+
+  const [statusRes, headRes] = await Promise.all([
+    runProcess("git", ["status", "--porcelain=1", "-b"], normalized),
+    runProcess("git", ["rev-parse", "--short", "HEAD"], normalized),
+  ]);
+
+  const statusInfo = parseGitStatusPorcelain(statusRes.stdout);
+  const firstLine = statusRes.stdout.split("\n")[0]?.trim() ?? "";
+  const branchToken = firstLine.startsWith("## ") ? firstLine.slice(3).split("...")[0] : "";
+  const branch = branchToken.length > 0 ? branchToken : null;
+
+  return {
+    insideRepo: true,
+    branch,
+    head: headRes.code === 0 ? headRes.stdout.trim() || null : null,
+    ...statusInfo,
+  };
+}
+
+async function getGitCommits(projectPath: string, limit: number): Promise<GitCommitSummary[]> {
+  const normalized = normalizeProjectPath(projectPath);
+  const safeLimit = Number.isFinite(limit) && limit > 0 ? Math.min(Math.floor(limit), 100) : 20;
+
+  const insideCheck = await runProcess("git", ["rev-parse", "--is-inside-work-tree"], normalized);
+  if (insideCheck.code !== 0 || insideCheck.stdout.trim() !== "true") {
+    return [];
+  }
+
+  const logRes = await runProcess(
+    "git",
+    ["log", `-n${safeLimit}`, "--date=iso-strict", "--name-only", "--pretty=format:__COMMIT__%H|%an|%aI|%s"],
+    normalized,
+  );
+  if (logRes.code !== 0) {
+    return [];
+  }
+
+  const commits: GitCommitSummary[] = [];
+  const lines = logRes.stdout.split("\n");
+  let current: GitCommitSummary | null = null;
+
+  for (const line of lines) {
+    if (line.startsWith("__COMMIT__")) {
+      if (current) {
+        commits.push({
+          ...current,
+          files: [...new Set(current.files)].sort((a, b) => a.localeCompare(b)),
+        });
+      }
+
+      const raw = line.slice("__COMMIT__".length);
+      const [hash, author, ts, ...messageParts] = raw.split("|");
+      current = {
+        hash: hash ?? "",
+        author: author ?? "",
+        ts: ts ?? "",
+        message: messageParts.join("|"),
+        files: [],
+      };
+      continue;
+    }
+
+    if (!current) {
+      continue;
+    }
+
+    const trimmed = line.trim();
+    if (trimmed.length > 0) {
+      current.files.push(trimmed);
+    }
+  }
+
+  if (current) {
+    commits.push({
+      ...current,
+      files: [...new Set(current.files)].sort((a, b) => a.localeCompare(b)),
+    });
+  }
+
+  return commits;
 }
 
 async function runCodexLoginStatus(): Promise<{ ok: boolean; message: string }> {
@@ -741,6 +1001,14 @@ async function syncCodexHistory(projectPath: string): Promise<CodexHistorySyncSu
 
     summary.matchedFiles += 1;
 
+    // Recovery for older cursors that were advanced before import conditions were correct.
+    if (cursor.sequence === 0 && cursor.lineCount > 0) {
+      cursor = {
+        ...cursor,
+        lineCount: 0,
+      };
+    }
+
     let sequence = cursor.sequence;
     let importedForFile = 0;
 
@@ -852,6 +1120,14 @@ ipcMain.handle("codaph:codex:auth-status", async () => {
 
 ipcMain.handle("codaph:history:sync", async (_event, params: { projectPath: string }) => {
   return syncCodexHistory(params.projectPath);
+});
+
+ipcMain.handle("codaph:git:status", async (_event, params: { projectPath: string }) => {
+  return getGitStatus(params.projectPath);
+});
+
+ipcMain.handle("codaph:git:commits", async (_event, params: { projectPath: string; limit?: number }) => {
+  return getGitCommits(params.projectPath, params.limit ?? 20);
 });
 
 ipcMain.handle("codaph:sessions", async (_event, params: { projectPath: string }) => {

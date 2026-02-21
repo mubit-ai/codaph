@@ -1,16 +1,50 @@
 :root {
+  --bg: #0e131c;
+  --paper: #151d2b;
+  --paper-soft: #1b2434;
+  --surface: #111926;
+  --surface-soft: #0f1622;
+  --ink: #e8edf7;
+  --muted: #95a2b8;
+  --accent: #3cc9a7;
+  --accent-soft: #1d3c3a;
+  --danger: #ff8a7c;
+  --edge: #2b3648;
+  --edge-soft: #223045;
+  --shadow: rgba(0, 0, 0, 0.45);
+  --auth-ok-bg: #173830;
+  --auth-ok-ink: #87f3d2;
+  --auth-bad-bg: #48272b;
+  --auth-bad-ink: #ffb3ab;
+
+  font-family: "IBM Plex Sans", "Avenir Next", "Segoe UI", sans-serif;
+  color: var(--ink);
+  color-scheme: dark;
+  background:
+    radial-gradient(circle at 0% 0%, rgba(56, 80, 126, 0.35) 0%, transparent 42%),
+    radial-gradient(circle at 95% 5%, rgba(33, 133, 116, 0.24) 0%, transparent 40%),
+    var(--bg);
+}
+
+[data-theme="light"] {
   --bg: #f8f4eb;
   --paper: #fffdf8;
+  --paper-soft: #f6faf8;
+  --surface: #ffffff;
+  --surface-soft: #fffdfa;
   --ink: #1f1a12;
   --muted: #645a49;
   --accent: #0f7b6c;
   --accent-soft: #ccefe8;
   --danger: #b24b39;
   --edge: #dfd2bd;
+  --edge-soft: #eadfcd;
   --shadow: rgba(52, 34, 14, 0.14);
-
-  font-family: "IBM Plex Sans", "Avenir Next", "Segoe UI", sans-serif;
-  color: var(--ink);
+  --auth-ok-bg: #e2f6ef;
+  --auth-ok-ink: #0c6f5f;
+  --auth-bad-bg: #fce8e4;
+  --auth-bad-ink: #9c3f30;
+  color-scheme: light;
   background:
     radial-gradient(circle at 0% 0%, #fff3df 0%, transparent 40%),
     radial-gradient(circle at 95% 5%, #d9f4ee 0%, transparent 38%),
@@ -24,6 +58,8 @@
 body {
   margin: 0;
   min-height: 100vh;
+  color: var(--ink);
+  transition: background-color 160ms ease, color 160ms ease;
 }
 
 #app {
@@ -85,6 +121,11 @@ summary {
   gap: 12px;
 }
 
+.row-actions {
+  display: flex;
+  gap: 8px;
+}
+
 .hint {
   margin-top: 8px;
   color: var(--muted);
@@ -102,6 +143,26 @@ summary {
   gap: 8px;
 }
 
+.git-overview {
+  margin-top: 10px;
+  display: grid;
+  gap: 8px;
+}
+
+.git-stats {
+  color: var(--muted);
+}
+
+.git-files {
+  display: grid;
+  gap: 4px;
+}
+
+.git-commits {
+  display: grid;
+  gap: 8px;
+}
+
 .project-item,
 .session-item {
   width: 100%;
@@ -109,7 +170,7 @@ summary {
   border: 1px solid var(--edge);
   border-radius: 12px;
   padding: 10px;
-  background: #fff;
+  background: var(--surface);
   display: grid;
   gap: 4px;
   cursor: pointer;
@@ -118,7 +179,7 @@ summary {
 .project-item.active,
 .session-item.active {
   border-color: var(--accent);
-  background: linear-gradient(160deg, var(--accent-soft), #f3fbf8 70%);
+  background: linear-gradient(160deg, var(--accent-soft), var(--surface) 72%);
 }
 
 .project-path {
@@ -128,7 +189,7 @@ summary {
 }
 
 .capture-panel {
-  background: linear-gradient(180deg, #fffdf8, #f6faf8 75%);
+  background: linear-gradient(180deg, var(--paper), var(--paper-soft) 75%);
 }
 
 .capture-grid {
@@ -150,10 +211,10 @@ summary {
 
 .manual-capture {
   margin-top: 10px;
-  border: 1px solid #e4d8c5;
+  border: 1px solid var(--edge-soft);
   border-radius: 10px;
   padding: 8px 10px;
-  background: #fffdfa;
+  background: var(--surface-soft);
 }
 
 .manual-capture summary {
@@ -181,7 +242,7 @@ select,
 textarea {
   border: 1px solid var(--edge);
   border-radius: 10px;
-  background: white;
+  background: var(--surface);
   color: var(--ink);
   padding: 8px 10px;
 }
@@ -196,10 +257,14 @@ textarea {
   border: 1px solid var(--edge);
   border-radius: 10px;
   padding: 8px 12px;
-  background: #fff;
+  background: var(--surface);
   color: var(--ink);
   cursor: pointer;
   white-space: nowrap;
+}
+
+.theme-toggle {
+  min-width: 110px;
 }
 
 .btn.primary {
@@ -225,13 +290,13 @@ textarea {
 }
 
 .auth.ok {
-  background: #e2f6ef;
-  color: #0c6f5f;
+  background: var(--auth-ok-bg);
+  color: var(--auth-ok-ink);
 }
 
 .auth.bad {
-  background: #fce8e4;
-  color: #9c3f30;
+  background: var(--auth-bad-bg);
+  color: var(--auth-bad-ink);
 }
 
 .grid-two {
@@ -242,9 +307,9 @@ textarea {
 
 .log-item,
 .diff-item {
-  border: 1px solid #eadfcd;
+  border: 1px solid var(--edge-soft);
   border-radius: 10px;
-  background: #fff;
+  background: var(--surface);
   padding: 10px;
   display: grid;
   gap: 6px;
@@ -257,9 +322,9 @@ textarea {
 }
 
 .raw-item {
-  border: 1px solid #eadfcd;
+  border: 1px solid var(--edge-soft);
   border-radius: 10px;
-  background: #fff;
+  background: var(--surface);
   overflow: hidden;
 }
 
@@ -279,11 +344,11 @@ textarea {
 .raw-item pre {
   margin: 0;
   padding: 10px;
-  border-top: 1px solid #efe4d2;
+  border-top: 1px solid var(--edge-soft);
   font-size: 12px;
   max-height: 280px;
   overflow: auto;
-  background: #fffdfa;
+  background: var(--surface-soft);
 }
 
 .status {

@@ -54,7 +54,8 @@ export class QueryService {
       threadCount: data.threads.length,
     }));
 
-    return out.sort((a, b) => b.from.localeCompare(a.from));
+    // Show sessions by last activity time so long-running sessions stay visible.
+    return out.sort((a, b) => b.to.localeCompare(a.to));
   }
 
   async getTimeline(filter: TimelineFilter): Promise<CapturedEventEnvelope[]> {

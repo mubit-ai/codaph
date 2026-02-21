@@ -40,6 +40,27 @@ declare global {
         importedEvents: number;
         importedSessions: number;
       }>;
+      getGitStatus: (projectPath: string) => Promise<{
+        insideRepo: boolean;
+        branch: string | null;
+        head: string | null;
+        stagedCount: number;
+        unstagedCount: number;
+        untrackedCount: number;
+        changedFiles: string[];
+      }>;
+      getGitCommits: (
+        projectPath: string,
+        limit?: number,
+      ) => Promise<
+        Array<{
+          hash: string;
+          author: string;
+          ts: string;
+          message: string;
+          files: string[];
+        }>
+      >;
       listSessions: (projectPath: string) => Promise<
         Array<{
           sessionId: string;

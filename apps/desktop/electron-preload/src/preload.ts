@@ -11,6 +11,10 @@ const api = {
   getCodexAuthStatus: async () => ipcRenderer.invoke("codaph:codex:auth-status"),
   syncHistory: async (projectPath: string) =>
     ipcRenderer.invoke("codaph:history:sync", { projectPath }),
+  getGitStatus: async (projectPath: string) =>
+    ipcRenderer.invoke("codaph:git:status", { projectPath }),
+  getGitCommits: async (projectPath: string, limit?: number) =>
+    ipcRenderer.invoke("codaph:git:commits", { projectPath, limit }),
   listSessions: async (projectPath: string) =>
     ipcRenderer.invoke("codaph:sessions", { projectPath }),
   getTimeline: async (projectPath: string, sessionId: string) =>

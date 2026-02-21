@@ -37,7 +37,34 @@ interface HistorySyncSummary {
   importedSessions: number;
 }
 
+interface GitStatusSummary {
+  insideRepo: boolean;
+  branch: string | null;
+  head: string | null;
+  stagedCount: number;
+  unstagedCount: number;
+  untrackedCount: number;
+  changedFiles: string[];
+}
+
+interface GitCommitSummary {
+  hash: string;
+  author: string;
+  ts: string;
+  message: string;
+  files: string[];
+}
+
+interface ChangeTraceRow {
+  ts: string;
+  reason: string;
+  files: Array<{ path: string; kind: string }>;
+}
+
 type CaptureMode = "codex_sdk" | "codex_exec";
+type ThemeMode = "dark" | "light";
+
+const THEME_STORAGE_KEY = "codaph-theme";
 
 const projects = ref<ProjectRecord[]>([]);
 const selectedProjectPath = ref<string | null>(null);
@@ -51,15 +78,19 @@ const loadingSessions = ref(false);
 const loadingTimeline = ref(false);
 const syncBusy = ref(false);
 const captureBusy = ref(false);
+const loadingGit = ref(false);
 
 const autoSync = ref(true);
 const promptInput = ref("");
 const captureMode = ref<CaptureMode>("codex_exec");
 const modelInput = ref("");
+const theme = ref<ThemeMode>("dark");
 
 const status = ref<string>("");
 const codexAuthMessage = ref<string>("Checking Codex login status...");
 const codexAuthOk = ref<boolean>(false);
+const gitStatus = ref<GitStatusSummary | null>(null);
+const gitCommits = ref<GitCommitSummary[]>([]);
 
 let autoSyncTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -207,6 +238,66 @@ const assistantOutputs = computed(() =>
     .filter((row): row is { event: EventRow; text: string } => !!row),
 );
 
+const changeTrace = computed<ChangeTraceRow[]>(() => {
+  const trace: ChangeTraceRow[] = [];
+  let lastPrompt: string | null = null;
+  let lastThought: string | null = null;
+  let lastAssistant: string | null = null;
+
+  for (const event of events.value) {
+    const prompt = getPromptText(event);
+    if (prompt) {
+      lastPrompt = prompt;
+    }
+
+    const thought = getThoughtText(event);
+    if (thought) {
+      lastThought = thought;
+    }
+
+    const item = getItem(event);
+    const itemType = getItemType(event);
+    if (itemType === "agent_message") {
+      const text = stringFromUnknown(item?.text) ?? stringFromUnknown(item?.content);
+      if (text) {
+        lastAssistant = text;
+      }
+    }
+
+    if (itemType !== "file_change") {
+      continue;
+    }
+
+    const rawChanges = Array.isArray(item?.changes) ? item.changes : [];
+    const files = rawChanges
+      .filter((change): change is { path: string; kind: string } =>
+        isRecord(change) && typeof change.path === "string" && typeof change.kind === "string",
+      )
+      .map((change) => ({
+        path: change.path,
+        kind: change.kind,
+      }));
+
+    if (files.length === 0) {
+      continue;
+    }
+
+    const reason =
+      lastThought ??
+      lastAssistant ??
+      lastPrompt ??
+      "No thought text exposed for this file change event.";
+
+    trace.push({
+      ts: event.ts,
+      reason,
+      files,
+    });
+  }
+
+  return trace;
+});
+
 function formatTs(ts: string): string {
   const d = new Date(ts);
   if (Number.isNaN(d.getTime())) {
@@ -215,10 +306,65 @@ function formatTs(ts: string): string {
   return d.toLocaleString();
 }
 
+function truncateText(text: string, maxLen = 180): string {
+  if (text.length <= maxLen) {
+    return text;
+  }
+  return `${text.slice(0, maxLen - 1)}...`;
+}
+
+function applyTheme(nextTheme: ThemeMode) {
+  theme.value = nextTheme;
+  document.documentElement.setAttribute("data-theme", nextTheme);
+  try {
+    window.localStorage.setItem(THEME_STORAGE_KEY, nextTheme);
+  } catch {
+    // Ignore localStorage errors in restricted environments.
+  }
+}
+
+function restoreTheme() {
+  let stored: ThemeMode | null = null;
+  try {
+    const value = window.localStorage.getItem(THEME_STORAGE_KEY);
+    if (value === "dark" || value === "light") {
+      stored = value;
+    }
+  } catch {
+    // Ignore localStorage errors in restricted environments.
+  }
+
+  if (stored) {
+    applyTheme(stored);
+    return;
+  }
+
+  const prefersDark = window.matchMedia?.("(prefers-color-scheme: dark)")?.matches ?? true;
+  applyTheme(prefersDark ? "dark" : "light");
+}
+
+function toggleTheme() {
+  applyTheme(theme.value === "dark" ? "light" : "dark");
+}
+
 async function refreshCodexAuthStatus() {
   const auth = await window.codaph.getCodexAuthStatus();
   codexAuthOk.value = auth.ok;
   codexAuthMessage.value = auth.message;
+}
+
+async function loadGitOverview(projectPath: string) {
+  loadingGit.value = true;
+  try {
+    const [statusData, commitData] = await Promise.all([
+      window.codaph.getGitStatus(projectPath),
+      window.codaph.getGitCommits(projectPath, 20),
+    ]);
+    gitStatus.value = statusData;
+    gitCommits.value = commitData;
+  } finally {
+    loadingGit.value = false;
+  }
 }
 
 async function loadProjects() {
@@ -236,6 +382,7 @@ async function loadProjects() {
     if (selectedProjectPath.value) {
       await syncHistory(false, false);
       await loadSessions(selectedProjectPath.value);
+      await loadGitOverview(selectedProjectPath.value);
     }
   } finally {
     loadingProjects.value = false;
@@ -253,7 +400,7 @@ async function addProject() {
   await window.codaph.setLastProject(added.path);
 
   await syncHistory(true, false);
-  await loadSessions(added.path);
+  await Promise.all([loadSessions(added.path), loadGitOverview(added.path)]);
 }
 
 async function removeSelectedProject() {
@@ -272,7 +419,7 @@ async function selectProject(projectPath: string) {
   await window.codaph.setLastProject(projectPath);
 
   await syncHistory(false, false);
-  await loadSessions(projectPath);
+  await Promise.all([loadSessions(projectPath), loadGitOverview(projectPath)]);
 }
 
 async function loadSessions(projectPath: string) {
@@ -388,6 +535,7 @@ async function runCapture() {
 }
 
 onMounted(async () => {
+  restoreTheme();
   await Promise.all([loadProjects(), refreshCodexAuthStatus()]);
 
   autoSyncTimer = setInterval(() => {
@@ -412,7 +560,12 @@ onBeforeUnmount(() => {
     <aside class="rail panel">
       <div class="row-head">
         <h1>Codaph</h1>
-        <button class="btn" @click="addProject">Add Folder</button>
+        <div class="row-actions">
+          <button class="btn theme-toggle" @click="toggleTheme">
+            Theme: {{ theme === "dark" ? "Dark" : "Light" }}
+          </button>
+          <button class="btn" @click="addProject">Add Folder</button>
+        </div>
       </div>
 
       <p class="hint">
@@ -523,6 +676,41 @@ onBeforeUnmount(() => {
         </p>
       </section>
 
+      <section class="panel">
+        <div class="row-head">
+          <h2>Git Activity</h2>
+          <button
+            class="btn"
+            :disabled="loadingGit || !selectedProjectPath"
+            @click="selectedProjectPath && loadGitOverview(selectedProjectPath)"
+          >
+            {{ loadingGit ? "Refreshing..." : "Refresh Git" }}
+          </button>
+        </div>
+        <div v-if="!gitStatus" class="mono muted">No git data loaded.</div>
+        <div v-else-if="!gitStatus.insideRepo" class="mono muted">Selected folder is not a git repository.</div>
+        <div v-else class="git-overview">
+          <div class="git-stats mono">
+            branch: {{ gitStatus.branch ?? "(detached)" }} · head: {{ gitStatus.head ?? "(none)" }}
+          </div>
+          <div class="git-stats mono">
+            staged: {{ gitStatus.stagedCount }} · unstaged: {{ gitStatus.unstagedCount }} · untracked:
+            {{ gitStatus.untrackedCount }}
+          </div>
+          <div v-if="gitStatus.changedFiles.length > 0" class="git-files">
+            <span class="mono muted">working tree files:</span>
+            <span class="mono">{{ gitStatus.changedFiles.join(", ") }}</span>
+          </div>
+          <div v-if="gitCommits.length > 0" class="git-commits">
+            <article v-for="commit in gitCommits.slice(0, 8)" :key="commit.hash" class="log-item">
+              <div class="mono muted">{{ formatTs(commit.ts) }} · {{ commit.hash.slice(0, 8) }} · {{ commit.author }}</div>
+              <p>{{ commit.message }}</p>
+              <div v-if="commit.files.length > 0" class="mono muted">{{ commit.files.slice(0, 6).join(", ") }}</div>
+            </article>
+          </div>
+        </div>
+      </section>
+
       <section class="panel grid-two">
         <article>
           <h3>Prompts</h3>
@@ -551,6 +739,20 @@ onBeforeUnmount(() => {
             </div>
           </div>
         </article>
+      </section>
+
+      <section class="panel">
+        <h2>Thought → Change Trace</h2>
+        <div v-if="changeTrace.length === 0" class="mono muted">
+          No file-change trace in this session yet.
+        </div>
+        <div v-else class="log-list">
+          <article v-for="row in changeTrace" :key="`${row.ts}-${row.files.map((file) => file.path).join('|')}`" class="log-item">
+            <div class="mono muted">{{ formatTs(row.ts) }}</div>
+            <p>{{ truncateText(row.reason) }}</p>
+            <div class="mono">{{ row.files.map((file) => `${file.kind}:${file.path}`).join(", ") }}</div>
+          </article>
+        </div>
       </section>
 
       <section class="panel grid-two">
