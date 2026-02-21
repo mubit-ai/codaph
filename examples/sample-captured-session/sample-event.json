@@ -1,0 +1,13 @@
+{
+  "eventId": "sample0001",
+  "source": "codex_exec",
+  "repoId": "sample-repo",
+  "sessionId": "sample-session",
+  "threadId": "sample-thread",
+  "ts": "2026-02-21T00:00:00.000Z",
+  "eventType": "turn.started",
+  "payload": {
+    "type": "turn.started"
+  },
+  "reasoningAvailability": "unavailable"
+}

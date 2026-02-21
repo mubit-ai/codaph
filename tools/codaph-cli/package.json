@@ -1,0 +1,22 @@
+{
+  "name": "@codaph/codaph-cli",
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "codaph": "./src/index.ts"
+  },
+  "dependencies": {
+    "@codaph/adapter-codex-exec": "workspace:*",
+    "@codaph/adapter-codex-sdk": "workspace:*",
+    "@codaph/core-types": "workspace:*",
+    "@codaph/ingest-pipeline": "workspace:*",
+    "@codaph/mirror-jsonl": "workspace:*",
+    "@codaph/query-service": "workspace:*"
+  },
+  "scripts": {
+    "build": "bun build src/index.ts --outdir dist --target bun",
+    "test": "bun test",
+    "lint": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  }
+}

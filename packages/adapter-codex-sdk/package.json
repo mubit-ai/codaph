@@ -1,0 +1,19 @@
+{
+  "name": "@codaph/adapter-codex-sdk",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@codaph/core-types": "workspace:*",
+    "@codaph/ingest-pipeline": "workspace:*",
+    "@openai/codex-sdk": "^0.104.0"
+  },
+  "scripts": {
+    "build": "bun build src/index.ts --outdir dist --target bun",
+    "test": "bun test",
+    "lint": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  }
+}
