@@ -23,6 +23,9 @@ bun run build
 # required for collaborative MuBit writes/queries
 export MUBIT_API_KEY=...
 export OPENAI_API_KEY=...
+# optional overrides (defaults auto-detected from git/GitHub)
+export CODAPH_PROJECT_ID=your-org/repo
+export CODAPH_ACTOR_ID=your-github-login
 
 bun run tui
 bun run cli doctor
@@ -30,13 +33,15 @@ bun run cli doctor
 
 TUI flow:
 1. Add or select a project folder.
-2. Sync Codex history from `~/.codex/sessions` into Codaph mirror + MuBit.
-3. Inspect prompts, thoughts, assistant output, and file changes by session.
-4. Query MuBit semantic memory for the active session.
+2. Codaph auto-detects GitHub `owner/repo` from `origin` and uses it as shared MuBit project id (if not explicitly set).
+3. Sync Codex history from `~/.codex/sessions` into Codaph mirror + MuBit.
+4. Inspect prompts, thoughts, assistant output, and file changes by session.
+5. Query MuBit semantic memory for the active session.
 
 TUI keyboard map:
 - `q`: quit
 - `?`: help overlay
+- `o`: settings overlay (set project name/id, actor id, API keys, run scope)
 - `p`: switch project
 - `a`: add/switch project path
 - Browse view: `up/down` navigate sessions, `enter` inspect, `s` sync
@@ -74,6 +79,9 @@ bun run cli mubit query "what changed in auth?" --session <session-id> --cwd /ab
 MuBit flags:
 - `--mubit` / `--no-mubit`
 - `--mubit-api-key <key>` (or `MUBIT_API_KEY`)
+- `--mubit-project-id <shared-id>` (or `CODAPH_PROJECT_ID`)
+- `--mubit-run-scope <session|project>` (defaults to `project` when a project id is resolved, else `session`)
+- `--mubit-actor-id <id>` (or `CODAPH_ACTOR_ID`)
 - `--raw` (for `mubit query`, print full response JSON)
 - `--agent` / `--no-agent` (for `mubit query`, OpenAI synthesis on top of MuBit)
 - `--openai-api-key <key>` (or `OPENAI_API_KEY`)
@@ -81,6 +89,14 @@ MuBit flags:
 - `--mubit-transport <auto|http|grpc>`
 - `--mubit-endpoint`, `--mubit-http-endpoint`, `--mubit-grpc-endpoint`
 - `--mubit-write-timeout-ms <ms>` (default `15000`, set `0` to disable timeout)
+
+Team-shared MuBit setup:
+1. Everyone uses the same `MUBIT_API_KEY`.
+2. Everyone uses the same `CODAPH_PROJECT_ID` (or `--mubit-project-id`) for that repo.
+   If unset, Codaph auto-detects from git remote `origin` as `owner/repo`.
+3. Use `--mubit-run-scope project` to share one project-level memory space across contributors/sessions.
+4. Set per-user `CODAPH_ACTOR_ID` (or `--mubit-actor-id`) so contributor identity is preserved in metadata.
+   If unset, Codaph auto-detects via `gh api user`, then git config, then shell user.
 
 ## Desktop App (Kept, Secondary)
 

@@ -312,3 +312,43 @@ Do not rewrite history; append a new snapshot each run.
 - unstaged: 0
 - untracked: 0
 - files: AGENT.md, tools/codaph-cli/src/index.ts
+
+## Status Snapshot — 2026-02-23T14:23:44.794Z
+- source: manual
+- repo: /Users/anilp/Code/codaph
+- branch: main
+- head: b4e012c
+- staged: 1
+- unstaged: 3
+- untracked: 0
+- files: EADME.md, packages/memory-mubit/src/index.ts, packages/memory-mubit/test/memory-mubit.test.ts, tools/codaph-cli/src/index.ts
+
+## Status Snapshot — 2026-02-23T14:51:18.138Z
+- source: manual
+- repo: /Users/anilp/Code/codaph
+- branch: main
+- head: b4e012c
+- staged: 1
+- unstaged: 4
+- untracked: 1
+- files: GENT.md, README.md, packages/memory-mubit/src/index.ts, packages/memory-mubit/test/memory-mubit.test.ts, tools/codaph-cli/src/index.ts, tools/codaph-cli/src/settings-store.ts
+
+## Status Snapshot — 2026-02-23T14:53:04.458Z
+- source: manual
+- repo: /Users/anilp/Code/codaph
+- branch: main
+- head: b4e012c
+- staged: 1
+- unstaged: 4
+- untracked: 1
+- files: GENT.md, README.md, packages/memory-mubit/src/index.ts, packages/memory-mubit/test/memory-mubit.test.ts, tools/codaph-cli/src/index.ts, tools/codaph-cli/src/settings-store.ts
+
+## Status Snapshot — 2026-02-23T14:58:26.947Z
+- source: pre-commit
+- repo: /Users/anilp/Code/codaph
+- branch: main
+- head: b4e012c
+- staged: 6
+- unstaged: 0
+- untracked: 0
+- files: AGENT.md, README.md, packages/memory-mubit/src/index.ts, packages/memory-mubit/test/memory-mubit.test.ts, tools/codaph-cli/src/index.ts, tools/codaph-cli/src/settings-store.ts

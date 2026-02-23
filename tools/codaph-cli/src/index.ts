@@ -10,7 +10,7 @@ import { IngestPipeline } from "@codaph/ingest-pipeline";
 import { CodexSdkAdapter } from "@codaph/adapter-codex-sdk";
 import { CodexExecAdapter } from "@codaph/adapter-codex-exec";
 import { QueryService } from "@codaph/query-service";
-import { MubitMemoryEngine, mubitRunIdForSession } from "@codaph/memory-mubit";
+import { MubitMemoryEngine, mubitRunIdForProject, mubitRunIdForSession } from "@codaph/memory-mubit";
 import {
   syncCodexHistory,
   type CodexHistorySyncProgress,
@@ -22,6 +22,16 @@ import {
   removeProjectFromRegistry,
   setLastProject,
 } from "./project-registry";
+import {
+  detectGitHubDefaults,
+  getProjectSettings,
+  loadCodaphSettings,
+  saveCodaphSettings,
+  updateGlobalSettings,
+  updateProjectSettings,
+  type CodaphSettings,
+  type MubitRunScope,
+} from "./settings-store";
 
 type Flags = Record<string, string | boolean>;
 type CaptureMode = "run" | "exec";
@@ -122,6 +132,9 @@ function help(): string {
     "  --mubit-http-endpoint <url>",
     "  --mubit-grpc-endpoint <host:port>",
     "  --mubit-agent-id <id>",
+    "  --mubit-project-id <shared-project-id> (or CODAPH_PROJECT_ID; auto from git origin owner/repo)",
+    "  --mubit-run-scope <session|project>    (default: project when a project id is resolved, else session)",
+    "  --mubit-actor-id <contributor-id>      (or CODAPH_ACTOR_ID; auto from gh/git config)",
     "  --mubit-write-timeout-ms <ms> (default 15000, set 0 to disable timeout)",
     "",
     "OpenAI agent flags:",
@@ -131,11 +144,17 @@ function help(): string {
   ].join("\n");
 }
 
-function resolveMubitApiKey(flags: Flags): string | null {
+function loadSettingsOrDefault(settings?: CodaphSettings): CodaphSettings {
+  return settings ?? loadCodaphSettings();
+}
+
+function resolveMubitApiKey(flags: Flags, settings?: CodaphSettings): string | null {
+  const loaded = loadSettingsOrDefault(settings);
   const raw =
     getStringFlag(flags, "mubit-api-key") ??
     process.env.MUBIT_API_KEY ??
     process.env.MUBIT_APIKEY ??
+    loaded.mubitApiKey ??
     null;
   if (!raw || raw.trim().length === 0) {
     return null;
@@ -143,11 +162,78 @@ function resolveMubitApiKey(flags: Flags): string | null {
   return raw.trim();
 }
 
-function resolveOpenAiApiKey(flags: Flags): string | null {
+function resolveMubitProjectId(flags: Flags, cwd: string, settings?: CodaphSettings): string | null {
+  const loaded = loadSettingsOrDefault(settings);
+  const projectSettings = getProjectSettings(loaded, cwd);
+  const explicit =
+    getStringFlag(flags, "mubit-project-id") ??
+    process.env.CODAPH_PROJECT_ID ??
+    process.env.MUBIT_PROJECT_ID ??
+    projectSettings.mubitProjectId ??
+    null;
+  if (explicit && explicit.trim().length > 0) {
+    return explicit.trim();
+  }
+
+  const detected = detectGitHubDefaults(cwd).projectId;
+  return detected && detected.trim().length > 0 ? detected.trim() : null;
+}
+
+function resolveMubitActorId(flags: Flags, cwd: string, settings?: CodaphSettings): string | null {
+  const loaded = loadSettingsOrDefault(settings);
+  const explicit =
+    getStringFlag(flags, "mubit-actor-id") ??
+    process.env.CODAPH_ACTOR_ID ??
+    loaded.mubitActorId ??
+    null;
+  if (explicit && explicit.trim().length > 0) {
+    return explicit.trim();
+  }
+
+  const detected = detectGitHubDefaults(cwd).actorId;
+  if (detected && detected.trim().length > 0) {
+    return detected.trim();
+  }
+
+  const fallback = process.env.USER ?? process.env.USERNAME ?? null;
+  return fallback && fallback.trim().length > 0 ? fallback.trim() : null;
+}
+
+function resolveMubitRunScope(flags: Flags, cwd: string, settings?: CodaphSettings): MubitRunScope {
+  const loaded = loadSettingsOrDefault(settings);
+  const projectSettings = getProjectSettings(loaded, cwd);
+  const explicit =
+    getStringFlag(flags, "mubit-run-scope") ??
+    process.env.CODAPH_MUBIT_RUN_SCOPE ??
+    projectSettings.mubitRunScope ??
+    null;
+  if (explicit) {
+    return explicit.toLowerCase() === "project" ? "project" : "session";
+  }
+  return resolveMubitProjectId(flags, cwd, loaded) ? "project" : "session";
+}
+
+function resolveProjectLabel(flags: Flags, cwd: string, settings?: CodaphSettings): string {
+  const loaded = loadSettingsOrDefault(settings);
+  const projectSettings = getProjectSettings(loaded, cwd);
+  const explicitName = projectSettings.projectName;
+  if (explicitName && explicitName.trim().length > 0) {
+    return explicitName.trim();
+  }
+  const projectId = resolveMubitProjectId(flags, cwd, loaded);
+  if (projectId && projectId.trim().length > 0) {
+    return projectId.trim();
+  }
+  return basename(cwd) || cwd;
+}
+
+function resolveOpenAiApiKey(flags: Flags, settings?: CodaphSettings): string | null {
+  const loaded = loadSettingsOrDefault(settings);
   const raw =
     getStringFlag(flags, "openai-api-key") ??
     process.env.OPENAI_API_KEY ??
     process.env.OPENAI_APIKEY ??
+    loaded.openAiApiKey ??
     null;
   if (!raw || raw.trim().length === 0) {
     return null;
@@ -155,13 +241,13 @@ function resolveOpenAiApiKey(flags: Flags): string | null {
   return raw.trim();
 }
 
-function shouldUseOpenAiAgent(flags: Flags): boolean {
-  const hasKey = resolveOpenAiApiKey(flags) !== null;
+function shouldUseOpenAiAgent(flags: Flags, settings?: CodaphSettings): boolean {
+  const hasKey = resolveOpenAiApiKey(flags, settings) !== null;
   return getBooleanFlag(flags, "agent", hasKey);
 }
 
-function shouldEnableMubit(flags: Flags): boolean {
-  const envHasKey = resolveMubitApiKey(flags) !== null;
+function shouldEnableMubit(flags: Flags, settings?: CodaphSettings): boolean {
+  const envHasKey = resolveMubitApiKey(flags, settings) !== null;
   return getBooleanFlag(flags, "mubit", envHasKey);
 }
 
@@ -178,13 +264,14 @@ function resolveMubitWriteTimeoutMs(flags: Flags): number {
   return parsed;
 }
 
-function createMubitMemory(flags: Flags): MubitMemoryEngine | null {
-  const enabled = shouldEnableMubit(flags);
+function createMubitMemory(flags: Flags, cwd: string, settings?: CodaphSettings): MubitMemoryEngine | null {
+  const loaded = loadSettingsOrDefault(settings);
+  const enabled = shouldEnableMubit(flags, loaded);
   if (!enabled) {
     return null;
   }
 
-  const apiKey = resolveMubitApiKey(flags);
+  const apiKey = resolveMubitApiKey(flags, loaded);
   if (!apiKey) {
     return null;
   }
@@ -200,26 +287,54 @@ function createMubitMemory(flags: Flags): MubitMemoryEngine | null {
     httpEndpoint: getStringFlag(flags, "mubit-http-endpoint"),
     grpcEndpoint: getStringFlag(flags, "mubit-grpc-endpoint"),
     agentId: getStringFlag(flags, "mubit-agent-id") ?? "codaph-cli",
+    projectId: resolveMubitProjectId(flags, cwd, loaded) ?? undefined,
+    actorId: resolveMubitActorId(flags, cwd, loaded) ?? undefined,
+    runScope: resolveMubitRunScope(flags, cwd, loaded),
   });
+}
+
+function mubitRunIdForContext(
+  flags: Flags,
+  repoId: string,
+  sessionId: string,
+  cwd: string,
+  settings?: CodaphSettings,
+): string {
+  const loaded = loadSettingsOrDefault(settings);
+  const projectId = resolveMubitProjectId(flags, cwd, loaded) ?? repoId;
+  if (resolveMubitRunScope(flags, cwd, loaded) === "project") {
+    return mubitRunIdForProject(projectId);
+  }
+  return mubitRunIdForSession(projectId, sessionId);
 }
 
 async function doctor(rest: string[]): Promise<void> {
   const { flags } = parseArgs(rest);
-  const requested = shouldEnableMubit(flags);
+  const settings = loadCodaphSettings();
+  const requested = shouldEnableMubit(flags, settings);
   const envKeyPresent =
     (typeof process.env.MUBIT_API_KEY === "string" && process.env.MUBIT_API_KEY.trim().length > 0) ||
     (typeof process.env.MUBIT_APIKEY === "string" && process.env.MUBIT_APIKEY.trim().length > 0);
-  const keyPresent = resolveMubitApiKey(flags) !== null;
-  const memory = createMubitMemory(flags);
-  const openAiKeyPresent = resolveOpenAiApiKey(flags) !== null;
-  const agentEnabled = shouldUseOpenAiAgent(flags);
   const cwd = resolve(getStringFlag(flags, "cwd") ?? process.cwd());
+  const keyPresent = resolveMubitApiKey(flags, settings) !== null;
+  const memory = createMubitMemory(flags, cwd, settings);
+  const openAiKeyPresent = resolveOpenAiApiKey(flags, settings) !== null;
+  const agentEnabled = shouldUseOpenAiAgent(flags, settings);
+  const projectId = resolveMubitProjectId(flags, cwd, settings);
+  const actorId = resolveMubitActorId(flags, cwd, settings);
+  const runScope = resolveMubitRunScope(flags, cwd, settings);
+  const repoId = repoIdFromPath(cwd);
 
   console.log(`cwd: ${cwd}`);
+  console.log(`repoId(local): ${repoId}`);
+  console.log(`MuBit project id: ${projectId ?? "(not set, uses local repoId)"}`);
+  console.log(`MuBit run scope: ${runScope}`);
+  console.log(`MuBit actor id: ${actorId ?? "(not set)"}`);
   console.log(`env MUBIT_API_KEY present: ${envKeyPresent ? "yes" : "no"}`);
   console.log(`flag/env key resolved: ${keyPresent ? "yes" : "no"}`);
   console.log(`MuBit requested: ${requested ? "yes" : "no"}`);
   console.log(`MuBit runtime: ${memory?.isEnabled() ? "enabled" : "disabled"}`);
+  console.log(`MuBit run scope preview: ${mubitRunIdForContext(flags, repoId, "session-preview", cwd, settings)}`);
   console.log(`MuBit write timeout: ${resolveMubitWriteTimeoutMs(flags)}ms`);
   console.log(`OpenAI key present: ${openAiKeyPresent ? "yes" : "no"}`);
   console.log(`OpenAI agent: ${agentEnabled ? "enabled" : "disabled"}`);
@@ -233,10 +348,14 @@ async function doctor(rest: string[]): Promise<void> {
   }
 }
 
-function createPipeline(cwd: string, flags: Flags): { pipeline: IngestPipeline; memory: MubitMemoryEngine | null } {
+function createPipeline(
+  cwd: string,
+  flags: Flags,
+  settings?: CodaphSettings,
+): { pipeline: IngestPipeline; memory: MubitMemoryEngine | null } {
   const mirrorRoot = resolve(cwd, ".codaph");
   const mirror = new JsonlMirror(mirrorRoot);
-  const memory = createMubitMemory(flags);
+  const memory = createMubitMemory(flags, cwd, settings);
   const memoryWriteTimeoutMs = resolveMubitWriteTimeoutMs(flags);
   const pipeline = new IngestPipeline(mirror, {
     memoryEngine: memory ?? undefined,
@@ -305,7 +424,8 @@ async function runCapture(command: CaptureMode, rest: string[]): Promise<void> {
   }
 
   const cwd = resolve(getStringFlag(flags, "cwd") ?? process.cwd());
-  const { pipeline, memory } = createPipeline(cwd, flags);
+  const settings = loadCodaphSettings();
+  const { pipeline, memory } = createPipeline(cwd, flags, settings);
 
   const options = {
     prompt,
@@ -411,7 +531,8 @@ async function syncHistory(rest: string[]): Promise<void> {
     syncFlags.mubit = false;
   }
 
-  const { pipeline, memory } = createPipeline(cwd, syncFlags);
+  const settings = loadCodaphSettings();
+  const { pipeline, memory } = createPipeline(cwd, syncFlags, settings);
   const reporter = createSyncProgressReporter("Syncing Codex history");
   const summary = await syncCodexHistory({
     projectPath: cwd,
@@ -429,7 +550,7 @@ async function syncHistory(rest: string[]): Promise<void> {
   }
 
   console.log(formatSummary(summary));
-  const mubitRequested = shouldEnableMubit(syncFlags);
+  const mubitRequested = shouldEnableMubit(syncFlags, settings);
   if (memory?.isEnabled()) {
     console.log("MuBit ingest during sync: enabled");
   } else if (mubitRequested) {
@@ -837,11 +958,12 @@ async function runOpenAiAgentFromMubit(
   runId: string,
   flags: Flags,
 ): Promise<{ text: string; model: string } | null> {
-  if (!shouldUseOpenAiAgent(flags)) {
+  const settings = loadCodaphSettings();
+  if (!shouldUseOpenAiAgent(flags, settings)) {
     return null;
   }
 
-  const apiKey = resolveOpenAiApiKey(flags);
+  const apiKey = resolveOpenAiApiKey(flags, settings);
   if (!apiKey) {
     return null;
   }
@@ -955,8 +1077,9 @@ async function mubitQuery(rest: string[]): Promise<void> {
   }
 
   const cwd = resolve(getStringFlag(flags, "cwd") ?? process.cwd());
+  const settings = loadCodaphSettings();
   const repoId = repoIdFromPath(cwd);
-  const engine = createMubitMemory(flags);
+  const engine = createMubitMemory(flags, cwd, settings);
   if (!engine || !engine.isEnabled()) {
     throw new Error("MuBit is disabled. Set MUBIT_API_KEY (or MUBIT_APIKEY) and use --mubit.");
   }
@@ -964,7 +1087,7 @@ async function mubitQuery(rest: string[]): Promise<void> {
   const limitRaw = getStringFlag(flags, "limit");
   const limit = limitRaw ? Number.parseInt(limitRaw, 10) : undefined;
   const rawMode = getBooleanFlag(flags, "raw", false);
-  const runId = mubitRunIdForSession(repoId, sessionId);
+  const runId = mubitRunIdForContext(flags, repoId, sessionId, cwd, settings);
   console.log(`Querying MuBit run scope: ${runId}`);
 
   const response = await withTimeout(
@@ -980,7 +1103,7 @@ async function mubitQuery(rest: string[]): Promise<void> {
   );
 
   if (!rawMode) {
-    const openAiKey = resolveOpenAiApiKey(flags);
+    const openAiKey = resolveOpenAiApiKey(flags, settings);
     const agentRequested = getBooleanFlag(flags, "agent", openAiKey !== null);
     if (agentRequested && !openAiKey) {
       console.log("OpenAI agent requested but OPENAI_API_KEY is missing. Falling back to MuBit response.");
@@ -999,10 +1122,11 @@ async function mubitQuery(rest: string[]): Promise<void> {
 async function mubitBackfill(rest: string[]): Promise<void> {
   const { flags } = parseArgs(rest);
   const cwd = resolve(getStringFlag(flags, "cwd") ?? process.cwd());
+  const settings = loadCodaphSettings();
   const sessionId = getStringFlag(flags, "session");
   const verbose = getBooleanFlag(flags, "verbose", false);
 
-  const engine = createMubitMemory(flags);
+  const engine = createMubitMemory(flags, cwd, settings);
   if (!engine || !engine.isEnabled()) {
     throw new Error("MuBit is disabled. Set MUBIT_API_KEY (or MUBIT_APIKEY) and use --mubit.");
   }
@@ -1160,7 +1284,14 @@ interface ChatMessage {
 
 type TuiView = "browse" | "inspect";
 type InspectPane = "prompts" | "thoughts" | "files" | "diff" | "chat";
-type InputMode = null | "add_project";
+type InputMode =
+  | null
+  | "add_project"
+  | "set_project_name"
+  | "set_mubit_project_id"
+  | "set_mubit_actor_id"
+  | "set_mubit_api_key"
+  | "set_openai_api_key";
 
 interface TuiState {
   projectPath: string;
@@ -1179,6 +1310,7 @@ interface TuiState {
   fullDiffOpen: boolean;
   fullDiffScroll: number;
   helpOpen: boolean;
+  settingsOpen: boolean;
   busy: boolean;
   statusLine: string;
   inputMode: InputMode;
@@ -1188,10 +1320,10 @@ interface TuiState {
 
 const ANSI_ESCAPE_REGEX = /\u001b\[[0-9;]*m/g;
 const TUI_COLORS = {
-  brand: "38;5;141",
+  brand: "38;2;255;69;0",
   activeBorder: "97",
   inactiveBorder: "90",
-  selected: "48;5;57;97",
+  selected: "48;2;255;69;0;30",
   dim: "2",
   muted: "90",
   cyan: "36",
@@ -2040,10 +2172,15 @@ function headerLine(left: string, right: string, width: number): string {
   return `${left}${" ".repeat(gap)}${right}`;
 }
 
-function renderBrowseView(state: TuiState, mubitEnabled: boolean, width: number, height: number): string {
-  const projectName = basename(state.projectPath) || state.projectPath;
-  const leftHeader = `${paint("codaph", TUI_COLORS.brand)}  >  ${projectName}`;
-  const rightHeader = `${paint(mubitEnabled ? "MuBit:on" : "MuBit:off", mubitEnabled ? TUI_COLORS.cyan : TUI_COLORS.yellow)}   ${paint("[?] help", TUI_COLORS.dim)}`;
+function renderBrowseView(
+  state: TuiState,
+  projectLabel: string,
+  mubitEnabled: boolean,
+  width: number,
+  height: number,
+): string {
+  const leftHeader = `${paint("codaph", TUI_COLORS.brand)}  >  ${projectLabel}`;
+  const rightHeader = `${paint(mubitEnabled ? "MuBit:on" : "MuBit:off", mubitEnabled ? TUI_COLORS.cyan : TUI_COLORS.yellow)}   ${paint("[o] settings  [?] help", TUI_COLORS.dim)}`;
   const header = headerLine(leftHeader, rightHeader, width);
 
   const tableHeight = Math.max(10, height - 6);
@@ -2079,12 +2216,13 @@ function renderBrowseView(state: TuiState, mubitEnabled: boolean, width: number,
   }
 
   const sessionsBox = boxLines("Sessions", width, tableHeight, sessionLines, true);
-  const footer = "[up/down] navigate   [enter] inspect   [s] sync   [p] switch project   [a] add project   [q] quit";
+  const footer = "[up/down] navigate   [enter] inspect   [s] sync   [p] switch project   [a] add project   [o] settings   [q] quit";
   return [header, "", ...sessionsBox, "", paint(clipPlain(footer, width), TUI_COLORS.dim)].join("\n");
 }
 
 function renderDiffOverlay(
   state: TuiState,
+  projectLabel: string,
   selectedSession: SessionBrowseRow,
   analysis: SessionAnalysis,
   width: number,
@@ -2122,7 +2260,7 @@ function renderDiffOverlay(
   }));
 
   const top = headerLine(
-    `${paint("codaph", TUI_COLORS.brand)}  >  ${basename(state.projectPath)}  >  Full Diff`,
+    `${paint("codaph", TUI_COLORS.brand)}  >  ${projectLabel}  >  Full Diff`,
     paint("[d/esc] close", TUI_COLORS.dim),
     width,
   );
@@ -2144,6 +2282,7 @@ function renderDiffOverlay(
 
 function renderInspectView(
   state: TuiState,
+  projectLabel: string,
   selectedSession: SessionBrowseRow,
   analysis: SessionAnalysis,
   mubitEnabled: boolean,
@@ -2151,7 +2290,7 @@ function renderInspectView(
   height: number,
 ): string {
   if (state.fullDiffOpen) {
-    return renderDiffOverlay(state, selectedSession, analysis, width, height);
+    return renderDiffOverlay(state, projectLabel, selectedSession, analysis, width, height);
   }
 
   const prompt = selectedPromptFromAnalysis(analysis, state.selectedPromptIndex);
@@ -2161,7 +2300,7 @@ function renderInspectView(
   const baseHeight = Math.max(14, height - 4 - (state.chatOpen ? chatHeight + 1 : 0));
 
   const topHeader = headerLine(
-    `${paint("codaph", TUI_COLORS.brand)}  >  ${basename(state.projectPath)}  >  Session ${selectedSession.sessionId.slice(0, 8)} - ${formatDateCell(selectedSession.to)}`,
+    `${paint("codaph", TUI_COLORS.brand)}  >  ${projectLabel}  >  Session ${selectedSession.sessionId.slice(0, 8)} - ${formatDateCell(selectedSession.to)}`,
     `${paint(mubitEnabled ? "MuBit:on" : "MuBit:off", mubitEnabled ? TUI_COLORS.cyan : TUI_COLORS.yellow)}   ${paint("[left] back  [?] help", TUI_COLORS.dim)}`,
     width,
   );
@@ -2386,8 +2525,8 @@ function renderInspectView(
   const footer = state.chatOpen
     ? "[tab] focus pane   [esc] close chat   [up/down] navigate/scroll   [left] back"
     : threePaneMode
-      ? "[enter] prompt -> thoughts   [up/down] select/scroll   [tab] focus pane   [d] full diff   [m] MuBit chat   [left] back"
-      : "[up/down] prompts/scroll pane   [tab] focus pane   [d] full diff   [m] MuBit chat   [left] back";
+      ? "[enter] prompt -> thoughts   [up/down] select/scroll   [tab] focus pane   [d] full diff   [m] MuBit chat   [o] settings   [left] back"
+      : "[up/down] prompts/scroll pane   [tab] focus pane   [d] full diff   [m] MuBit chat   [o] settings   [left] back";
 
   composed.push("");
   composed.push(paint(clipPlain(footer, width), TUI_COLORS.dim));
@@ -2399,6 +2538,7 @@ function renderHelpOverlay(width: number, height: number): string {
     { text: "Global", color: TUI_COLORS.muted },
     { text: "q       quit" },
     { text: "?       toggle help" },
+    { text: "o       settings" },
     { text: "p       switch project" },
     { text: "a       add/switch project path" },
     { text: "" },
@@ -2433,6 +2573,78 @@ function renderHelpOverlay(width: number, height: number): string {
     ...padded,
     "",
     `${" ".repeat(leftPad)}${paint("[esc/?] close", TUI_COLORS.dim)}`,
+  ].join("\n");
+}
+
+function maskSecret(value: string | null): string {
+  if (!value) {
+    return "(not set)";
+  }
+  if (value.length <= 8) {
+    return "***";
+  }
+  return `${value.slice(0, 3)}...${value.slice(-3)}`;
+}
+
+function renderSettingsOverlay(
+  flags: Flags,
+  settings: CodaphSettings,
+  state: TuiState,
+  memoryEnabled: boolean,
+  width: number,
+  height: number,
+): string {
+  const projectSettings = getProjectSettings(settings, state.projectPath);
+  const projectName = resolveProjectLabel(flags, state.projectPath, settings);
+  const projectId = resolveMubitProjectId(flags, state.projectPath, settings);
+  const actorId = resolveMubitActorId(flags, state.projectPath, settings);
+  const runScope = resolveMubitRunScope(flags, state.projectPath, settings);
+  const openAiKey = resolveOpenAiApiKey(flags, settings);
+  const mubitKey = resolveMubitApiKey(flags, settings);
+  const detected = detectGitHubDefaults(state.projectPath);
+
+  const lines: PaneLine[] = [
+    { text: `Project: ${state.projectPath}`, color: TUI_COLORS.muted },
+    { text: `MuBit runtime: ${memoryEnabled ? "enabled" : "disabled"}` },
+    { text: "" },
+    { text: `Current project name: ${projectName}` },
+    { text: `Current project id: ${projectId ?? "(auto detection failed)"}` },
+    { text: `Current actor id: ${actorId ?? "(auto detection failed)"}` },
+    { text: `Current run scope: ${runScope}` },
+    { text: `MuBit API key: ${maskSecret(mubitKey)}` },
+    { text: `OpenAI API key: ${maskSecret(openAiKey)}` },
+    { text: "" },
+    { text: `Detected GitHub project: ${detected.projectId ?? "(none)"}`, color: TUI_COLORS.muted },
+    { text: `Detected GitHub actor: ${detected.actorId ?? "(none)"}`, color: TUI_COLORS.muted },
+    {
+      text: `Saved project name override: ${projectSettings.projectName && projectSettings.projectName.trim().length > 0 ? projectSettings.projectName.trim() : "(none)"}`,
+      color: TUI_COLORS.muted,
+    },
+    { text: "" },
+    { text: "Actions", color: TUI_COLORS.muted },
+    { text: "1  set project name (this folder)" },
+    { text: "2  set MuBit project id (this folder)" },
+    { text: "3  set actor id (global)" },
+    { text: "4  set MuBit API key (global)" },
+    { text: "5  set OpenAI API key (global)" },
+    { text: "6  auto-fill project+actor from git/GitHub" },
+    { text: "7  toggle MuBit run scope (session/project) for this folder" },
+    { text: "8  clear MuBit API key" },
+    { text: "9  clear OpenAI API key" },
+    { text: "" },
+    { text: "esc/o close settings", color: TUI_COLORS.muted },
+  ];
+
+  const boxWidth = Math.max(72, Math.min(width - 6, 116));
+  const boxHeight = Math.max(18, Math.min(height - 4, 34));
+  const box = boxLines("Settings", boxWidth, boxHeight, lines, true);
+  const leftPad = Math.max(0, Math.floor((width - boxWidth) / 2));
+  const padded = box.map((line) => `${" ".repeat(leftPad)}${line}`);
+  const topPad = Math.max(0, Math.floor((height - boxHeight) / 2) - 1);
+
+  return [
+    ...Array.from({ length: topPad }, () => ""),
+    ...padded,
   ].join("\n");
 }
 
@@ -2477,6 +2689,7 @@ async function tui(rest: string[]): Promise<void> {
     fullDiffOpen: false,
     fullDiffScroll: 0,
     helpOpen: false,
+    settingsOpen: false,
     busy: false,
     statusLine: "",
     inputMode: null,
@@ -2486,7 +2699,8 @@ async function tui(rest: string[]): Promise<void> {
 
   let query = new QueryService(resolve(state.projectPath, ".codaph"));
   let repoId = repoIdFromPath(state.projectPath);
-  const memory = createMubitMemory(flags);
+  let settings = loadCodaphSettings();
+  let memory = createMubitMemory(flags, state.projectPath, settings);
   const analysisCache = new Map<string, CachedSessionAnalysis>();
   let screenReady = false;
 
@@ -2519,6 +2733,11 @@ async function tui(rest: string[]): Promise<void> {
     state.fullDiffScroll = 0;
   };
 
+  const refreshSettingsAndMemory = (): void => {
+    settings = loadCodaphSettings();
+    memory = createMubitMemory(flags, state.projectPath, settings);
+  };
+
   const render = (): void => {
     if (!screenReady) {
       return;
@@ -2526,18 +2745,21 @@ async function tui(rest: string[]): Promise<void> {
 
     const { width, height } = getSize();
     let screen = "";
+    const projectLabel = resolveProjectLabel(flags, state.projectPath, settings);
 
     if (state.helpOpen) {
       screen = renderHelpOverlay(width, height);
+    } else if (state.settingsOpen) {
+      screen = renderSettingsOverlay(flags, settings, state, memory?.isEnabled() ?? false, width, height);
     } else if (state.view === "browse") {
-      screen = renderBrowseView(state, memory?.isEnabled() ?? false, width, height);
+      screen = renderBrowseView(state, projectLabel, memory?.isEnabled() ?? false, width, height);
     } else {
       const row = selectedRow();
       const analysis = selectedAnalysis();
       if (!row || !analysis) {
-        screen = renderBrowseView(state, memory?.isEnabled() ?? false, width, height);
+        screen = renderBrowseView(state, projectLabel, memory?.isEnabled() ?? false, width, height);
       } else {
-        screen = renderInspectView(state, row, analysis, memory?.isEnabled() ?? false, width, height);
+        screen = renderInspectView(state, projectLabel, row, analysis, memory?.isEnabled() ?? false, width, height);
       }
     }
 
@@ -2651,7 +2873,8 @@ async function tui(rest: string[]): Promise<void> {
   };
 
   const syncProject = async (): Promise<void> => {
-    const { pipeline, memory: syncMemory } = createPipeline(state.projectPath, flags);
+    refreshSettingsAndMemory();
+    const { pipeline, memory: syncMemory } = createPipeline(state.projectPath, flags, settings);
     let lastRefresh = 0;
     const summary = await syncCodexHistory({
       projectPath: state.projectPath,
@@ -2689,6 +2912,7 @@ async function tui(rest: string[]): Promise<void> {
     state.fullDiffOpen = false;
     resetInspectScroll();
     analysisCache.clear();
+    refreshSettingsAndMemory();
     await setLastProject(state.projectPath);
     await refreshRows(`Loading ${basename(state.projectPath)}`);
     state.statusLine = `Project: ${state.projectPath}`;
@@ -2723,7 +2947,7 @@ async function tui(rest: string[]): Promise<void> {
       return;
     }
 
-    const runId = mubitRunIdForSession(repoId, session.sessionId);
+    const runId = mubitRunIdForContext(flags, repoId, session.sessionId, state.projectPath, settings);
     const prompt = selectedPromptFromAnalysis(analysis, state.selectedPromptIndex);
     const contextualQuery = `${question}\n\nCurrent prompt context:\n${clipText(prompt.prompt, 400)}`;
 
@@ -2739,7 +2963,7 @@ async function tui(rest: string[]): Promise<void> {
       "MuBit query",
     );
 
-    const openAiKey = resolveOpenAiApiKey(flags);
+    const openAiKey = resolveOpenAiApiKey(flags, settings);
     const agentRequested = getBooleanFlag(flags, "agent", openAiKey !== null);
     if (agentRequested && !openAiKey) {
       chat.push({
@@ -2801,6 +3025,169 @@ async function tui(rest: string[]): Promise<void> {
     }
   };
 
+  const inputPrompt = (mode: Exclude<InputMode, null>): string => {
+    if (mode === "add_project") {
+      return "Add project path: ";
+    }
+    if (mode === "set_project_name") {
+      return "Set project name for this folder: ";
+    }
+    if (mode === "set_mubit_project_id") {
+      return "Set MuBit project id for this folder: ";
+    }
+    if (mode === "set_mubit_actor_id") {
+      return "Set MuBit actor id (global): ";
+    }
+    if (mode === "set_mubit_api_key") {
+      return "Set MuBit API key (global): ";
+    }
+    return "Set OpenAI API key (global): ";
+  };
+
+  const renderInputValue = (mode: Exclude<InputMode, null>, value: string): string =>
+    mode === "set_mubit_api_key" || mode === "set_openai_api_key"
+      ? "*".repeat(Math.min(32, value.length))
+      : value;
+
+  const beginInputMode = (mode: Exclude<InputMode, null>): void => {
+    state.inputMode = mode;
+    state.inputBuffer = "";
+    state.statusLine = inputPrompt(mode);
+    state.settingsOpen = false;
+    render();
+  };
+
+  const applyInputMode = async (mode: Exclude<InputMode, null>, candidate: string): Promise<void> => {
+    if (mode === "add_project") {
+      const normalized = resolve(candidate);
+      await addProjectToRegistry(normalized);
+      state.projectPath = normalized;
+      await setLastProject(normalized);
+      state.selectedSessionIndex = 0;
+      state.selectedPromptIndex = 0;
+      state.view = "browse";
+      state.chatOpen = false;
+      state.fullDiffOpen = false;
+      resetInspectScroll();
+      analysisCache.clear();
+      refreshSettingsAndMemory();
+      await refreshRows(`Loading ${basename(normalized)}`);
+      state.statusLine = `Project: ${normalized}`;
+      return;
+    }
+
+    if (mode === "set_mubit_project_id") {
+      settings = updateProjectSettings(settings, state.projectPath, {
+        mubitProjectId: candidate,
+      });
+      saveCodaphSettings(settings);
+      refreshSettingsAndMemory();
+      state.statusLine = `MuBit project id set to ${candidate}`;
+      return;
+    }
+
+    if (mode === "set_project_name") {
+      settings = updateProjectSettings(settings, state.projectPath, {
+        projectName: candidate,
+      });
+      saveCodaphSettings(settings);
+      refreshSettingsAndMemory();
+      state.statusLine = `Project name set to ${candidate}`;
+      return;
+    }
+
+    if (mode === "set_mubit_actor_id") {
+      settings = updateGlobalSettings(settings, {
+        mubitActorId: candidate,
+      });
+      saveCodaphSettings(settings);
+      refreshSettingsAndMemory();
+      state.statusLine = `MuBit actor id set to ${candidate}`;
+      return;
+    }
+
+    if (mode === "set_mubit_api_key") {
+      settings = updateGlobalSettings(settings, {
+        mubitApiKey: candidate,
+      });
+      saveCodaphSettings(settings);
+      refreshSettingsAndMemory();
+      state.statusLine = "MuBit API key saved.";
+      return;
+    }
+
+    settings = updateGlobalSettings(settings, {
+      openAiApiKey: candidate,
+    });
+    saveCodaphSettings(settings);
+    refreshSettingsAndMemory();
+    state.statusLine = "OpenAI API key saved.";
+  };
+
+  const runSettingsAction = (action: string): void => {
+    if (action === "close") {
+      state.settingsOpen = false;
+      render();
+      return;
+    }
+    if (action === "auto") {
+      const detected = detectGitHubDefaults(state.projectPath);
+      if (!detected.projectId && !detected.actorId) {
+        state.statusLine = "GitHub auto-detection failed for this folder.";
+        state.settingsOpen = false;
+        render();
+        return;
+      }
+      if (detected.projectId) {
+        settings = updateProjectSettings(settings, state.projectPath, {
+          mubitProjectId: detected.projectId,
+        });
+      }
+      if (detected.actorId) {
+        settings = updateGlobalSettings(settings, {
+          mubitActorId: detected.actorId,
+        });
+      }
+      saveCodaphSettings(settings);
+      refreshSettingsAndMemory();
+      state.settingsOpen = false;
+      state.statusLine = `Auto-filled: project=${detected.projectId ?? "n/a"} actor=${detected.actorId ?? "n/a"}`;
+      render();
+      return;
+    }
+    if (action === "toggle_scope") {
+      const current = resolveMubitRunScope(flags, state.projectPath, settings);
+      const next: MubitRunScope = current === "project" ? "session" : "project";
+      settings = updateProjectSettings(settings, state.projectPath, {
+        mubitRunScope: next,
+      });
+      saveCodaphSettings(settings);
+      refreshSettingsAndMemory();
+      state.settingsOpen = false;
+      state.statusLine = `MuBit run scope set to ${next} for this folder.`;
+      render();
+      return;
+    }
+    if (action === "clear_mubit_key") {
+      settings = updateGlobalSettings(settings, { mubitApiKey: null });
+      saveCodaphSettings(settings);
+      refreshSettingsAndMemory();
+      state.settingsOpen = false;
+      state.statusLine = "Cleared MuBit API key from Codaph settings.";
+      render();
+      return;
+    }
+    if (action === "clear_openai_key") {
+      settings = updateGlobalSettings(settings, { openAiApiKey: null });
+      saveCodaphSettings(settings);
+      refreshSettingsAndMemory();
+      state.settingsOpen = false;
+      state.statusLine = "Cleared OpenAI API key from Codaph settings.";
+      render();
+      return;
+    }
+  };
+
   const onKey = (str: string, key: { name?: string; ctrl?: boolean; meta?: boolean; sequence?: string }): void => {
     if (key.ctrl && key.name === "c") {
       close();
@@ -2815,17 +3202,72 @@ async function tui(rest: string[]): Promise<void> {
       return;
     }
 
-    if (state.inputMode === "add_project") {
+    if (state.settingsOpen) {
+      if (str === "q" || key.name === "q") {
+        close();
+        return;
+      }
+      if (str === "?") {
+        state.settingsOpen = false;
+        state.helpOpen = true;
+        render();
+        return;
+      }
+      if (key.name === "escape" || str === "o") {
+        runSettingsAction("close");
+        return;
+      }
+      if (str === "1") {
+        beginInputMode("set_project_name");
+        return;
+      }
+      if (str === "2") {
+        beginInputMode("set_mubit_project_id");
+        return;
+      }
+      if (str === "3") {
+        beginInputMode("set_mubit_actor_id");
+        return;
+      }
+      if (str === "4") {
+        beginInputMode("set_mubit_api_key");
+        return;
+      }
+      if (str === "5") {
+        beginInputMode("set_openai_api_key");
+        return;
+      }
+      if (str === "6") {
+        runSettingsAction("auto");
+        return;
+      }
+      if (str === "7") {
+        runSettingsAction("toggle_scope");
+        return;
+      }
+      if (str === "8") {
+        runSettingsAction("clear_mubit_key");
+        return;
+      }
+      if (str === "9") {
+        runSettingsAction("clear_openai_key");
+        return;
+      }
+      return;
+    }
+
+    if (state.inputMode) {
+      const mode = state.inputMode;
       if (key.name === "escape") {
         state.inputMode = null;
         state.inputBuffer = "";
-        state.statusLine = "Project add cancelled.";
+        state.statusLine = "Input cancelled.";
         render();
         return;
       }
       if (key.name === "backspace") {
         state.inputBuffer = state.inputBuffer.slice(0, -1);
-        state.statusLine = `Add project path: ${state.inputBuffer}`;
+        state.statusLine = `${inputPrompt(mode)}${renderInputValue(mode, state.inputBuffer)}`;
         render();
         return;
       }
@@ -2834,30 +3276,18 @@ async function tui(rest: string[]): Promise<void> {
         state.inputMode = null;
         state.inputBuffer = "";
         if (candidate.length === 0) {
-          state.statusLine = "Empty path. Cancelled.";
+          state.statusLine = "Empty input. Cancelled.";
           render();
           return;
         }
-        runTask("Adding project...", async () => {
-          const normalized = resolve(candidate);
-          await addProjectToRegistry(normalized);
-          state.projectPath = normalized;
-          await setLastProject(normalized);
-          state.selectedSessionIndex = 0;
-          state.selectedPromptIndex = 0;
-          state.view = "browse";
-          state.chatOpen = false;
-          state.fullDiffOpen = false;
-          resetInspectScroll();
-          analysisCache.clear();
-          await refreshRows(`Loading ${basename(normalized)}`);
-          state.statusLine = `Project: ${normalized}`;
+        runTask("Applying setting...", async () => {
+          await applyInputMode(mode, candidate);
         });
         return;
       }
       if (!key.ctrl && !key.meta && str.length === 1 && str >= " ") {
         state.inputBuffer += str;
-        state.statusLine = `Add project path: ${state.inputBuffer}`;
+        state.statusLine = `${inputPrompt(mode)}${renderInputValue(mode, state.inputBuffer)}`;
         render();
       }
       return;
@@ -2874,16 +3304,19 @@ async function tui(rest: string[]): Promise<void> {
       return;
     }
 
+    if (str === "o") {
+      state.settingsOpen = true;
+      render();
+      return;
+    }
+
     if (str === "p") {
       runTask("Switching project...", cycleProject);
       return;
     }
 
     if (str === "a") {
-      state.inputMode = "add_project";
-      state.inputBuffer = "";
-      state.statusLine = "Add project path: ";
-      render();
+      beginInputMode("add_project");
       return;
     }
 

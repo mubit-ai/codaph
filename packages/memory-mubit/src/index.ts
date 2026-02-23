@@ -2,6 +2,7 @@ import { Client, type ClientConfig } from "@mubit-ai/sdk";
 import type { CapturedEventEnvelope, MemoryEngine, MemoryWriteResult } from "@codaph/core-types";
 
 export type MubitTransport = "auto" | "http" | "grpc";
+export type MubitRunScope = "session" | "project";
 
 export interface MubitSemanticQueryOptions {
   runId: string;
@@ -20,6 +21,9 @@ export interface MubitMemoryOptions {
   transport?: MubitTransport;
   agentId?: string;
   runIdPrefix?: string;
+  projectId?: string;
+  actorId?: string;
+  runScope?: MubitRunScope;
   enabled?: boolean;
   client?: {
     control: {
@@ -129,6 +133,13 @@ export function mubitRunIdForSession(
   return `${runIdPrefix}:${repoId}:${sessionId}`;
 }
 
+export function mubitRunIdForProject(
+  repoId: string,
+  runIdPrefix = "codaph",
+): string {
+  return `${runIdPrefix}:${repoId}`;
+}
+
 export class MubitMemoryEngine implements MemoryEngine {
   private readonly client: {
     control: {
@@ -142,11 +153,17 @@ export class MubitMemoryEngine implements MemoryEngine {
   private readonly enabled: boolean;
   private readonly agentId: string;
   private readonly runIdPrefix: string;
+  private readonly projectId?: string;
+  private readonly actorId?: string;
+  private readonly runScope: MubitRunScope;
 
   constructor(options: MubitMemoryOptions = {}) {
     this.enabled = options.enabled ?? true;
     this.agentId = options.agentId ?? "codaph";
     this.runIdPrefix = options.runIdPrefix ?? "codaph";
+    this.projectId = asString(options.projectId);
+    this.actorId = asString(options.actorId);
+    this.runScope = options.runScope ?? "session";
 
     if (options.client) {
       this.client = options.client;
@@ -178,12 +195,20 @@ export class MubitMemoryEngine implements MemoryEngine {
     return this.enabled && this.configured;
   }
 
+  runIdForSession(repoId: string, sessionId: string): string {
+    const sharedRepoId = this.projectId ?? repoId;
+    if (this.runScope === "project") {
+      return mubitRunIdForProject(sharedRepoId, this.runIdPrefix);
+    }
+    return mubitRunIdForSession(sharedRepoId, sessionId, this.runIdPrefix);
+  }
+
   async writeEvent(event: CapturedEventEnvelope): Promise<MemoryWriteResult> {
     if (!this.isEnabled()) {
       return { accepted: false, raw: { disabled: true } };
     }
 
-    const runId = mubitRunIdForSession(event.repoId, event.sessionId, this.runIdPrefix);
+    const runId = this.runIdForSession(event.repoId, event.sessionId);
     const ingestPayload: Record<string, unknown> = {
       run_id: runId,
       agent_id: this.agentId,
@@ -202,6 +227,8 @@ export class MubitMemoryEngine implements MemoryEngine {
           }),
           metadata_json: toJson({
             repo_id: event.repoId,
+            project_id: this.projectId ?? event.repoId,
+            actor_id: this.actorId ?? null,
             session_id: event.sessionId,
             thread_id: event.threadId,
             ts: event.ts,
