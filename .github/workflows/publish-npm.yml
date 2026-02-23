@@ -5,6 +5,11 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Optional release tag (vX.Y.Z). If empty, uses package.json version."
+        required: false
+        type: string
 
 jobs:
   publish:
@@ -31,13 +36,31 @@ jobs:
           registry-url: "https://registry.npmjs.org"
 
       - name: Validate tag matches package version
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_TAG_INPUT: ${{ github.event.inputs.release_tag || '' }}
         run: |
-          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          set -euo pipefail
           PKG_VERSION="$(node -e "console.log(JSON.parse(require('node:fs').readFileSync('package.json','utf8')).version)")"
-          if [ "${TAG_VERSION}" != "${PKG_VERSION}" ]; then
-            echo "Tag version ${TAG_VERSION} does not match package.json version ${PKG_VERSION}"
+          EXPECTED_TAG="v${PKG_VERSION}"
+
+          if [ "${EVENT_NAME}" = "push" ]; then
+            if [ "${GITHUB_REF_NAME}" != "${EXPECTED_TAG}" ]; then
+              echo "Tag ${GITHUB_REF_NAME} does not match package.json version ${PKG_VERSION}"
+              exit 1
+            fi
+            echo "Tag validation passed for push event: ${GITHUB_REF_NAME}"
+            exit 0
+          fi
+
+          # workflow_dispatch path:
+          # - allow dispatch from main/branches
+          # - optional release_tag input can enforce intended tag
+          if [ -n "${RELEASE_TAG_INPUT}" ] && [ "${RELEASE_TAG_INPUT}" != "${EXPECTED_TAG}" ]; then
+            echo "release_tag input ${RELEASE_TAG_INPUT} does not match package.json version ${PKG_VERSION}"
             exit 1
           fi
+          echo "Manual dispatch validation passed (expected tag: ${EXPECTED_TAG})"
 
       - name: Install dependencies
         run: bun install --frozen-lockfile

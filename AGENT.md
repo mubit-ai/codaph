@@ -532,3 +532,23 @@ Do not rewrite history; append a new snapshot each run.
 - unstaged: 0
 - untracked: 0
 - files: .github/workflows/publish-npm.yml, AGENT.md, README.md, docs/one-page-cli-tui.md, docs/troubleshooting.md
+
+## Status Snapshot — 2026-02-23T17:57:27.946Z
+- source: manual
+- repo: /Users/anilp/Code/codaph
+- branch: main
+- head: 5f6d7bf
+- staged: 1
+- unstaged: 0
+- untracked: 0
+- files: github/workflows/publish-npm.yml
+
+## Status Snapshot — 2026-02-23T18:00:18.448Z
+- source: pre-commit
+- repo: /Users/anilp/Code/codaph
+- branch: main
+- head: 5f6d7bf
+- staged: 2
+- unstaged: 0
+- untracked: 0
+- files: .github/workflows/publish-npm.yml, AGENT.md
