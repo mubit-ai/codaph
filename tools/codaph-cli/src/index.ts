@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
-import { createInterface } from "node:readline/promises";
+import { emitKeypressEvents } from "node:readline";
 import { stdin as input, stdout as output } from "node:process";
-import { resolve } from "node:path";
+import { basename, resolve } from "node:path";
 import type { CapturedEventEnvelope } from "@codaph/core-types";
 import { repoIdFromPath } from "@codaph/core-types";
 import { JsonlMirror } from "@codaph/mirror-jsonl";
@@ -499,17 +499,17 @@ function getItemType(event: CapturedEventEnvelope): string | null {
 
 function getPromptText(event: CapturedEventEnvelope): string | null {
   if (event.eventType === "prompt.submitted") {
-    return stringFromUnknown(event.payload.prompt);
+    return stringFromUnknown(event.payload.prompt) ?? stringFromUnknown(event.payload.input);
   }
 
   const item = getItem(event);
   const itemType = getItemType(event);
-  if (item && (itemType === "user_message" || itemType === "input")) {
-    return (
-      stringFromUnknown(item.content) ??
-      stringFromUnknown(item.text) ??
-      stringFromUnknown(item.input)
-    );
+  if (item && itemType === "user_message") {
+    const role = typeof item.role === "string" ? item.role.toLowerCase() : null;
+    if (role && role !== "user") {
+      return null;
+    }
+    return stringFromUnknown(item.content) ?? stringFromUnknown(item.text);
   }
 
   return null;
@@ -589,6 +589,11 @@ function stripTranscriptDump(text: string): string {
 
 function toCompactLine(text: string, maxChars = 220): string {
   return clipText(stripTranscriptDump(text).replace(/\s+/g, " ").trim(), maxChars);
+}
+
+function promptPreview(text: string, maxChars = 180): string {
+  const compact = toCompactLine(text, maxChars).replace(/\s+/g, " ").trim();
+  return compact.length > 0 ? compact : "(empty prompt)";
 }
 
 function printSessionDetails(events: CapturedEventEnvelope[]): void {
@@ -1084,319 +1089,1409 @@ async function projects(rest: string[]): Promise<void> {
   throw new Error("Usage: codaph projects <list|add|remove> [--cwd <path>]");
 }
 
-async function pause(rl: ReturnType<typeof createInterface>, message = "Press Enter to continue..."): Promise<void> {
-  await rl.question(`${message}\n`);
+interface QuerySessionSummary {
+  sessionId: string;
+  from: string;
+  to: string;
+  eventCount: number;
+  threadCount: number;
 }
 
-function pickByIndex<T>(items: T[], rawIndex: string): T | null {
-  const index = Number.parseInt(rawIndex.trim(), 10);
-  if (!Number.isFinite(index) || index < 1 || index > items.length) {
-    return null;
-  }
-  return items[index - 1] ?? null;
+interface FileStatRow {
+  path: string;
+  plus: number;
+  minus: number;
 }
 
-function ansi(code: string, text: string): string {
-  if (!output.isTTY) {
-    return text;
-  }
-  return `\u001b[${code}m${text}\u001b[0m`;
-}
-
-function truncateForWidth(text: string, width: number): string {
-  if (text.length <= width) {
-    return text;
-  }
-  if (width <= 1) {
-    return text.slice(0, width);
-  }
-  return `${text.slice(0, width - 1)}...`;
-}
-
-function makeBox(title: string, lines: string[], width: number): string {
-  const usable = Math.max(20, width - 2);
-  const cleanTitle = truncateForWidth(title, usable - 4);
-  const prefix = ` ${cleanTitle} `;
-  const top = `┌${prefix}${"─".repeat(Math.max(0, usable - prefix.length))}┐`;
-  const bottom = `└${"─".repeat(usable)}┘`;
-  const body =
-    lines.length === 0
-      ? [`│${" ".repeat(usable)}│`]
-      : lines.map((line) => {
-          const clipped = truncateForWidth(line, usable);
-          const padded = `${clipped}${" ".repeat(Math.max(0, usable - clipped.length))}`;
-          return `│${padded}│`;
-        });
-  return [top, ...body, bottom].join("\n");
-}
-
-function buildSessionRows(events: CapturedEventEnvelope[], maxRows = 5): {
-  prompts: string[];
+interface PromptSlice {
+  id: number;
+  ts: string;
+  prompt: string;
   thoughts: string[];
   outputs: string[];
-  changes: string[];
-} {
-  const prompts = events
-    .map((event) => ({ ts: event.ts, text: getPromptText(event) }))
-    .filter((row): row is { ts: string; text: string } => !!row.text)
-    .slice(-maxRows)
-    .map((row) => `${row.ts}  ${toCompactLine(row.text, 140)}`);
-  const thoughts = events
-    .map((event) => ({ ts: event.ts, text: getThoughtText(event) }))
-    .filter((row): row is { ts: string; text: string } => !!row.text)
-    .slice(-maxRows)
-    .map((row) => `${row.ts}  ${toCompactLine(row.text, 140)}`);
-  const outputs = events
-    .map((event) => ({ ts: event.ts, text: getAssistantText(event) }))
-    .filter((row): row is { ts: string; text: string } => !!row.text)
-    .slice(-maxRows)
-    .map((row) => `${row.ts}  ${toCompactLine(row.text, 140)}`);
-  const changes = events
-    .flatMap((event) => getFileChangeList(event).map((change) => ({ ts: event.ts, ...change })))
-    .slice(-8)
-    .map((row) => `${row.ts}  ${row.kind}:${row.path}`);
-
-  return { prompts, thoughts, outputs, changes };
+  files: Map<string, FileStatRow>;
+  diffLines: string[];
 }
 
-function renderDashboard(params: {
-  projectPath: string;
-  sessions: Array<{ sessionId: string; eventCount: number; from: string; to: string }>;
-  selectedSessionId: string | null;
-  mubitEnabled: boolean;
-  events: CapturedEventEnvelope[];
-  diffs: Array<{ path: string; kinds: string[]; occurrences: number }>;
-}): string {
-  const width = Math.max(88, Math.min(output.columns ?? 120, 148));
-  const innerWidth = width - 2;
-  const statusLabel = params.mubitEnabled ? "enabled" : "disabled";
-  const rows = buildSessionRows(params.events);
-  const diffLines =
-    params.diffs.length === 0
-      ? ["(none)"]
-      : params.diffs.slice(0, 8).map((row) => `${row.path} | ${row.kinds.join(",")} | x${row.occurrences}`);
+interface SessionAnalysis {
+  sessionId: string;
+  prompts: PromptSlice[];
+  files: FileStatRow[];
+  tokenEstimate: number;
+}
 
-  const blocks = [
-    ansi(
-      "36",
-      makeBox(
-        "Codaph",
-        [
-          `Project: ${params.projectPath}`,
-          `Sessions: ${params.sessions.length}`,
-          `Active Session: ${params.selectedSessionId ?? "(none)"}`,
-          `MuBit: ${statusLabel}`,
-        ],
-        innerWidth,
-      ),
-    ),
-    makeBox("Prompts", rows.prompts.length > 0 ? rows.prompts : ["(none)"], innerWidth),
-    makeBox("Thoughts", rows.thoughts.length > 0 ? rows.thoughts : ["(none)"], innerWidth),
-    makeBox("Assistant Output", rows.outputs.length > 0 ? rows.outputs : ["(none)"], innerWidth),
-    makeBox("File Changes", rows.changes.length > 0 ? rows.changes : ["(none)"], innerWidth),
-    makeBox("Diff Summary", diffLines, innerWidth),
-    ansi(
-      "35",
-      makeBox(
-        "Actions",
-        [
-          "1) Sync Codex history (mirror + MuBit)",
-          "2) Switch session",
-          "3) Switch project",
-          "4) Add project",
-          "5) MuBit query via OpenAI agent",
-          "q) Quit",
-        ],
-        innerWidth,
-      ),
-    ),
+interface SessionBrowseRow {
+  sessionId: string;
+  from: string;
+  to: string;
+  eventCount: number;
+  threadCount: number;
+  promptCount: number;
+  fileCount: number;
+  tokenEstimate: number;
+  status: "synced" | "no_files";
+}
+
+interface CachedSessionAnalysis {
+  eventCount: number;
+  analysis: SessionAnalysis;
+}
+
+interface PaneLine {
+  text: string;
+  color?: string;
+  highlight?: boolean;
+}
+
+interface ChatMessage {
+  role: "you" | "mubit";
+  text: string;
+  ts: string;
+}
+
+type TuiView = "browse" | "inspect";
+type InspectPane = "prompts" | "thoughts" | "files" | "diff" | "chat";
+type InputMode = null | "add_project";
+
+interface TuiState {
+  projectPath: string;
+  view: TuiView;
+  inspectPane: InspectPane;
+  rows: SessionBrowseRow[];
+  selectedSessionIndex: number;
+  selectedPromptIndex: number;
+  chatOpen: boolean;
+  chatDraft: string;
+  chatScroll: number;
+  fullDiffOpen: boolean;
+  fullDiffScroll: number;
+  helpOpen: boolean;
+  busy: boolean;
+  statusLine: string;
+  inputMode: InputMode;
+  inputBuffer: string;
+  chatBySession: Map<string, ChatMessage[]>;
+}
+
+const ANSI_ESCAPE_REGEX = /\u001b\[[0-9;]*m/g;
+const TUI_COLORS = {
+  brand: "38;5;141",
+  activeBorder: "97",
+  inactiveBorder: "90",
+  selected: "48;5;57;97",
+  dim: "2",
+  muted: "90",
+  cyan: "36",
+  yellow: "33",
+  green: "32",
+  red: "31",
+} as const;
+
+function paint(text: string, colorCode?: string): string {
+  if (!colorCode || !output.isTTY) {
+    return text;
+  }
+  return `\u001b[${colorCode}m${text}\u001b[0m`;
+}
+
+function isFullWidthCodePoint(codePoint: number): boolean {
+  return (
+    codePoint >= 0x1100 &&
+    (
+      codePoint <= 0x115f ||
+      codePoint === 0x2329 ||
+      codePoint === 0x232a ||
+      (codePoint >= 0x2e80 && codePoint <= 0xa4cf && codePoint !== 0x303f) ||
+      (codePoint >= 0xac00 && codePoint <= 0xd7a3) ||
+      (codePoint >= 0xf900 && codePoint <= 0xfaff) ||
+      (codePoint >= 0xfe10 && codePoint <= 0xfe19) ||
+      (codePoint >= 0xfe30 && codePoint <= 0xfe6f) ||
+      (codePoint >= 0xff00 && codePoint <= 0xff60) ||
+      (codePoint >= 0xffe0 && codePoint <= 0xffe6) ||
+      (codePoint >= 0x1f300 && codePoint <= 0x1f64f) ||
+      (codePoint >= 0x1f900 && codePoint <= 0x1f9ff) ||
+      (codePoint >= 0x20000 && codePoint <= 0x3fffd)
+    )
+  );
+}
+
+function charDisplayWidth(char: string): number {
+  const codePoint = char.codePointAt(0);
+  if (!codePoint) {
+    return 0;
+  }
+  if (codePoint <= 0x1f || (codePoint >= 0x7f && codePoint <= 0x9f)) {
+    return 0;
+  }
+  if (
+    (codePoint >= 0x0300 && codePoint <= 0x036f) ||
+    (codePoint >= 0x1ab0 && codePoint <= 0x1aff) ||
+    (codePoint >= 0x1dc0 && codePoint <= 0x1dff) ||
+    (codePoint >= 0x20d0 && codePoint <= 0x20ff) ||
+    (codePoint >= 0xfe20 && codePoint <= 0xfe2f)
+  ) {
+    return 0;
+  }
+  return isFullWidthCodePoint(codePoint) ? 2 : 1;
+}
+
+function displayWidth(text: string): number {
+  let width = 0;
+  for (const char of text) {
+    width += charDisplayWidth(char);
+  }
+  return width;
+}
+
+function truncateToWidth(text: string, maxWidth: number): string {
+  if (maxWidth <= 0) {
+    return "";
+  }
+  let width = 0;
+  let out = "";
+  for (const char of text) {
+    const w = charDisplayWidth(char);
+    if (width + w > maxWidth) {
+      break;
+    }
+    out += char;
+    width += w;
+  }
+  return out;
+}
+
+function visibleLength(text: string): number {
+  return displayWidth(text.replace(ANSI_ESCAPE_REGEX, ""));
+}
+
+function clipPlain(text: string, width: number): string {
+  if (width <= 0) {
+    return "";
+  }
+  if (displayWidth(text) <= width) {
+    return text;
+  }
+  if (width <= 3) {
+    return truncateToWidth(text, width);
+  }
+  return `${truncateToWidth(text, width - 3)}...`;
+}
+
+function padPlain(text: string, width: number): string {
+  const clipped = clipPlain(text, width);
+  const missing = Math.max(0, width - visibleLength(clipped));
+  return `${clipped}${" ".repeat(missing)}`;
+}
+
+function splitByWidth(text: string, width: number): string[] {
+  if (width <= 0) {
+    return [""];
+  }
+  const out: string[] = [];
+  let line = "";
+  let lineWidth = 0;
+  for (const char of text) {
+    const w = charDisplayWidth(char);
+    if (lineWidth + w > width && line.length > 0) {
+      out.push(line);
+      line = "";
+      lineWidth = 0;
+    }
+    line += char;
+    lineWidth += w;
+  }
+  if (line.length > 0) {
+    out.push(line);
+  }
+  return out.length > 0 ? out : [""];
+}
+
+function wrapPlain(text: string, width: number): string[] {
+  if (width <= 0) {
+    return [""];
+  }
+
+  const out: string[] = [];
+  const paragraphs = text.split("\n");
+
+  for (const paragraph of paragraphs) {
+    const clean = paragraph.trimEnd();
+    if (clean.length === 0) {
+      out.push("");
+      continue;
+    }
+
+    const words = clean.split(/\s+/).filter((word) => word.length > 0);
+    let line = "";
+
+    for (const word of words) {
+      if (displayWidth(line) === 0) {
+        if (displayWidth(word) <= width) {
+          line = word;
+        } else {
+          const chunks = splitByWidth(word, width);
+          out.push(...chunks.slice(0, -1));
+          line = chunks[chunks.length - 1] ?? "";
+        }
+        continue;
+      }
+
+      const candidate = `${line} ${word}`;
+      if (displayWidth(candidate) <= width) {
+        line = candidate;
+        continue;
+      }
+
+      out.push(line);
+      if (displayWidth(word) <= width) {
+        line = word;
+      } else {
+        const chunks = splitByWidth(word, width);
+        out.push(...chunks.slice(0, -1));
+        line = chunks[chunks.length - 1] ?? "";
+      }
+    }
+
+    if (line.length > 0) {
+      out.push(line);
+    }
+  }
+
+  return out.length > 0 ? out : [""];
+}
+
+function boxLines(
+  title: string,
+  width: number,
+  height: number,
+  lines: PaneLine[],
+  active = false,
+): string[] {
+  const safeWidth = Math.max(16, width);
+  const innerWidth = safeWidth - 2;
+  const bodyHeight = Math.max(1, height - 2);
+  const borderColor = active ? TUI_COLORS.activeBorder : TUI_COLORS.inactiveBorder;
+
+  const cleanTitle = clipPlain(title, Math.max(1, innerWidth - 3));
+  const topPadding = Math.max(0, innerWidth - (visibleLength(cleanTitle) + 2));
+  const top = paint(`+ ${cleanTitle} ${"-".repeat(topPadding)}+`, borderColor);
+  const bottom = paint(`+${"-".repeat(innerWidth)}+`, borderColor);
+
+  const body: string[] = [];
+  for (let i = 0; i < bodyHeight; i += 1) {
+    const line = lines[i] ?? { text: "" };
+    const rawLine = line.text.replace(/[\r\n\t]+/g, " ");
+    const plain = padPlain(rawLine, innerWidth);
+    let rendered = plain;
+    if (line.highlight) {
+      rendered = paint(rendered, TUI_COLORS.selected);
+    } else if (line.color) {
+      rendered = paint(rendered, line.color);
+    }
+    body.push(`${paint("|", borderColor)}${rendered}${paint("|", borderColor)}`);
+  }
+
+  return [top, ...body, bottom];
+}
+
+function joinColumns(left: string[], right: string[], gap = 2): string[] {
+  const count = Math.max(left.length, right.length);
+  const leftWidth = visibleLength(left[0] ?? "");
+  const rightWidth = visibleLength(right[0] ?? "");
+  const leftBlank = " ".repeat(leftWidth);
+  const rightBlank = " ".repeat(rightWidth);
+
+  const rows: string[] = [];
+  for (let i = 0; i < count; i += 1) {
+    rows.push(`${left[i] ?? leftBlank}${" ".repeat(gap)}${right[i] ?? rightBlank}`);
+  }
+  return rows;
+}
+
+function windowStart(total: number, selected: number, visible: number): number {
+  if (total <= visible) {
+    return 0;
+  }
+  const half = Math.floor(visible / 2);
+  let start = Math.max(0, selected - half);
+  if (start + visible > total) {
+    start = total - visible;
+  }
+  return start;
+}
+
+function formatDateCell(ts: string): string {
+  const date = new Date(ts);
+  if (Number.isNaN(date.getTime())) {
+    return "unknown";
+  }
+  const month = date.toLocaleString("en-US", { month: "short" });
+  const day = String(date.getDate()).padStart(2, "0");
+  const hh = String(date.getHours()).padStart(2, "0");
+  const mm = String(date.getMinutes()).padStart(2, "0");
+  return `${month} ${day} ${hh}:${mm}`;
+}
+
+function formatTokenEstimate(tokens: number): string {
+  if (tokens >= 1000) {
+    const asK = tokens / 1000;
+    return asK >= 10 ? `${Math.round(asK)}k` : `${asK.toFixed(1)}k`;
+  }
+  return `${tokens}`;
+}
+
+function applyFileChange(stats: Map<string, FileStatRow>, path: string, kind: string): void {
+  const row = stats.get(path) ?? { path, plus: 0, minus: 0 };
+  if (kind === "add") {
+    row.plus += 1;
+  } else if (kind === "delete") {
+    row.minus += 1;
+  } else {
+    row.plus += 1;
+    row.minus += 1;
+  }
+  stats.set(path, row);
+}
+
+function toSortedFileStats(stats: Map<string, FileStatRow>): FileStatRow[] {
+  return [...stats.values()].sort((a, b) => {
+    const weightA = a.plus + a.minus;
+    const weightB = b.plus + b.minus;
+    if (weightA !== weightB) {
+      return weightB - weightA;
+    }
+    return a.path.localeCompare(b.path);
+  });
+}
+
+function extractPatchDiffLines(event: CapturedEventEnvelope): string[] {
+  const item = getItem(event);
+  const itemType = getItemType(event);
+  if (!item || itemType !== "tool_call") {
+    return [];
+  }
+
+  const toolName = typeof item.name === "string" ? item.name : null;
+  if (toolName !== "apply_patch") {
+    return [];
+  }
+
+  const argsText =
+    stringFromUnknown(item.arguments) ??
+    (typeof item.arguments === "string"
+      ? item.arguments
+      : isRecord(item.arguments)
+        ? JSON.stringify(item.arguments)
+        : null);
+  if (!argsText) {
+    return [];
+  }
+
+  const out: string[] = [];
+  for (const raw of argsText.split("\n")) {
+    const line = raw.trimEnd();
+    if (line.startsWith("*** Update File: ")) {
+      const path = line.slice("*** Update File: ".length).trim();
+      out.push(`--- a/${path}`);
+      out.push(`+++ b/${path}`);
+    } else if (line.startsWith("*** Add File: ")) {
+      const path = line.slice("*** Add File: ".length).trim();
+      out.push(`+++ b/${path}`);
+    } else if (line.startsWith("*** Delete File: ")) {
+      const path = line.slice("*** Delete File: ".length).trim();
+      out.push(`--- a/${path}`);
+    } else if (line.startsWith("@@")) {
+      out.push(line);
+    } else if ((line.startsWith("+") || line.startsWith("-")) && !line.startsWith("+++") && !line.startsWith("---")) {
+      out.push(line);
+    }
+
+    if (out.length >= 280) {
+      break;
+    }
+  }
+
+  return out;
+}
+
+function buildSessionAnalysis(sessionId: string, events: CapturedEventEnvelope[]): SessionAnalysis {
+  const prompts: PromptSlice[] = [];
+  const sessionFiles = new Map<string, FileStatRow>();
+  let nextPromptId = 1;
+  let tokenChars = 0;
+
+  const ensureCurrentPrompt = (): PromptSlice => {
+    if (prompts.length === 0) {
+      prompts.push({
+        id: nextPromptId,
+        ts: events[0]?.ts ?? new Date().toISOString(),
+        prompt: "(No prompt captured)",
+        thoughts: [],
+        outputs: [],
+        files: new Map<string, FileStatRow>(),
+        diffLines: [],
+      });
+      nextPromptId += 1;
+    }
+    return prompts[prompts.length - 1] as PromptSlice;
+  };
+
+  for (const event of events) {
+    const promptText = getPromptText(event);
+    if (promptText) {
+      prompts.push({
+        id: nextPromptId,
+        ts: event.ts,
+        prompt: promptText,
+        thoughts: [],
+        outputs: [],
+        files: new Map<string, FileStatRow>(),
+        diffLines: [],
+      });
+      nextPromptId += 1;
+      tokenChars += promptText.length;
+      continue;
+    }
+
+    const current = ensureCurrentPrompt();
+    const thought = getThoughtText(event);
+    if (thought) {
+      current.thoughts.push(thought);
+      tokenChars += thought.length;
+    }
+
+    const outputText = getAssistantText(event);
+    if (outputText) {
+      current.outputs.push(outputText);
+      tokenChars += outputText.length;
+    }
+
+    for (const change of getFileChangeList(event)) {
+      applyFileChange(current.files, change.path, change.kind);
+      applyFileChange(sessionFiles, change.path, change.kind);
+      const marker = change.kind === "delete" ? "-" : "+";
+      current.diffLines.push(`${marker} ${change.path}`);
+    }
+
+    const patchLines = extractPatchDiffLines(event);
+    if (patchLines.length > 0) {
+      current.diffLines.push(...patchLines);
+    }
+  }
+
+  if (prompts.length === 0) {
+    prompts.push({
+      id: 1,
+      ts: events[0]?.ts ?? new Date().toISOString(),
+      prompt: "(No prompt captured)",
+      thoughts: [],
+      outputs: [],
+      files: new Map<string, FileStatRow>(),
+      diffLines: [],
+    });
+  }
+
+  for (const prompt of prompts) {
+    prompt.diffLines = prompt.diffLines.slice(0, 280);
+  }
+
+  return {
+    sessionId,
+    prompts,
+    files: toSortedFileStats(sessionFiles),
+    tokenEstimate: Math.max(0, Math.round(tokenChars / 4)),
+  };
+}
+
+function selectedPromptFromAnalysis(analysis: SessionAnalysis, selectedPromptIndex: number): PromptSlice {
+  const safeIndex = Math.max(0, Math.min(selectedPromptIndex, analysis.prompts.length - 1));
+  return analysis.prompts[safeIndex] as PromptSlice;
+}
+
+function diffPreviewLines(prompt: PromptSlice, fallbackFiles: FileStatRow[]): string[] {
+  if (prompt.diffLines.length > 0) {
+    return prompt.diffLines;
+  }
+
+  const files = toSortedFileStats(prompt.files);
+  if (files.length > 0) {
+    return files.map((row) => `+ ${row.path} (+${row.plus} -${row.minus})`);
+  }
+
+  if (fallbackFiles.length > 0) {
+    return fallbackFiles.map((row) => `+ ${row.path} (+${row.plus} -${row.minus})`);
+  }
+
+  return ["(No diff captured)"];
+}
+
+function composeMubitAnswer(
+  response: Record<string, unknown>,
+  cwd: string,
+  sessionId: string,
+): string {
+  const finalAnswer =
+    typeof response.final_answer === "string" && response.final_answer.trim().length > 0
+      ? response.final_answer
+      : null;
+  if (finalAnswer) {
+    return sanitizeMubitAnswer(finalAnswer);
+  }
+
+  const snippets = summarizeEvidence(response);
+  if (snippets.length > 0) {
+    return snippets.map((line) => line.replace(/^- /, "")).join("\n");
+  }
+
+  return `MuBit returned no answer/evidence for session ${sessionId}. Try refining query for ${cwd}.`;
+}
+
+function headerLine(left: string, right: string, width: number): string {
+  const gap = Math.max(1, width - visibleLength(left) - visibleLength(right));
+  return `${left}${" ".repeat(gap)}${right}`;
+}
+
+function renderBrowseView(state: TuiState, mubitEnabled: boolean, width: number, height: number): string {
+  const projectName = basename(state.projectPath) || state.projectPath;
+  const leftHeader = `${paint("codaph", TUI_COLORS.brand)}  >  ${projectName}`;
+  const rightHeader = `${paint(mubitEnabled ? "MuBit:on" : "MuBit:off", mubitEnabled ? TUI_COLORS.cyan : TUI_COLORS.yellow)}   ${paint("[?] help", TUI_COLORS.dim)}`;
+  const header = headerLine(leftHeader, rightHeader, width);
+
+  const tableHeight = Math.max(10, height - 6);
+  const bodyRows = Math.max(3, tableHeight - 4);
+  const start = windowStart(state.rows.length, state.selectedSessionIndex, bodyRows);
+  const rows = state.rows.slice(start, start + bodyRows);
+
+  const sessionLines: PaneLine[] = [
+    { text: "  #   Date              Prompts   Files Changed   Tokens    Status", color: TUI_COLORS.muted },
+    { text: " -------------------------------------------------------------------", color: TUI_COLORS.muted },
   ];
 
-  return blocks.join("\n\n");
+  if (rows.length === 0) {
+    sessionLines.push({ text: "  (no sessions yet) press [s] to sync Codex history", color: TUI_COLORS.muted });
+  } else {
+    for (let i = 0; i < rows.length; i += 1) {
+      const absoluteIndex = start + i;
+      const row = rows[i] as SessionBrowseRow;
+      const marker = absoluteIndex === state.selectedSessionIndex ? ">" : " ";
+      const idx = String(absoluteIndex + 1).padStart(2, " ");
+      const dateCell = padPlain(formatDateCell(row.to), 16);
+      const prompts = String(row.promptCount).padStart(4, " ");
+      const files = String(row.fileCount).padStart(6, " ");
+      const tokens = padPlain(formatTokenEstimate(row.tokenEstimate), 7);
+      const statusText = row.status === "synced" ? "ok synced" : "! no files";
+
+      sessionLines.push({
+        text: `${marker} ${idx}  ${dateCell}    ${prompts}         ${files}         ${tokens}   ${statusText}`,
+        color: row.status === "no_files" ? TUI_COLORS.yellow : undefined,
+        highlight: absoluteIndex === state.selectedSessionIndex,
+      });
+    }
+  }
+
+  const sessionsBox = boxLines("Sessions", width, tableHeight, sessionLines, true);
+  const footer = "[up/down] navigate   [enter] inspect   [s] sync   [p] switch project   [a] add project   [q] quit";
+  return [header, "", ...sessionsBox, "", paint(clipPlain(footer, width), TUI_COLORS.dim)].join("\n");
+}
+
+function renderDiffOverlay(
+  state: TuiState,
+  selectedSession: SessionBrowseRow,
+  analysis: SessionAnalysis,
+  width: number,
+  height: number,
+): string {
+  const prompt = selectedPromptFromAnalysis(analysis, state.selectedPromptIndex);
+  const diffLines = diffPreviewLines(prompt, analysis.files);
+  const contentHeight = Math.max(8, height - 4);
+  const bodyHeight = Math.max(1, contentHeight - 2);
+  const maxScroll = Math.max(0, diffLines.length - bodyHeight);
+  const scroll = Math.max(0, Math.min(state.fullDiffScroll, maxScroll));
+  const visible = diffLines.slice(scroll, scroll + bodyHeight);
+
+  const lineRows: PaneLine[] = visible.map((line) => ({
+    text: line,
+    color:
+      line.startsWith("+") ? TUI_COLORS.green :
+      line.startsWith("-") ? TUI_COLORS.red :
+      line.startsWith("@@") || line.startsWith("---") || line.startsWith("+++") ? TUI_COLORS.muted :
+      undefined,
+  }));
+
+  const top = headerLine(
+    `${paint("codaph", TUI_COLORS.brand)}  >  ${basename(state.projectPath)}  >  Full Diff`,
+    paint("[d/esc] close", TUI_COLORS.dim),
+    width,
+  );
+  const box = boxLines(
+    `Session ${selectedSession.sessionId.slice(0, 8)} - Prompt ${prompt.id}`,
+    width,
+    contentHeight,
+    lineRows,
+    true,
+  );
+  return [
+    top,
+    "",
+    ...box,
+    "",
+    paint(`[up/down] scroll (${scroll}/${maxScroll})`, TUI_COLORS.dim),
+  ].join("\n");
+}
+
+function renderInspectView(
+  state: TuiState,
+  selectedSession: SessionBrowseRow,
+  analysis: SessionAnalysis,
+  mubitEnabled: boolean,
+  width: number,
+  height: number,
+): string {
+  if (state.fullDiffOpen) {
+    return renderDiffOverlay(state, selectedSession, analysis, width, height);
+  }
+
+  const prompt = selectedPromptFromAnalysis(analysis, state.selectedPromptIndex);
+  const splitMode = width >= 104;
+  const chatHeight = state.chatOpen ? Math.max(10, Math.floor(height * 0.32)) : 0;
+  const baseHeight = Math.max(14, height - 4 - (state.chatOpen ? chatHeight + 1 : 0));
+
+  const topHeader = headerLine(
+    `${paint("codaph", TUI_COLORS.brand)}  >  ${basename(state.projectPath)}  >  Session ${selectedSession.sessionId.slice(0, 8)} - ${formatDateCell(selectedSession.to)}`,
+    `${paint(mubitEnabled ? "MuBit:on" : "MuBit:off", mubitEnabled ? TUI_COLORS.cyan : TUI_COLORS.yellow)}   ${paint("[left] back  [?] help", TUI_COLORS.dim)}`,
+    width,
+  );
+
+  const thoughtText = prompt.thoughts.length > 0 ? prompt.thoughts.join("\n\n") : "(No exposed reasoning text)";
+  const promptFiles = toSortedFileStats(prompt.files);
+  const filesToRender = promptFiles.length > 0 ? promptFiles : analysis.files;
+  const buildPromptLines = (paneWidth: number, paneHeight: number): PaneLine[] => {
+    const lines: PaneLine[] = [];
+    const promptBody = Math.max(1, paneHeight - 2);
+    const promptStart = windowStart(analysis.prompts.length, state.selectedPromptIndex, promptBody);
+    const visiblePrompts = analysis.prompts.slice(promptStart, promptStart + promptBody);
+    for (let i = 0; i < visiblePrompts.length; i += 1) {
+      const absoluteIndex = promptStart + i;
+      const row = visiblePrompts[i] as PromptSlice;
+      lines.push({
+        text: `${absoluteIndex === state.selectedPromptIndex ? ">" : " "} ${row.id.toString().padStart(2, " ")}  ${promptPreview(row.prompt, Math.max(10, paneWidth - 10))}`,
+        highlight: absoluteIndex === state.selectedPromptIndex,
+      });
+    }
+    return lines;
+  };
+
+  const buildThoughtLines = (paneWidth: number): PaneLine[] =>
+    wrapPlain(thoughtText, Math.max(12, paneWidth - 4)).map((line) => ({ text: line }));
+
+  const buildFileLines = (paneWidth: number): PaneLine[] =>
+    filesToRender.length === 0
+      ? [{ text: "(No files changed)", color: TUI_COLORS.muted }]
+      : filesToRender.map((file) => ({
+          text: `${padPlain(file.path, Math.max(10, paneWidth - 18))}  +${file.plus}  -${file.minus}`,
+        }));
+
+  const buildDiffLines = (): PaneLine[] =>
+    diffPreviewLines(prompt, analysis.files).map((line) => ({
+      text: line,
+      color:
+        line.startsWith("+") ? TUI_COLORS.green :
+        line.startsWith("-") ? TUI_COLORS.red :
+        line.startsWith("@@") || line.startsWith("---") || line.startsWith("+++") ? TUI_COLORS.muted :
+        undefined,
+    }));
+
+  const composed: string[] = [topHeader, ""];
+  if (splitMode) {
+    const minPane = 24;
+    const leftWidth = Math.max(minPane, Math.min(Math.floor((width - 2) * 0.36), width - minPane - 2));
+    const rightWidth = Math.max(minPane, width - leftWidth - 2);
+    const topHeight = Math.max(7, Math.floor(baseHeight * 0.5));
+    const bottomHeight = Math.max(7, baseHeight - topHeight);
+
+    const promptsBox = boxLines("Prompts", leftWidth, topHeight, buildPromptLines(leftWidth, topHeight), state.inspectPane === "prompts");
+    const thoughtsBox = boxLines("Thoughts", rightWidth, topHeight, buildThoughtLines(rightWidth), state.inspectPane === "thoughts");
+    const filesBox = boxLines("Files Changed", leftWidth, bottomHeight, buildFileLines(leftWidth), state.inspectPane === "files");
+    const diffBox = boxLines("Diff", rightWidth, bottomHeight, buildDiffLines(), state.inspectPane === "diff");
+
+    composed.push(...joinColumns(promptsBox, thoughtsBox));
+    composed.push(...joinColumns(filesBox, diffBox));
+  } else {
+    const paneWidth = width;
+    const promptsHeight = Math.max(6, Math.floor(baseHeight * 0.26));
+    const thoughtsHeight = Math.max(6, Math.floor(baseHeight * 0.23));
+    const filesHeight = Math.max(6, Math.floor(baseHeight * 0.23));
+    const diffHeight = Math.max(6, baseHeight - promptsHeight - thoughtsHeight - filesHeight);
+
+    composed.push(...boxLines("Prompts", paneWidth, promptsHeight, buildPromptLines(paneWidth, promptsHeight), state.inspectPane === "prompts"));
+    composed.push("");
+    composed.push(...boxLines("Thoughts", paneWidth, thoughtsHeight, buildThoughtLines(paneWidth), state.inspectPane === "thoughts"));
+    composed.push("");
+    composed.push(...boxLines("Files Changed", paneWidth, filesHeight, buildFileLines(paneWidth), state.inspectPane === "files"));
+    composed.push("");
+    composed.push(...boxLines("Diff", paneWidth, diffHeight, buildDiffLines(), state.inspectPane === "diff"));
+  }
+
+  if (state.chatOpen) {
+    const transcriptWidth = Math.max(20, width - 6);
+    const sessionChat = state.chatBySession.get(selectedSession.sessionId) ?? [];
+    const transcript: PaneLine[] = [];
+
+    for (const message of sessionChat) {
+      const label = message.role === "you" ? "you>" : "mubit>";
+      const tone = message.role === "you" ? TUI_COLORS.yellow : TUI_COLORS.cyan;
+      const wrapped = wrapPlain(message.text, transcriptWidth);
+      transcript.push({ text: `${label}  ${wrapped[0] ?? ""}`, color: tone });
+      for (const line of wrapped.slice(1)) {
+        transcript.push({ text: `      ${line}`, color: tone });
+      }
+      transcript.push({ text: "", color: TUI_COLORS.muted });
+    }
+
+    const chatBodyHeight = Math.max(3, chatHeight - 2);
+    const transcriptHeight = Math.max(1, chatBodyHeight - 2);
+    const maxScroll = Math.max(0, transcript.length - transcriptHeight);
+    const scroll = Math.max(0, Math.min(state.chatScroll, maxScroll));
+    const start = Math.max(0, transcript.length - transcriptHeight - scroll);
+    const visibleTranscript = transcript.slice(start, start + transcriptHeight);
+    const inputLine = `> ${state.chatDraft}`;
+
+    const chatLines = [
+      ...visibleTranscript,
+      { text: clipPlain(inputLine, transcriptWidth), highlight: state.inspectPane === "chat" },
+      { text: "[enter] send   [esc] close chat", color: TUI_COLORS.muted },
+    ];
+    composed.push("");
+    composed.push(...boxLines("MuBit", width, chatHeight, chatLines, state.inspectPane === "chat"));
+  }
+
+  const footer = state.chatOpen
+    ? "[tab] focus pane   [esc] close chat   [up/down] navigate/scroll   [left] back"
+    : "[up/down] prompts   [tab] focus pane   [d] full diff   [m] MuBit chat   [left] back";
+
+  composed.push("");
+  composed.push(paint(clipPlain(footer, width), TUI_COLORS.dim));
+  return composed.join("\n");
+}
+
+function renderHelpOverlay(width: number, height: number): string {
+  const lines: PaneLine[] = [
+    { text: "Global", color: TUI_COLORS.muted },
+    { text: "q       quit" },
+    { text: "?       toggle help" },
+    { text: "p       switch project" },
+    { text: "a       add/switch project path" },
+    { text: "" },
+    { text: "Browse", color: TUI_COLORS.muted },
+    { text: "up/down navigate sessions" },
+    { text: "enter   open session inspect view" },
+    { text: "s       sync Codex history" },
+    { text: "" },
+    { text: "Inspect", color: TUI_COLORS.muted },
+    { text: "up/down navigate prompts" },
+    { text: "tab     cycle pane focus" },
+    { text: "d       toggle full diff overlay" },
+    { text: "m       toggle MuBit chat" },
+    { text: "left/esc back to browse" },
+    { text: "" },
+    { text: "Chat", color: TUI_COLORS.muted },
+    { text: "type    edit prompt" },
+    { text: "enter   send question" },
+    { text: "esc     close chat" },
+  ];
+
+  const boxWidth = Math.max(56, Math.min(width - 8, 92));
+  const boxHeight = Math.max(14, Math.min(height - 6, 28));
+  const box = boxLines("Help", boxWidth, boxHeight, lines, true);
+  const leftPad = Math.max(0, Math.floor((width - boxWidth) / 2));
+  const padded = box.map((line) => `${" ".repeat(leftPad)}${line}`);
+  const topPad = Math.max(0, Math.floor((height - boxHeight) / 2) - 1);
+
+  return [
+    ...Array.from({ length: topPad }, () => ""),
+    ...padded,
+    "",
+    `${" ".repeat(leftPad)}${paint("[esc/?] close", TUI_COLORS.dim)}`,
+  ].join("\n");
+}
+
+function inspectPaneCycle(chatOpen: boolean): InspectPane[] {
+  return chatOpen ? ["prompts", "thoughts", "files", "diff", "chat"] : ["prompts", "thoughts", "files", "diff"];
 }
 
 async function tui(rest: string[]): Promise<void> {
   const { flags } = parseArgs(rest);
+  if (!input.isTTY || !output.isTTY) {
+    throw new Error("TUI requires an interactive terminal.");
+  }
+
   const cwdFlag = getStringFlag(flags, "cwd");
   if (cwdFlag) {
     await addProjectToRegistry(cwdFlag);
   }
 
-  let registry = await loadRegistry();
+  const registry = await loadRegistry();
+  const fallbackProject = registry.lastProjectPath ?? registry.projects[0] ?? process.cwd();
   if (registry.projects.length === 0) {
-    registry = await addProjectToRegistry(process.cwd());
+    await addProjectToRegistry(fallbackProject);
   }
 
-  let selectedProject = registry.lastProjectPath ?? registry.projects[0];
-  let selectedSessionId: string | null = null;
+  const state: TuiState = {
+    projectPath: resolve(fallbackProject),
+    view: "browse",
+    inspectPane: "prompts",
+    rows: [],
+    selectedSessionIndex: 0,
+    selectedPromptIndex: 0,
+    chatOpen: false,
+    chatDraft: "",
+    chatScroll: 0,
+    fullDiffOpen: false,
+    fullDiffScroll: 0,
+    helpOpen: false,
+    busy: false,
+    statusLine: "",
+    inputMode: null,
+    inputBuffer: "",
+    chatBySession: new Map<string, ChatMessage[]>(),
+  };
+
+  let query = new QueryService(resolve(state.projectPath, ".codaph"));
+  let repoId = repoIdFromPath(state.projectPath);
   const memory = createMubitMemory(flags);
-  const rl = createInterface({ input, output });
+  const analysisCache = new Map<string, CachedSessionAnalysis>();
+  let screenReady = false;
 
-  try {
-    while (true) {
-      const repoId = repoIdFromPath(selectedProject);
-      const query = new QueryService(resolve(selectedProject, ".codaph"));
-      const sessions = await query.listSessions(repoId);
-      if (!selectedSessionId || !sessions.some((session) => session.sessionId === selectedSessionId)) {
-        selectedSessionId = sessions[0]?.sessionId ?? null;
-      }
+  const getSize = (): { width: number; height: number } => ({
+    width: Math.max(20, Math.min(180, Math.max(20, (output.columns ?? 120) - 4))),
+    height: Math.max(2, Math.max(2, (output.rows ?? 40) - 2)),
+  });
 
-      let events: CapturedEventEnvelope[] = [];
-      let diffs: Array<{ path: string; kinds: string[]; occurrences: number }> = [];
-      if (selectedSessionId) {
-        events = await query.getTimeline({ repoId, sessionId: selectedSessionId });
-        diffs = await query.getDiffSummary(repoId, selectedSessionId);
-      }
+  const selectedRow = (): SessionBrowseRow | null => {
+    if (state.rows.length === 0) {
+      return null;
+    }
+    const idx = Math.max(0, Math.min(state.selectedSessionIndex, state.rows.length - 1));
+    return state.rows[idx] ?? null;
+  };
 
-      console.clear();
-      console.log(
-        renderDashboard({
-          projectPath: selectedProject,
-          sessions,
-          selectedSessionId,
-          mubitEnabled: memory?.isEnabled() ?? false,
-          events,
-          diffs,
-        }),
-      );
+  const selectedAnalysis = (): SessionAnalysis | null => {
+    const row = selectedRow();
+    if (!row) {
+      return null;
+    }
+    return analysisCache.get(row.sessionId)?.analysis ?? null;
+  };
 
-      const action = (await rl.question("\ncodaph> ")).trim().toLowerCase();
-      if (action === "q" || action === "quit" || action === "exit") {
-        return;
-      }
+  const render = (): void => {
+    if (!screenReady) {
+      return;
+    }
 
-      if (action === "1" || action === "s" || action === "sync") {
-        const syncFlags: Flags = { ...flags };
-        const { pipeline, memory: syncMemory } = createPipeline(selectedProject, syncFlags);
-        const mubitMode = syncMemory?.isEnabled() ? "MuBit enabled" : "MuBit disabled";
-        console.log(`\nSyncing Codex history (${mubitMode})...`);
-        const reporter = createSyncProgressReporter("Syncing");
-        try {
-          const summary = await syncCodexHistory({
-            projectPath: selectedProject,
-            pipeline,
-            onProgress: reporter.onProgress,
-          }).finally(() => reporter.finish());
-          console.log(`\n${formatSummary(summary)}`);
-          if (syncMemory?.isEnabled()) {
-            console.log("MuBit ingest during sync: enabled");
-          } else {
-            console.log("MuBit ingest during sync: disabled");
-          }
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          console.log(`\nHistory sync failed: ${message}`);
-        }
-        await pause(rl);
-        continue;
-      }
+    const { width, height } = getSize();
+    let screen = "";
 
-      if (action === "2" || action === "session") {
-        if (sessions.length === 0) {
-          console.log("\nNo sessions available.");
-          await pause(rl);
-          continue;
-        }
-        console.log("");
-        sessions.forEach((session, index) => {
-          console.log(`${index + 1}) ${session.sessionId} | events=${session.eventCount} | ${session.to}`);
-        });
-        const rawIndex = await rl.question("Choose session #: ");
-        const picked = pickByIndex(sessions, rawIndex);
-        if (picked) {
-          selectedSessionId = picked.sessionId;
-        }
-        continue;
-      }
-
-      if (action === "3" || action === "project") {
-        registry = await loadRegistry();
-        if (registry.projects.length === 0) {
-          console.log("\nNo projects saved.");
-          await pause(rl);
-          continue;
-        }
-        console.log("");
-        registry.projects.forEach((project, index) => {
-          const marker = project === selectedProject ? "*" : " ";
-          console.log(`${index + 1})${marker} ${project}`);
-        });
-        const rawIndex = await rl.question("Choose project #: ");
-        const picked = pickByIndex(registry.projects, rawIndex);
-        if (picked) {
-          selectedProject = picked;
-          selectedSessionId = null;
-          await setLastProject(picked);
-        }
-        continue;
-      }
-
-      if (action === "4" || action === "add") {
-        const rawPath = await rl.question("Project path: ");
-        const trimmed = rawPath.trim();
-        if (!trimmed) {
-          continue;
-        }
-        const normalized = resolve(trimmed);
-        await addProjectToRegistry(normalized);
-        selectedProject = normalized;
-        selectedSessionId = null;
-        continue;
-      }
-
-      if (action === "5" || action === "mubit") {
-        if (!memory || !memory.isEnabled()) {
-          console.log("\nMuBit disabled. Set MUBIT_API_KEY and restart with --mubit.");
-          await pause(rl);
-          continue;
-        }
-        if (!selectedSessionId) {
-          console.log("\nSelect a session first.");
-          await pause(rl);
-          continue;
-        }
-        const question = (await rl.question("MuBit query: ")).trim();
-        if (!question) {
-          continue;
-        }
-        try {
-          const runId = mubitRunIdForSession(repoId, selectedSessionId);
-          console.log(`\nQuerying MuBit run scope: ${runId}`);
-          const response = await withTimeout(
-            memory.querySemanticContext({
-              runId,
-              query: buildMubitQueryPrompt(question),
-              limit: 8,
-              mode: "direct_bypass",
-              directLane: "semantic_search",
-            }),
-            45000,
-            "MuBit query",
-          );
-          console.log("");
-          const openAiKey = resolveOpenAiApiKey(flags);
-          const agentRequested = getBooleanFlag(flags, "agent", openAiKey !== null);
-          if (agentRequested && !openAiKey) {
-            console.log("OpenAI agent requested but OPENAI_API_KEY is missing. Falling back to MuBit response.");
-          }
-          const agentResult = await runOpenAiAgentFromMubit(question, response, runId, flags);
-          if (agentResult) {
-            console.log(`OpenAI agent (${agentResult.model}) answer:`);
-            console.log(agentResult.text);
-          } else {
-            printMubitResponse(response, selectedProject, selectedSessionId, false);
-          }
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          console.log(`\nMuBit query failed: ${message}`);
-        }
-        await pause(rl);
-        continue;
+    if (state.helpOpen) {
+      screen = renderHelpOverlay(width, height);
+    } else if (state.view === "browse") {
+      screen = renderBrowseView(state, memory?.isEnabled() ?? false, width, height);
+    } else {
+      const row = selectedRow();
+      const analysis = selectedAnalysis();
+      if (!row || !analysis) {
+        screen = renderBrowseView(state, memory?.isEnabled() ?? false, width, height);
+      } else {
+        screen = renderInspectView(state, row, analysis, memory?.isEnabled() ?? false, width, height);
       }
     }
-  } finally {
-    rl.close();
-  }
+
+    const statusText = state.statusLine.trim().length > 0
+      ? clipPlain(state.statusLine, width)
+      : "";
+    const status = statusText.length > 0
+      ? paint(statusText, state.busy ? TUI_COLORS.yellow : TUI_COLORS.dim)
+      : "";
+
+    const bodyHeight = Math.max(1, height - 1);
+    const frameLines = screen.split("\n").slice(0, bodyHeight);
+    while (frameLines.length < bodyHeight) {
+      frameLines.push("");
+    }
+    frameLines.push(status);
+
+    output.write("\u001b[H");
+    for (let i = 0; i < frameLines.length; i += 1) {
+      output.write(frameLines[i] ?? "");
+      output.write("\u001b[K");
+      if (i < frameLines.length - 1) {
+        output.write("\n");
+      }
+    }
+  };
+
+  const ensureAnalysis = async (session: QuerySessionSummary): Promise<SessionAnalysis> => {
+    const cached = analysisCache.get(session.sessionId);
+    if (cached && cached.eventCount === session.eventCount) {
+      return cached.analysis;
+    }
+
+    const events = await query.getTimeline({ repoId, sessionId: session.sessionId });
+    const analysis = buildSessionAnalysis(session.sessionId, events);
+    analysisCache.set(session.sessionId, { eventCount: session.eventCount, analysis });
+    return analysis;
+  };
+
+  const refreshRows = async (progressLabel: string): Promise<void> => {
+    query = new QueryService(resolve(state.projectPath, ".codaph"));
+    repoId = repoIdFromPath(state.projectPath);
+
+    const sessions = await query.listSessions(repoId) as QuerySessionSummary[];
+    const rows: SessionBrowseRow[] = [];
+
+    for (let i = 0; i < sessions.length; i += 1) {
+      const session = sessions[i] as QuerySessionSummary;
+      state.statusLine = `${progressLabel} (${i + 1}/${sessions.length})`;
+      if (i === 0 || i % 3 === 0) {
+        render();
+      }
+
+      const analysis = await ensureAnalysis(session);
+      const promptCount = analysis.prompts.filter((entry) => entry.prompt !== "(No prompt captured)").length;
+      rows.push({
+        sessionId: session.sessionId,
+        from: session.from,
+        to: session.to,
+        eventCount: session.eventCount,
+        threadCount: session.threadCount,
+        promptCount,
+        fileCount: analysis.files.length,
+        tokenEstimate: analysis.tokenEstimate,
+        status: analysis.files.length > 0 ? "synced" : "no_files",
+      });
+    }
+
+    state.rows = rows;
+    if (state.rows.length === 0) {
+      state.selectedSessionIndex = 0;
+      state.selectedPromptIndex = 0;
+      state.view = "browse";
+      return;
+    }
+
+    if (state.selectedSessionIndex >= state.rows.length) {
+      state.selectedSessionIndex = state.rows.length - 1;
+    }
+    state.selectedPromptIndex = 0;
+  };
+
+  const runTask = (label: string, task: () => Promise<void>): void => {
+    if (state.busy) {
+      return;
+    }
+    state.busy = true;
+    state.statusLine = label;
+    render();
+    void task()
+      .catch((error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        state.statusLine = `Error: ${message}`;
+      })
+      .finally(() => {
+        state.busy = false;
+        render();
+      });
+  };
+
+  const ensureChat = (sessionId: string): ChatMessage[] => {
+    const existing = state.chatBySession.get(sessionId);
+    if (existing) {
+      return existing;
+    }
+    const created: ChatMessage[] = [];
+    state.chatBySession.set(sessionId, created);
+    return created;
+  };
+
+  const syncProject = async (): Promise<void> => {
+    const { pipeline, memory: syncMemory } = createPipeline(state.projectPath, flags);
+    let lastRefresh = 0;
+    const summary = await syncCodexHistory({
+      projectPath: state.projectPath,
+      pipeline,
+      onProgress: (progress) => {
+        state.statusLine = `Sync ${progress.matchedFiles}/${progress.scannedFiles} | events ${progress.importedEvents} | line ${progress.currentLine} | ${shortenPath(progress.currentFile, 42)}`;
+        const now = Date.now();
+        if (now - lastRefresh > 120) {
+          lastRefresh = now;
+          render();
+        }
+      },
+    });
+    analysisCache.clear();
+    await refreshRows("Refreshing sessions");
+    state.statusLine = `${formatSummary(summary)} | MuBit ${syncMemory?.isEnabled() ? "enabled" : "disabled"}`;
+  };
+
+  const cycleProject = async (): Promise<void> => {
+    const current = await loadRegistry();
+    if (current.projects.length === 0) {
+      state.statusLine = "No projects in registry. Press [a] to add one.";
+      return;
+    }
+
+    const at = current.projects.indexOf(state.projectPath);
+    const next = current.projects[(at + 1 + current.projects.length) % current.projects.length] ?? current.projects[0];
+    state.projectPath = resolve(next);
+    state.view = "browse";
+    state.selectedSessionIndex = 0;
+    state.selectedPromptIndex = 0;
+    state.chatOpen = false;
+    state.chatDraft = "";
+    state.chatScroll = 0;
+    state.fullDiffOpen = false;
+    state.fullDiffScroll = 0;
+    analysisCache.clear();
+    await setLastProject(state.projectPath);
+    await refreshRows(`Loading ${basename(state.projectPath)}`);
+    state.statusLine = `Project: ${state.projectPath}`;
+  };
+
+  const sendChatQuestion = async (): Promise<void> => {
+    const session = selectedRow();
+    const analysis = selectedAnalysis();
+    if (!session || !analysis) {
+      state.statusLine = "No session selected.";
+      return;
+    }
+
+    const question = state.chatDraft.trim();
+    if (question.length === 0) {
+      return;
+    }
+
+    const chat = ensureChat(session.sessionId);
+    chat.push({ role: "you", text: question, ts: new Date().toISOString() });
+    state.chatDraft = "";
+    state.chatScroll = 0;
+    render();
+
+    if (!memory || !memory.isEnabled()) {
+      chat.push({
+        role: "mubit",
+        text: "MuBit is disabled. Set MUBIT_API_KEY and restart with --mubit.",
+        ts: new Date().toISOString(),
+      });
+      state.statusLine = "MuBit is disabled.";
+      return;
+    }
+
+    const runId = mubitRunIdForSession(repoId, session.sessionId);
+    const prompt = selectedPromptFromAnalysis(analysis, state.selectedPromptIndex);
+    const contextualQuery = `${question}\n\nCurrent prompt context:\n${clipText(prompt.prompt, 400)}`;
+
+    const response = await withTimeout(
+      memory.querySemanticContext({
+        runId,
+        query: buildMubitQueryPrompt(contextualQuery),
+        limit: 8,
+        mode: "direct_bypass",
+        directLane: "semantic_search",
+      }),
+      45000,
+      "MuBit query",
+    );
+
+    const openAiKey = resolveOpenAiApiKey(flags);
+    const agentRequested = getBooleanFlag(flags, "agent", openAiKey !== null);
+    if (agentRequested && !openAiKey) {
+      chat.push({
+        role: "mubit",
+        text: "OpenAI agent requested but OPENAI_API_KEY is missing. Falling back to MuBit answer.",
+        ts: new Date().toISOString(),
+      });
+    }
+
+    const agentResult = await runOpenAiAgentFromMubit(question, response, runId, flags);
+    const answer = agentResult?.text ?? composeMubitAnswer(response, state.projectPath, session.sessionId);
+    chat.push({
+      role: "mubit",
+      text: answer,
+      ts: new Date().toISOString(),
+    });
+    state.chatScroll = 0;
+    state.statusLine = agentResult
+      ? `OpenAI agent (${agentResult.model}) responded`
+      : "MuBit responded";
+  };
+
+  emitKeypressEvents(input);
+  input.setRawMode(true);
+  output.write("\u001b[?1049h");
+  output.write("\u001b[?7l");
+  output.write("\u001b[?25l");
+  output.write("\u001b[2J\u001b[H");
+  screenReady = true;
+
+  await refreshRows("Indexing sessions");
+  state.statusLine = `Project: ${state.projectPath}`;
+
+  const onResize = (): void => {
+    render();
+  };
+  output.on("resize", onResize);
+  render();
+
+  let closed = false;
+  let resolveDone: (() => void) | null = null;
+  const done = new Promise<void>((resolve) => {
+    resolveDone = resolve;
+  });
+
+  const close = (): void => {
+    if (closed) {
+      return;
+    }
+    closed = true;
+    input.off("keypress", onKey);
+    output.off("resize", onResize);
+    input.setRawMode(false);
+    output.write("\u001b[?25h");
+    output.write("\u001b[?7h");
+    output.write("\u001b[?1049l");
+    if (resolveDone) {
+      resolveDone();
+    }
+  };
+
+  const onKey = (str: string, key: { name?: string; ctrl?: boolean; meta?: boolean; sequence?: string }): void => {
+    if (key.ctrl && key.name === "c") {
+      close();
+      return;
+    }
+
+    if (state.helpOpen) {
+      if (str === "?" || key.name === "escape" || key.name === "q") {
+        state.helpOpen = false;
+        render();
+      }
+      return;
+    }
+
+    if (state.inputMode === "add_project") {
+      if (key.name === "escape") {
+        state.inputMode = null;
+        state.inputBuffer = "";
+        state.statusLine = "Project add cancelled.";
+        render();
+        return;
+      }
+      if (key.name === "backspace") {
+        state.inputBuffer = state.inputBuffer.slice(0, -1);
+        state.statusLine = `Add project path: ${state.inputBuffer}`;
+        render();
+        return;
+      }
+      if (key.name === "return") {
+        const candidate = state.inputBuffer.trim();
+        state.inputMode = null;
+        state.inputBuffer = "";
+        if (candidate.length === 0) {
+          state.statusLine = "Empty path. Cancelled.";
+          render();
+          return;
+        }
+        runTask("Adding project...", async () => {
+          const normalized = resolve(candidate);
+          await addProjectToRegistry(normalized);
+          state.projectPath = normalized;
+          await setLastProject(normalized);
+          state.selectedSessionIndex = 0;
+          state.selectedPromptIndex = 0;
+          state.view = "browse";
+          state.chatOpen = false;
+          state.fullDiffOpen = false;
+          analysisCache.clear();
+          await refreshRows(`Loading ${basename(normalized)}`);
+          state.statusLine = `Project: ${normalized}`;
+        });
+        return;
+      }
+      if (!key.ctrl && !key.meta && str.length === 1 && str >= " ") {
+        state.inputBuffer += str;
+        state.statusLine = `Add project path: ${state.inputBuffer}`;
+        render();
+      }
+      return;
+    }
+
+    if (str === "q" || key.name === "q") {
+      close();
+      return;
+    }
+
+    if (str === "?") {
+      state.helpOpen = true;
+      render();
+      return;
+    }
+
+    if (str === "p") {
+      runTask("Switching project...", cycleProject);
+      return;
+    }
+
+    if (str === "a") {
+      state.inputMode = "add_project";
+      state.inputBuffer = "";
+      state.statusLine = "Add project path: ";
+      render();
+      return;
+    }
+
+    if (state.busy) {
+      return;
+    }
+
+    if (state.view === "browse") {
+      if (key.name === "up") {
+        if (state.rows.length > 0) {
+          state.selectedSessionIndex = Math.max(0, state.selectedSessionIndex - 1);
+        }
+        render();
+        return;
+      }
+      if (key.name === "down") {
+        if (state.rows.length > 0) {
+          state.selectedSessionIndex = Math.min(state.rows.length - 1, state.selectedSessionIndex + 1);
+        }
+        render();
+        return;
+      }
+      if (key.name === "return") {
+        if (state.rows.length > 0) {
+          state.view = "inspect";
+          state.inspectPane = "prompts";
+          state.selectedPromptIndex = 0;
+          state.chatOpen = false;
+          state.fullDiffOpen = false;
+          render();
+        }
+        return;
+      }
+      if (str === "s") {
+        runTask("Syncing Codex history...", syncProject);
+        return;
+      }
+      return;
+    }
+
+    const analysis = selectedAnalysis();
+    if (!analysis) {
+      state.view = "browse";
+      render();
+      return;
+    }
+
+    if (state.fullDiffOpen) {
+      const prompt = selectedPromptFromAnalysis(analysis, state.selectedPromptIndex);
+      const fullDiff = diffPreviewLines(prompt, analysis.files);
+      const bodyHeight = Math.max(1, getSize().height - 6);
+      const maxScroll = Math.max(0, fullDiff.length - bodyHeight);
+
+      if (key.name === "up") {
+        state.fullDiffScroll = Math.max(0, state.fullDiffScroll - 1);
+        render();
+        return;
+      }
+      if (key.name === "down") {
+        state.fullDiffScroll = Math.min(maxScroll, state.fullDiffScroll + 1);
+        render();
+        return;
+      }
+      if (str === "d" || key.name === "escape" || key.name === "left") {
+        state.fullDiffOpen = false;
+        state.fullDiffScroll = 0;
+        render();
+      }
+      return;
+    }
+
+    if (key.name === "left" || key.name === "escape") {
+      if (state.chatOpen) {
+        state.chatOpen = false;
+        state.inspectPane = "prompts";
+      } else {
+        state.view = "browse";
+      }
+      render();
+      return;
+    }
+
+    if (key.name === "tab") {
+      const panes = inspectPaneCycle(state.chatOpen);
+      const current = panes.indexOf(state.inspectPane);
+      const next = panes[(current + 1) % panes.length] ?? panes[0];
+      state.inspectPane = next ?? "prompts";
+      render();
+      return;
+    }
+
+    if (str === "m") {
+      state.chatOpen = !state.chatOpen;
+      state.inspectPane = state.chatOpen ? "chat" : "prompts";
+      state.chatScroll = 0;
+      render();
+      return;
+    }
+
+    if (str === "d") {
+      state.fullDiffOpen = true;
+      state.fullDiffScroll = 0;
+      render();
+      return;
+    }
+
+    if (key.name === "up") {
+      if (state.inspectPane === "prompts") {
+        state.selectedPromptIndex = Math.max(0, state.selectedPromptIndex - 1);
+      } else if (state.inspectPane === "chat") {
+        const row = selectedRow();
+        const chat = row ? ensureChat(row.sessionId) : [];
+        state.chatScroll = Math.min(chat.length, state.chatScroll + 1);
+      }
+      render();
+      return;
+    }
+
+    if (key.name === "down") {
+      if (state.inspectPane === "prompts") {
+        state.selectedPromptIndex = Math.min(analysis.prompts.length - 1, state.selectedPromptIndex + 1);
+      } else if (state.inspectPane === "chat") {
+        state.chatScroll = Math.max(0, state.chatScroll - 1);
+      }
+      render();
+      return;
+    }
+
+    if (state.chatOpen && state.inspectPane === "chat") {
+      if (key.name === "backspace") {
+        state.chatDraft = state.chatDraft.slice(0, -1);
+        render();
+        return;
+      }
+      if (key.name === "return") {
+        runTask("Querying MuBit...", sendChatQuestion);
+        return;
+      }
+      if (!key.ctrl && !key.meta && str.length === 1 && str >= " ") {
+        state.chatDraft += str;
+        render();
+      }
+    }
+  };
+
+  input.on("keypress", onKey);
+  await done;
 }
 
 async function main(): Promise<void> {

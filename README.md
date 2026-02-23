@@ -34,6 +34,15 @@ TUI flow:
 3. Inspect prompts, thoughts, assistant output, and file changes by session.
 4. Query MuBit semantic memory for the active session.
 
+TUI keyboard map:
+- `q`: quit
+- `?`: help overlay
+- `p`: switch project
+- `a`: add/switch project path
+- Browse view: `up/down` navigate sessions, `enter` inspect, `s` sync
+- Inspect view: `up/down` prompt navigation, `tab` cycle pane focus, `d` full diff overlay, `m` MuBit chat, `left` or `esc` back
+- Chat panel: type message, `enter` send, `esc` close chat
+
 ## CLI Commands (Primary)
 
 ```bash

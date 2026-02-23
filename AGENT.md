@@ -212,3 +212,53 @@ Do not rewrite history; append a new snapshot each run.
 - unstaged: 0
 - untracked: 0
 - files: AGENT.md, README.md, package.json, packages/core-types/src/index.ts, packages/ingest-pipeline/src/index.ts, packages/memory-mubit/package.json, packages/memory-mubit/src/index.ts, packages/memory-mubit/test/memory-mubit.test.ts, packages/memory-mubit/tsconfig.json, tools/codaph-cli/package.json, tools/codaph-cli/src/codex-history-sync.ts, tools/codaph-cli/src/index.ts, tools/codaph-cli/src/project-registry.ts
+
+## Status Snapshot — 2026-02-23T11:43:20.882Z
+- source: manual
+- repo: /Users/anilp/Code/codaph
+- branch: main
+- head: 7b4bdae
+- staged: 1
+- unstaged: 1
+- untracked: 0
+- files: EADME.md, tools/codaph-cli/src/index.ts
+
+## Status Snapshot — 2026-02-23T12:04:21.030Z
+- source: manual
+- repo: /Users/anilp/Code/codaph
+- branch: main
+- head: 7b4bdae
+- staged: 1
+- unstaged: 2
+- untracked: 0
+- files: GENT.md, README.md, tools/codaph-cli/src/index.ts
+
+## Status Snapshot — 2026-02-23T12:09:59.419Z
+- source: manual
+- repo: /Users/anilp/Code/codaph
+- branch: main
+- head: 7b4bdae
+- staged: 1
+- unstaged: 2
+- untracked: 0
+- files: GENT.md, README.md, tools/codaph-cli/src/index.ts
+
+## Status Snapshot — 2026-02-23T13:27:29.719Z
+- source: manual
+- repo: /Users/anilp/Code/codaph
+- branch: main
+- head: 7b4bdae
+- staged: 1
+- unstaged: 2
+- untracked: 0
+- files: GENT.md, README.md, tools/codaph-cli/src/index.ts
+
+## Status Snapshot — 2026-02-23T13:30:30.500Z
+- source: pre-commit
+- repo: /Users/anilp/Code/codaph
+- branch: main
+- head: 7b4bdae
+- staged: 3
+- unstaged: 0
+- untracked: 0
+- files: AGENT.md, README.md, tools/codaph-cli/src/index.ts
