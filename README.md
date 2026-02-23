@@ -50,8 +50,8 @@ bun run build
 After npm publish, users can run Codaph directly without cloning:
 
 ```bash
-npx codaph --help
-npx codaph tui --cwd /absolute/project/path --mubit
+npx @codaph/codaph --help
+npx @codaph/codaph tui --cwd /absolute/project/path --mubit
 ```
 
 ## Release Tag Publish (GitHub Actions)
@@ -72,7 +72,7 @@ Workflow requirements:
 - GitHub repo secret `NPM_TOKEN` must be set.
 - Tag format must be `v<package.json version>` (example `v0.1.0`).
 - `NPM_TOKEN` must be from an npm account that can publish the package name.
-- If publish fails with `E403`, use an npm Automation/Publish token with write access (not read-only), or switch to a scoped name like `@anilperi/codaph`.
+- If publish fails with `E403`, use an npm Automation/Publish token with write access (not read-only), and ensure token scope includes `@codaph`.
 
 ## Run TUI (Primary)
 

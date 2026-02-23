@@ -115,8 +115,8 @@ Fixes:
 3. Confirm token account can publish package name:
    - if package exists: account must be listed in `npm owner ls <package>`
    - if package is new: account must be allowed to claim that name
-4. If unscoped name is blocked, publish with a scoped name (for example `@anilperi/codaph`) and use:
-   `npx @anilperi/codaph ...`
+4. For this repo, publish under the org scope and use:
+   `npx @codaph/codaph ...`
 
 Notes:
 

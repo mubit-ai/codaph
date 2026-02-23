@@ -28,7 +28,7 @@ bun run tui --cwd /absolute/project/path --mubit
 ### B) npx (after npm publish)
 
 ```bash
-npx codaph tui --cwd /absolute/project/path --mubit
+npx @codaph/codaph tui --cwd /absolute/project/path --mubit
 ```
 
 ### C) Homebrew (after formula publish)
@@ -135,7 +135,7 @@ Press `o` and set:
 For npm release docs, advertise:
 
 ```bash
-npx codaph ...
+npx @codaph/codaph ...
 ```
 
 GitHub Actions release-tag publish is configured at:
@@ -149,7 +149,7 @@ git push origin v0.1.0
 ```
 
 If GitHub Actions publish fails with `E403`, the npm token cannot publish that package name.
-Use a publish-capable token or switch to a scoped package name (example `@anilperi/codaph`).
+Use a publish-capable token and ensure it has scope access to `@codaph`.
 
 For Homebrew release docs, advertise:
 
