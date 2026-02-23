@@ -4,6 +4,7 @@ import {
   readEventsFromSegments,
   readManifest,
   readSparseIndex,
+  type SparseActorIndex,
   type SparseSessionIndex,
 } from "@codaph/mirror-jsonl";
 
@@ -15,6 +16,14 @@ export interface SessionSummary {
   threadCount: number;
 }
 
+export interface ContributorSummary {
+  actorId: string;
+  from: string;
+  to: string;
+  eventCount: number;
+  sessionCount: number;
+}
+
 function filterEvents(events: CapturedEventEnvelope[], filter: TimelineFilter): CapturedEventEnvelope[] {
   return events
     .filter((event) => {
@@ -22,6 +31,9 @@ function filterEvents(events: CapturedEventEnvelope[], filter: TimelineFilter): 
         return false;
       }
       if (filter.threadId && event.threadId !== filter.threadId) {
+        return false;
+      }
+      if (filter.actorId && event.actorId !== filter.actorId) {
         return false;
       }
       if (filter.from && event.ts < filter.from) {
@@ -56,6 +68,33 @@ export class QueryService {
 
     // Show sessions by last activity time so long-running sessions stay visible.
     return out.sort((a, b) => b.to.localeCompare(a.to));
+  }
+
+  async listContributors(repoId: string, sessionId?: string): Promise<ContributorSummary[]> {
+    const sparse = await readSparseIndex(this.rootDir, repoId);
+    const out: ContributorSummary[] = [];
+    const actors = sparse.actors ?? {};
+
+    for (const [actorId, data] of Object.entries(actors)) {
+      const actor = data as SparseActorIndex;
+      if (sessionId && !(actor.sessions ?? []).includes(sessionId)) {
+        continue;
+      }
+      out.push({
+        actorId,
+        from: actor.from,
+        to: actor.to,
+        eventCount: actor.eventCount,
+        sessionCount: (actor.sessions ?? []).length,
+      });
+    }
+
+    return out.sort((a, b) => {
+      if (a.eventCount !== b.eventCount) {
+        return b.eventCount - a.eventCount;
+      }
+      return b.to.localeCompare(a.to);
+    });
   }
 
   async getTimeline(filter: TimelineFilter): Promise<CapturedEventEnvelope[]> {

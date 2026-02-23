@@ -50,6 +50,8 @@ export interface CodexHistorySyncProgress {
 export interface SyncCodexHistoryOptions {
   projectPath: string;
   pipeline: IngestPipeline;
+  repoId?: string;
+  actorId?: string | null;
   codexSessionsRoot?: string;
   mirrorRoot?: string;
   onProgress?: (progress: CodexHistorySyncProgress) => void;
@@ -544,8 +546,9 @@ async function writeJson(path: string, data: unknown): Promise<void> {
 
 export async function syncCodexHistory(options: SyncCodexHistoryOptions): Promise<CodexHistorySyncSummary> {
   const normalizedProject = normalizeProjectPath(options.projectPath);
-  const repoId = repoIdFromPath(normalizedProject);
+  const repoId = options.repoId ?? repoIdFromPath(normalizedProject);
   const mirrorRoot = resolve(options.mirrorRoot ?? join(normalizedProject, ".codaph"));
+  const actorId = options.actorId ?? null;
   const sessionsRoot = resolve(options.codexSessionsRoot ?? getCodexSessionsRoot());
 
   const statePath = getHistorySyncStatePath(normalizedProject, mirrorRoot);
@@ -692,6 +695,7 @@ export async function syncCodexHistory(options: SyncCodexHistoryOptions): Promis
         await options.pipeline.ingest(event.eventType, event.payload, {
           source: "codex_exec",
           repoId,
+          actorId,
           sessionId,
           threadId: sessionId,
           sequence,

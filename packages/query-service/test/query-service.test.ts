@@ -16,6 +16,7 @@ describe("query-service", () => {
       eventId: "e1",
       source: "codex_exec",
       repoId: "repo-1",
+      actorId: "anil",
       sessionId: "session-1",
       threadId: "thread-1",
       ts: "2026-02-21T20:10:05Z",
@@ -37,6 +38,10 @@ describe("query-service", () => {
 
     const timeline = await query.getTimeline({ repoId: "repo-1", sessionId: "session-1" });
     expect(timeline).toHaveLength(1);
+    const actorTimeline = await query.getTimeline({ repoId: "repo-1", sessionId: "session-1", actorId: "anil" });
+    expect(actorTimeline).toHaveLength(1);
+    const contributors = await query.listContributors("repo-1", "session-1");
+    expect(contributors[0]?.actorId).toBe("anil");
 
     const diffs = await query.getDiffSummary("repo-1", "session-1");
     expect(diffs[0]?.path).toBe("src/a.ts");

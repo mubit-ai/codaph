@@ -13,6 +13,7 @@ describe("memory-mubit", () => {
 
   it("writes control ingest payloads with idempotency key", async () => {
     const captures: Array<Record<string, unknown>> = [];
+    const activities: Array<Record<string, unknown>> = [];
     const engine = new MubitMemoryEngine({
       client: {
         control: {
@@ -22,6 +23,10 @@ describe("memory-mubit", () => {
           },
           setVariable: async () => ({ success: true }),
           query: async () => ({ final_answer: "ok" }),
+          appendActivity: async (payload?: Record<string, unknown>) => {
+            activities.push(payload ?? {});
+            return { success: true };
+          },
         },
       },
     });
@@ -30,6 +35,7 @@ describe("memory-mubit", () => {
       eventId: "evt-123",
       source: "codex_exec",
       repoId: "repo-abc",
+      actorId: "anil",
       sessionId: "session-def",
       threadId: "thread-1",
       ts: "2026-02-23T09:00:00.000Z",
@@ -44,6 +50,8 @@ describe("memory-mubit", () => {
     expect(captures).toHaveLength(1);
     expect(captures[0].idempotency_key).toBe("evt-123");
     expect(captures[0].run_id).toBe("codaph:repo-abc:session-def");
+    expect(activities).toHaveLength(1);
+    expect(activities[0].run_id).toBe("codaph:repo-abc:session-def");
   });
 
   it("supports shared project scope and actor metadata", async () => {
@@ -60,6 +68,7 @@ describe("memory-mubit", () => {
           },
           setVariable: async () => ({ success: true }),
           query: async () => ({ final_answer: "ok" }),
+          appendActivity: async () => ({ success: true }),
         },
       },
     });
@@ -68,6 +77,7 @@ describe("memory-mubit", () => {
       eventId: "evt-456",
       source: "codex_exec",
       repoId: "local-repo-id",
+      actorId: null,
       sessionId: "session-xyz",
       threadId: "thread-1",
       ts: "2026-02-23T09:00:00.000Z",

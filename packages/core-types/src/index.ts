@@ -14,6 +14,7 @@ export interface CapturedEventEnvelope {
   eventId: string;
   source: AgentSource;
   repoId: string;
+  actorId: string | null;
   sessionId: string;
   threadId: string | null;
   ts: string;
@@ -23,8 +24,10 @@ export interface CapturedEventEnvelope {
 }
 
 export interface CreateCapturedEventInput {
+  eventId?: string;
   source: AgentSource;
   repoId: string;
+  actorId?: string | null;
   sessionId: string;
   threadId: string | null;
   ts: string;
@@ -37,6 +40,7 @@ export interface CreateCapturedEventInput {
 export interface AdapterRunOptions {
   prompt: string;
   cwd: string;
+  repoId?: string;
   model?: string;
   resumeThreadId?: string;
 }
@@ -58,6 +62,7 @@ export interface MirrorAppendResult {
   segment: string;
   offset: number;
   checksum: string;
+  deduplicated?: boolean;
 }
 
 export interface MirrorAppender {
@@ -81,6 +86,7 @@ export interface TimelineFilter {
   repoId: string;
   sessionId?: string;
   threadId?: string;
+  actorId?: string;
   from?: string;
   to?: string;
   itemType?: string;
@@ -116,18 +122,26 @@ export function createEventId(input: {
 }
 
 export function createCapturedEvent(input: CreateCapturedEventInput): CapturedEventEnvelope {
-  const eventId = createEventId({
-    source: input.source,
-    threadId: input.threadId,
-    sequence: input.sequence,
-    eventType: input.eventType,
-    ts: input.ts,
-  });
+  const actorId =
+    typeof input.actorId === "string" && input.actorId.trim().length > 0
+      ? input.actorId.trim()
+      : null;
+  const eventId =
+    typeof input.eventId === "string" && input.eventId.trim().length > 0
+      ? input.eventId.trim()
+      : createEventId({
+        source: input.source,
+        threadId: input.threadId,
+        sequence: input.sequence,
+        eventType: input.eventType,
+        ts: input.ts,
+      });
 
   return {
     eventId,
     source: input.source,
     repoId: input.repoId,
+    actorId,
     sessionId: input.sessionId,
     threadId: input.threadId,
     ts: input.ts,

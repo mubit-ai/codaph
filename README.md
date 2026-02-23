@@ -35,7 +35,8 @@ TUI flow:
 1. Add or select a project folder.
 2. Codaph auto-detects GitHub `owner/repo` from `origin` and uses it as shared MuBit project id (if not explicitly set).
 3. Sync Codex history from `~/.codex/sessions` into Codaph mirror + MuBit.
-4. Inspect prompts, thoughts, assistant output, and file changes by session.
+4. Optionally sync shared remote MuBit timeline back into local mirror (`r`) to pull collaborator activity.
+5. Inspect prompts, thoughts, assistant output, and file changes by session.
 5. Query MuBit semantic memory for the active session.
 
 TUI keyboard map:
@@ -44,8 +45,8 @@ TUI keyboard map:
 - `o`: settings overlay (set project name/id, actor id, API keys, run scope)
 - `p`: switch project
 - `a`: add/switch project path
-- Browse view: `up/down` navigate sessions, `enter` inspect, `s` sync
-- Inspect view: `up/down` prompt navigation, `tab` cycle pane focus, `d` full diff overlay, `m` MuBit chat, `left` or `esc` back
+- Browse view: `up/down` navigate sessions, `enter` inspect, `s` sync local codex, `r` sync remote MuBit
+- Inspect view: `up/down` prompt navigation, `tab` cycle pane focus, `d` full diff overlay, `m` MuBit chat, `f` actor filter, `c` contributors overlay, `left` or `esc` back
 - Chat panel: type message, `enter` send, `esc` close chat
 
 ## CLI Commands (Primary)
@@ -56,6 +57,8 @@ bun run cli doctor
 
 # import normal Codex app/CLI usage into .codaph and MuBit
 bun run cli sync --cwd /absolute/project/path
+# import shared MuBit timeline into local mirror (for collaborator visibility)
+bun run cli sync remote --cwd /absolute/project/path
 # optional local-only mode (no remote writes)
 bun run cli sync --cwd /absolute/project/path --local-only
 
@@ -95,8 +98,11 @@ Team-shared MuBit setup:
 2. Everyone uses the same `CODAPH_PROJECT_ID` (or `--mubit-project-id`) for that repo.
    If unset, Codaph auto-detects from git remote `origin` as `owner/repo`.
 3. Use `--mubit-run-scope project` to share one project-level memory space across contributors/sessions.
+   Run id format in this mode is `codaph:<owner/repo>`.
+   In session mode it is `codaph:<owner/repo>:<sessionId>`.
 4. Set per-user `CODAPH_ACTOR_ID` (or `--mubit-actor-id`) so contributor identity is preserved in metadata.
    If unset, Codaph auto-detects via `gh api user`, then git config, then shell user.
+5. Use `bun run cli sync remote --cwd <project>` (or `r` in TUI) to import remote activity into local timeline and render per-actor prompts/thoughts/diffs.
 
 ## Desktop App (Kept, Secondary)
 

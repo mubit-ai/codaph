@@ -55,7 +55,7 @@ export class CodexExecAdapter implements CodexAdapter {
     onEvent?: (event: CapturedEventEnvelope) => Promise<void> | void,
   ): Promise<AdapterRunResult> {
     const sessionId = randomUUID();
-    const repoId = repoIdFromPath(options.cwd);
+    const repoId = options.repoId ?? repoIdFromPath(options.cwd);
     const args = buildArgs(options);
 
     let sequence = 0;

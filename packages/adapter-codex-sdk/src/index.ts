@@ -75,7 +75,7 @@ export class CodexSdkAdapter implements CodexAdapter {
     onEvent?: (event: CapturedEventEnvelope) => Promise<void> | void,
   ): Promise<AdapterRunResult> {
     const sessionId = randomUUID();
-    const repoId = repoIdFromPath(options.cwd);
+    const repoId = options.repoId ?? repoIdFromPath(options.cwd);
     let sequence = 0;
     let threadId: string | null = options.resumeThreadId ?? null;
     let finalResponse: string | null = null;

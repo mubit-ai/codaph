@@ -16,6 +16,7 @@ import {
   type CodexHistorySyncProgress,
   type CodexHistorySyncSummary,
 } from "./codex-history-sync";
+import { syncMubitRemoteActivity } from "./mubit-remote-sync";
 import {
   addProjectToRegistry,
   loadRegistry,
@@ -103,6 +104,7 @@ function help(): string {
     "",
     "History Import (from ~/.codex/sessions):",
     "  codaph sync [--cwd <path>] [--json] [--no-mubit|--local-only]",
+    "  codaph sync remote [--cwd <path>] [--limit <n>] [--json]",
     "",
     "Read / Inspect:",
     "  codaph sessions list [--cwd <path>]",
@@ -227,6 +229,11 @@ function resolveProjectLabel(flags: Flags, cwd: string, settings?: CodaphSetting
   return basename(cwd) || cwd;
 }
 
+function resolveRepoIdForProject(flags: Flags, cwd: string, settings?: CodaphSettings): string {
+  const loaded = loadSettingsOrDefault(settings);
+  return resolveMubitProjectId(flags, cwd, loaded) ?? repoIdFromPath(cwd);
+}
+
 function resolveOpenAiApiKey(flags: Flags, settings?: CodaphSettings): string | null {
   const loaded = loadSettingsOrDefault(settings);
   const raw =
@@ -323,7 +330,7 @@ async function doctor(rest: string[]): Promise<void> {
   const projectId = resolveMubitProjectId(flags, cwd, settings);
   const actorId = resolveMubitActorId(flags, cwd, settings);
   const runScope = resolveMubitRunScope(flags, cwd, settings);
-  const repoId = repoIdFromPath(cwd);
+  const repoId = resolveRepoIdForProject(flags, cwd, settings);
 
   console.log(`cwd: ${cwd}`);
   console.log(`repoId(local): ${repoId}`);
@@ -353,13 +360,16 @@ function createPipeline(
   flags: Flags,
   settings?: CodaphSettings,
 ): { pipeline: IngestPipeline; memory: MubitMemoryEngine | null } {
+  const loaded = loadSettingsOrDefault(settings);
   const mirrorRoot = resolve(cwd, ".codaph");
   const mirror = new JsonlMirror(mirrorRoot);
-  const memory = createMubitMemory(flags, cwd, settings);
+  const memory = createMubitMemory(flags, cwd, loaded);
   const memoryWriteTimeoutMs = resolveMubitWriteTimeoutMs(flags);
+  const defaultActorId = resolveMubitActorId(flags, cwd, loaded);
   const pipeline = new IngestPipeline(mirror, {
     memoryEngine: memory ?? undefined,
     memoryWriteTimeoutMs,
+    defaultActorId,
     onMemoryError: (error) => {
       const message = error instanceof Error ? error.message : String(error);
       console.warn(`MuBit write failed: ${message}`);
@@ -425,11 +435,13 @@ async function runCapture(command: CaptureMode, rest: string[]): Promise<void> {
 
   const cwd = resolve(getStringFlag(flags, "cwd") ?? process.cwd());
   const settings = loadCodaphSettings();
+  const repoId = resolveRepoIdForProject(flags, cwd, settings);
   const { pipeline, memory } = createPipeline(cwd, flags, settings);
 
   const options = {
     prompt,
     cwd,
+    repoId,
     model: getStringFlag(flags, "model"),
     resumeThreadId: getStringFlag(flags, "resume-thread"),
   };
@@ -457,7 +469,8 @@ async function runCapture(command: CaptureMode, rest: string[]): Promise<void> {
 async function listSessions(rest: string[]): Promise<void> {
   const { flags } = parseArgs(rest);
   const cwd = resolve(getStringFlag(flags, "cwd") ?? process.cwd());
-  const repoId = repoIdFromPath(cwd);
+  const settings = loadCodaphSettings();
+  const repoId = resolveRepoIdForProject(flags, cwd, settings);
   const query = new QueryService(resolve(cwd, ".codaph"));
   const sessions = await query.listSessions(repoId);
 
@@ -479,7 +492,8 @@ async function timeline(rest: string[]): Promise<void> {
   }
 
   const cwd = resolve(getStringFlag(flags, "cwd") ?? process.cwd());
-  const repoId = repoIdFromPath(cwd);
+  const settings = loadCodaphSettings();
+  const repoId = resolveRepoIdForProject(flags, cwd, settings);
   const query = new QueryService(resolve(cwd, ".codaph"));
   const events = await query.getTimeline({ repoId, sessionId });
 
@@ -502,7 +516,8 @@ async function diff(rest: string[]): Promise<void> {
   }
 
   const cwd = resolve(getStringFlag(flags, "cwd") ?? process.cwd());
-  const repoId = repoIdFromPath(cwd);
+  const settings = loadCodaphSettings();
+  const repoId = resolveRepoIdForProject(flags, cwd, settings);
   const pathFilter = getStringFlag(flags, "path");
 
   const query = new QueryService(resolve(cwd, ".codaph"));
@@ -532,11 +547,15 @@ async function syncHistory(rest: string[]): Promise<void> {
   }
 
   const settings = loadCodaphSettings();
+  const repoId = resolveRepoIdForProject(syncFlags, cwd, settings);
+  const actorId = resolveMubitActorId(syncFlags, cwd, settings);
   const { pipeline, memory } = createPipeline(cwd, syncFlags, settings);
   const reporter = createSyncProgressReporter("Syncing Codex history");
   const summary = await syncCodexHistory({
     projectPath: cwd,
     pipeline,
+    repoId,
+    actorId,
     onProgress: flags.json === true ? undefined : reporter.onProgress,
   }).finally(() => {
     if (flags.json !== true) {
@@ -558,6 +577,59 @@ async function syncHistory(rest: string[]): Promise<void> {
   } else {
     console.log("MuBit ingest during sync: disabled (--no-mubit or --local-only)");
   }
+}
+
+async function syncRemote(rest: string[]): Promise<void> {
+  const { flags } = parseArgs(rest);
+  const cwd = resolve(getStringFlag(flags, "cwd") ?? process.cwd());
+  const settings = loadCodaphSettings();
+  const repoId = resolveRepoIdForProject(flags, cwd, settings);
+  const projectId = resolveMubitProjectId(flags, cwd, settings) ?? repoId;
+  const actorId = resolveMubitActorId(flags, cwd, settings);
+  const engine = createMubitMemory(flags, cwd, settings);
+  if (!engine || !engine.isEnabled()) {
+    throw new Error("MuBit is disabled. Set MUBIT_API_KEY (or MUBIT_APIKEY) and use --mubit.");
+  }
+
+  const limitRaw = getStringFlag(flags, "limit");
+  const timelineLimit = limitRaw ? Number.parseInt(limitRaw, 10) : 1200;
+  const mirror = new JsonlMirror(resolve(cwd, ".codaph"));
+  const runId = mubitRunIdForProject(projectId);
+  const reporter = createSyncProgressReporter("Syncing MuBit remote");
+
+  const summary = await syncMubitRemoteActivity({
+    mirror,
+    memory: engine,
+    runId,
+    repoId,
+    fallbackActorId: actorId,
+    timelineLimit: Number.isFinite(timelineLimit) && timelineLimit > 0 ? timelineLimit : 1200,
+    onProgress: flags.json === true
+      ? undefined
+      : (progress) => {
+        reporter.onProgress({
+          scannedFiles: progress.total,
+          matchedFiles: progress.current,
+          importedEvents: progress.imported,
+          currentFile: `dedup=${progress.deduplicated} skipped=${progress.skipped}`,
+          currentLine: progress.current,
+          currentSessionId: null,
+        });
+      },
+  }).finally(() => {
+    if (flags.json !== true) {
+      reporter.finish();
+    }
+  });
+
+  if (flags.json === true) {
+    console.log(JSON.stringify(summary, null, 2));
+    return;
+  }
+
+  console.log(`Remote sync run: ${summary.runId}`);
+  console.log(`timeline=${summary.timelineEvents} imported=${summary.imported} deduplicated=${summary.deduplicated} skipped=${summary.skipped}`);
+  console.log(`sessions=${summary.sessions} contributors=${summary.contributors}${summary.lastTs ? ` last=${summary.lastTs}` : ""}`);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -720,16 +792,16 @@ function promptPreview(text: string, maxChars = 180): string {
 
 function printSessionDetails(events: CapturedEventEnvelope[]): void {
   const prompts = events
-    .map((event) => ({ ts: event.ts, text: getPromptText(event) }))
-    .filter((row): row is { ts: string; text: string } => !!row.text)
+    .map((event) => ({ ts: event.ts, actor: actorLabel(event.actorId), text: getPromptText(event) }))
+    .filter((row): row is { ts: string; actor: string; text: string } => !!row.text)
     .slice(-5);
   const thoughts = events
-    .map((event) => ({ ts: event.ts, text: getThoughtText(event) }))
-    .filter((row): row is { ts: string; text: string } => !!row.text)
+    .map((event) => ({ ts: event.ts, actor: actorLabel(event.actorId), text: getThoughtText(event) }))
+    .filter((row): row is { ts: string; actor: string; text: string } => !!row.text)
     .slice(-5);
   const outputs = events
-    .map((event) => ({ ts: event.ts, text: getAssistantText(event) }))
-    .filter((row): row is { ts: string; text: string } => !!row.text)
+    .map((event) => ({ ts: event.ts, actor: actorLabel(event.actorId), text: getAssistantText(event) }))
+    .filter((row): row is { ts: string; actor: string; text: string } => !!row.text)
     .slice(-5);
   const changes = events
     .flatMap((event) => getFileChangeList(event).map((change) => ({ ts: event.ts, ...change })))
@@ -740,7 +812,7 @@ function printSessionDetails(events: CapturedEventEnvelope[]): void {
     console.log("  (none)");
   }
   for (const row of prompts) {
-    console.log(`  - ${row.ts}: ${toCompactLine(row.text)}`);
+    console.log(`  - ${row.ts} [${row.actor}]: ${toCompactLine(row.text)}`);
   }
 
   console.log("\nThoughts");
@@ -748,7 +820,7 @@ function printSessionDetails(events: CapturedEventEnvelope[]): void {
     console.log("  (none)");
   }
   for (const row of thoughts) {
-    console.log(`  - ${row.ts}: ${toCompactLine(row.text)}`);
+    console.log(`  - ${row.ts} [${row.actor}]: ${toCompactLine(row.text)}`);
   }
 
   console.log("\nAssistant Output");
@@ -756,7 +828,7 @@ function printSessionDetails(events: CapturedEventEnvelope[]): void {
     console.log("  (none)");
   }
   for (const row of outputs) {
-    console.log(`  - ${row.ts}: ${toCompactLine(row.text)}`);
+    console.log(`  - ${row.ts} [${row.actor}]: ${toCompactLine(row.text)}`);
   }
 
   console.log("\nFile Changes");
@@ -776,7 +848,8 @@ async function inspect(rest: string[]): Promise<void> {
   }
 
   const cwd = resolve(getStringFlag(flags, "cwd") ?? process.cwd());
-  const repoId = repoIdFromPath(cwd);
+  const settings = loadCodaphSettings();
+  const repoId = resolveRepoIdForProject(flags, cwd, settings);
   const query = new QueryService(resolve(cwd, ".codaph"));
 
   const events = await query.getTimeline({ repoId, sessionId });
@@ -1078,7 +1151,7 @@ async function mubitQuery(rest: string[]): Promise<void> {
 
   const cwd = resolve(getStringFlag(flags, "cwd") ?? process.cwd());
   const settings = loadCodaphSettings();
-  const repoId = repoIdFromPath(cwd);
+  const repoId = resolveRepoIdForProject(flags, cwd, settings);
   const engine = createMubitMemory(flags, cwd, settings);
   if (!engine || !engine.isEnabled()) {
     throw new Error("MuBit is disabled. Set MUBIT_API_KEY (or MUBIT_APIKEY) and use --mubit.");
@@ -1131,7 +1204,7 @@ async function mubitBackfill(rest: string[]): Promise<void> {
     throw new Error("MuBit is disabled. Set MUBIT_API_KEY (or MUBIT_APIKEY) and use --mubit.");
   }
 
-  const repoId = repoIdFromPath(cwd);
+  const repoId = resolveRepoIdForProject(flags, cwd, settings);
   const query = new QueryService(resolve(cwd, ".codaph"));
   const sessions = sessionId
     ? [{ sessionId, from: "", to: "", eventCount: 0, threadCount: 0 }]
@@ -1231,6 +1304,7 @@ interface FileStatRow {
 interface ThoughtSlice {
   id: number;
   ts: string;
+  actorId: string | null;
   text: string;
   diffLines: string[];
 }
@@ -1238,6 +1312,7 @@ interface ThoughtSlice {
 interface PromptSlice {
   id: number;
   ts: string;
+  actorId: string | null;
   prompt: string;
   thoughts: string[];
   thoughtSlices: ThoughtSlice[];
@@ -1246,10 +1321,28 @@ interface PromptSlice {
   diffLines: string[];
 }
 
+interface ContributorPromptTrace {
+  promptId: number;
+  ts: string;
+  prompt: string;
+  thoughtCount: number;
+  files: string[];
+}
+
+interface ContributorSlice {
+  actorId: string;
+  promptCount: number;
+  thoughtCount: number;
+  fileCount: number;
+  lastTs: string;
+  traces: ContributorPromptTrace[];
+}
+
 interface SessionAnalysis {
   sessionId: string;
   prompts: PromptSlice[];
   files: FileStatRow[];
+  contributors: ContributorSlice[];
   tokenEstimate: number;
 }
 
@@ -1311,8 +1404,11 @@ interface TuiState {
   fullDiffScroll: number;
   helpOpen: boolean;
   settingsOpen: boolean;
+  contributorsOpen: boolean;
+  selectedContributorIndex: number;
   busy: boolean;
   statusLine: string;
+  actorFilter: string | null;
   inputMode: InputMode;
   inputBuffer: string;
   chatBySession: Map<string, ChatMessage[]>;
@@ -1642,6 +1738,32 @@ function toSortedFileStats(stats: Map<string, FileStatRow>): FileStatRow[] {
   });
 }
 
+function normalizeActorId(value: string | null | undefined): string | null {
+  if (!value) {
+    return null;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function actorLabel(actorId: string | null | undefined): string {
+  return normalizeActorId(actorId) ?? "unknown";
+}
+
+function promptIndicesForActor(analysis: SessionAnalysis, actorFilter: string | null): number[] {
+  if (!actorFilter) {
+    return analysis.prompts.map((_, index) => index);
+  }
+  const filtered: number[] = [];
+  for (let i = 0; i < analysis.prompts.length; i += 1) {
+    const prompt = analysis.prompts[i] as PromptSlice;
+    if (actorLabel(prompt.actorId) === actorFilter) {
+      filtered.push(i);
+    }
+  }
+  return filtered.length > 0 ? filtered : analysis.prompts.map((_, index) => index);
+}
+
 function extractPatchDiffLines(event: CapturedEventEnvelope): string[] {
   const item = getItem(event);
   const itemType = getItemType(event);
@@ -1749,6 +1871,7 @@ function buildSessionAnalysis(sessionId: string, events: CapturedEventEnvelope[]
       const created: PromptSlice = {
         id: nextPromptId,
         ts: events[0]?.ts ?? new Date().toISOString(),
+        actorId: null,
         prompt: "(No prompt captured)",
         thoughts: [],
         thoughtSlices: [],
@@ -1764,11 +1887,13 @@ function buildSessionAnalysis(sessionId: string, events: CapturedEventEnvelope[]
   };
 
   for (const event of events) {
+    const eventActor = normalizeActorId(event.actorId);
     const promptText = getPromptText(event);
     if (promptText) {
       const created: PromptSlice = {
         id: nextPromptId,
         ts: event.ts,
+        actorId: eventActor,
         prompt: promptText,
         thoughts: [],
         thoughtSlices: [],
@@ -1791,6 +1916,7 @@ function buildSessionAnalysis(sessionId: string, events: CapturedEventEnvelope[]
       current.thoughtSlices.push({
         id: current.thoughtSlices.length + 1,
         ts: event.ts,
+        actorId: eventActor,
         text: thought,
         diffLines: pending.slice(0, 220),
       });
@@ -1839,6 +1965,7 @@ function buildSessionAnalysis(sessionId: string, events: CapturedEventEnvelope[]
     const created: PromptSlice = {
       id: 1,
       ts: events[0]?.ts ?? new Date().toISOString(),
+      actorId: null,
       prompt: "(No prompt captured)",
       thoughts: [],
       thoughtSlices: [],
@@ -1861,6 +1988,7 @@ function buildSessionAnalysis(sessionId: string, events: CapturedEventEnvelope[]
         prompt.thoughtSlices.push({
           id: 1,
           ts: prompt.ts,
+          actorId: prompt.actorId,
           text: "(No exposed reasoning text)",
           diffLines: pending.slice(0, 220),
         });
@@ -1872,17 +2000,75 @@ function buildSessionAnalysis(sessionId: string, events: CapturedEventEnvelope[]
     }
   }
 
+  const contributorMap = new Map<string, ContributorSlice>();
+  const ensureContributor = (actor: string): ContributorSlice => {
+    const existing = contributorMap.get(actor);
+    if (existing) {
+      return existing;
+    }
+    const created: ContributorSlice = {
+      actorId: actor,
+      promptCount: 0,
+      thoughtCount: 0,
+      fileCount: 0,
+      lastTs: "",
+      traces: [],
+    };
+    contributorMap.set(actor, created);
+    return created;
+  };
+
+  for (const prompt of prompts) {
+    const actor = actorLabel(prompt.actorId);
+    const contributor = ensureContributor(actor);
+    const fileStats = toSortedFileStats(prompt.files);
+    const fileNames = fileStats.map((file) => file.path);
+    contributor.promptCount += 1;
+    contributor.thoughtCount += prompt.thoughtSlices.length;
+    contributor.fileCount += fileNames.length;
+    if (!contributor.lastTs || prompt.ts > contributor.lastTs) {
+      contributor.lastTs = prompt.ts;
+    }
+    contributor.traces.push({
+      promptId: prompt.id,
+      ts: prompt.ts,
+      prompt: prompt.prompt,
+      thoughtCount: prompt.thoughtSlices.length,
+      files: fileNames,
+    });
+  }
+
+  const contributors = [...contributorMap.values()].sort((a, b) => {
+    if (a.promptCount !== b.promptCount) {
+      return b.promptCount - a.promptCount;
+    }
+    return b.lastTs.localeCompare(a.lastTs);
+  });
+
   return {
     sessionId,
     prompts,
     files: toSortedFileStats(sessionFiles),
+    contributors,
     tokenEstimate: Math.max(0, Math.round(tokenChars / 4)),
   };
 }
 
-function selectedPromptFromAnalysis(analysis: SessionAnalysis, selectedPromptIndex: number): PromptSlice {
-  const safeIndex = Math.max(0, Math.min(selectedPromptIndex, analysis.prompts.length - 1));
-  return analysis.prompts[safeIndex] as PromptSlice;
+function selectedPromptFromAnalysis(
+  analysis: SessionAnalysis,
+  selectedPromptIndex: number,
+  actorFilter: string | null,
+): { prompt: PromptSlice; index: number; indices: number[] } {
+  const indices = promptIndicesForActor(analysis, actorFilter);
+  const inRange = indices.includes(selectedPromptIndex)
+    ? selectedPromptIndex
+    : (indices[0] ?? 0);
+  const safePrompt = analysis.prompts[inRange] ?? analysis.prompts[0];
+  return {
+    prompt: safePrompt as PromptSlice,
+    index: inRange,
+    indices,
+  };
 }
 
 function thoughtEntriesForPrompt(prompt: PromptSlice): ThoughtSlice[] {
@@ -1894,6 +2080,7 @@ function thoughtEntriesForPrompt(prompt: PromptSlice): ThoughtSlice[] {
     return prompt.outputs.map((output, index) => ({
       id: index + 1,
       ts: prompt.ts,
+      actorId: prompt.actorId,
       text: output,
       diffLines: index === prompt.outputs.length - 1 ? prompt.diffLines : [],
     }));
@@ -1902,6 +2089,7 @@ function thoughtEntriesForPrompt(prompt: PromptSlice): ThoughtSlice[] {
   return [{
     id: 1,
     ts: prompt.ts,
+    actorId: prompt.actorId,
     text: "(No exposed reasoning text)",
     diffLines: prompt.diffLines,
   }];
@@ -2216,7 +2404,7 @@ function renderBrowseView(
   }
 
   const sessionsBox = boxLines("Sessions", width, tableHeight, sessionLines, true);
-  const footer = "[up/down] navigate   [enter] inspect   [s] sync   [p] switch project   [a] add project   [o] settings   [q] quit";
+  const footer = "[up/down] navigate   [enter] inspect   [s] sync local   [r] sync remote   [p] switch project   [a] add project   [o] settings   [q] quit";
   return [header, "", ...sessionsBox, "", paint(clipPlain(footer, width), TUI_COLORS.dim)].join("\n");
 }
 
@@ -2228,7 +2416,10 @@ function renderDiffOverlay(
   width: number,
   height: number,
 ): string {
-  const prompt = selectedPromptFromAnalysis(analysis, state.selectedPromptIndex);
+  const promptSelection = selectedPromptFromAnalysis(analysis, state.selectedPromptIndex, state.actorFilter);
+  const prompt = promptSelection.prompt;
+  state.selectedPromptIndex = promptSelection.index;
+  const filteredPromptIndices = promptSelection.indices;
   const thoughtSelection = selectedThoughtFromPrompt(prompt, state.selectedThoughtIndex);
   let rawDiffLines = thoughtSelection.selected.diffLines.length > 0
     ? thoughtSelection.selected.diffLines
@@ -2293,7 +2484,10 @@ function renderInspectView(
     return renderDiffOverlay(state, projectLabel, selectedSession, analysis, width, height);
   }
 
-  const prompt = selectedPromptFromAnalysis(analysis, state.selectedPromptIndex);
+  const promptSelection = selectedPromptFromAnalysis(analysis, state.selectedPromptIndex, state.actorFilter);
+  const prompt = promptSelection.prompt;
+  state.selectedPromptIndex = promptSelection.index;
+  const filteredPromptIndices = promptSelection.indices;
   const splitMode = width >= 104;
   const threePaneMode = width >= 126;
   const chatHeight = state.chatOpen ? Math.max(10, Math.floor(height * 0.32)) : 0;
@@ -2301,7 +2495,7 @@ function renderInspectView(
 
   const topHeader = headerLine(
     `${paint("codaph", TUI_COLORS.brand)}  >  ${projectLabel}  >  Session ${selectedSession.sessionId.slice(0, 8)} - ${formatDateCell(selectedSession.to)}`,
-    `${paint(mubitEnabled ? "MuBit:on" : "MuBit:off", mubitEnabled ? TUI_COLORS.cyan : TUI_COLORS.yellow)}   ${paint("[left] back  [?] help", TUI_COLORS.dim)}`,
+    `${paint(mubitEnabled ? "MuBit:on" : "MuBit:off", mubitEnabled ? TUI_COLORS.cyan : TUI_COLORS.yellow)}   ${paint(`[f] actor:${state.actorFilter ?? "all"}  [c] contributors  [left] back  [?] help`, TUI_COLORS.dim)}`,
     width,
   );
 
@@ -2316,13 +2510,15 @@ function renderInspectView(
   const buildPromptLines = (paneWidth: number, paneHeight: number): PaneLine[] => {
     const lines: PaneLine[] = [];
     const promptBody = Math.max(1, paneHeight - 2);
-    const promptStart = windowStart(analysis.prompts.length, state.selectedPromptIndex, promptBody);
-    const visiblePrompts = analysis.prompts.slice(promptStart, promptStart + promptBody);
-    for (let i = 0; i < visiblePrompts.length; i += 1) {
-      const absoluteIndex = promptStart + i;
-      const row = visiblePrompts[i] as PromptSlice;
+    const selectedFilteredIndex = Math.max(0, filteredPromptIndices.indexOf(state.selectedPromptIndex));
+    const promptStart = windowStart(filteredPromptIndices.length, selectedFilteredIndex, promptBody);
+    const visibleIndices = filteredPromptIndices.slice(promptStart, promptStart + promptBody);
+    for (let i = 0; i < visibleIndices.length; i += 1) {
+      const absoluteIndex = visibleIndices[i] as number;
+      const row = analysis.prompts[absoluteIndex] as PromptSlice;
+      const actorBadge = actorLabel(row.actorId);
       lines.push({
-        text: `${absoluteIndex === state.selectedPromptIndex ? ">" : " "} ${row.id.toString().padStart(2, " ")}  ${promptPreview(row.prompt, Math.max(10, paneWidth - 10))}`,
+        text: `${absoluteIndex === state.selectedPromptIndex ? ">" : " "} ${row.id.toString().padStart(2, " ")}  [${actorBadge}] ${promptPreview(row.prompt, Math.max(10, paneWidth - 18))}`,
         highlight: absoluteIndex === state.selectedPromptIndex,
       });
     }
@@ -2337,8 +2533,9 @@ function renderInspectView(
     for (let i = 0; i < visibleThoughts.length; i += 1) {
       const absoluteIndex = thoughtStart + i;
       const row = visibleThoughts[i] as ThoughtSlice;
+      const actorBadge = actorLabel(row.actorId);
       lines.push({
-        text: `${absoluteIndex === state.selectedThoughtIndex ? ">" : " "} ${row.id.toString().padStart(2, " ")}  ${promptPreview(row.text, Math.max(10, paneWidth - 10))}`,
+        text: `${absoluteIndex === state.selectedThoughtIndex ? ">" : " "} ${row.id.toString().padStart(2, " ")}  [${actorBadge}] ${promptPreview(row.text, Math.max(10, paneWidth - 18))}`,
         highlight: absoluteIndex === state.selectedThoughtIndex,
       });
     }
@@ -2401,7 +2598,13 @@ function renderInspectView(
     }
 
     const paneHeight = Math.max(8, baseHeight);
-    const promptsBox = boxLines("Prompts", leftWidth, paneHeight, buildPromptLines(leftWidth, paneHeight), state.inspectPane === "prompts");
+    const promptsBox = boxLines(
+      `Prompts (${filteredPromptIndices.length}/${analysis.prompts.length})`,
+      leftWidth,
+      paneHeight,
+      buildPromptLines(leftWidth, paneHeight),
+      state.inspectPane === "prompts",
+    );
     const thoughtsBox = boxLines(
       `Thoughts (${thoughtSelection.index + 1}/${thoughtSelection.entries.length})`,
       middleWidth,
@@ -2424,7 +2627,13 @@ function renderInspectView(
     const topHeight = Math.max(7, Math.floor(baseHeight * 0.5));
     const bottomHeight = Math.max(7, baseHeight - topHeight);
 
-    const promptsBox = boxLines("Prompts", leftWidth, topHeight, buildPromptLines(leftWidth, topHeight), state.inspectPane === "prompts");
+    const promptsBox = boxLines(
+      `Prompts (${filteredPromptIndices.length}/${analysis.prompts.length})`,
+      leftWidth,
+      topHeight,
+      buildPromptLines(leftWidth, topHeight),
+      state.inspectPane === "prompts",
+    );
     const thoughtsBox = boxLines(
       "Thoughts",
       rightWidth,
@@ -2456,7 +2665,15 @@ function renderInspectView(
     const filesHeight = Math.max(6, Math.floor(baseHeight * 0.23));
     const diffHeight = Math.max(6, baseHeight - promptsHeight - thoughtsHeight - filesHeight);
 
-    composed.push(...boxLines("Prompts", paneWidth, promptsHeight, buildPromptLines(paneWidth, promptsHeight), state.inspectPane === "prompts"));
+    composed.push(
+      ...boxLines(
+        `Prompts (${filteredPromptIndices.length}/${analysis.prompts.length})`,
+        paneWidth,
+        promptsHeight,
+        buildPromptLines(paneWidth, promptsHeight),
+        state.inspectPane === "prompts",
+      ),
+    );
     composed.push("");
     composed.push(
       ...boxLines(
@@ -2525,8 +2742,8 @@ function renderInspectView(
   const footer = state.chatOpen
     ? "[tab] focus pane   [esc] close chat   [up/down] navigate/scroll   [left] back"
     : threePaneMode
-      ? "[enter] prompt -> thoughts   [up/down] select/scroll   [tab] focus pane   [d] full diff   [m] MuBit chat   [o] settings   [left] back"
-      : "[up/down] prompts/scroll pane   [tab] focus pane   [d] full diff   [m] MuBit chat   [o] settings   [left] back";
+      ? "[enter] prompt -> thoughts   [up/down] select/scroll   [tab] focus pane   [d] full diff   [m] MuBit chat   [f] actor filter   [c] contributors   [o] settings   [left] back"
+      : "[up/down] prompts/scroll pane   [tab] focus pane   [d] full diff   [m] MuBit chat   [f] actor filter   [c] contributors   [o] settings   [left] back";
 
   composed.push("");
   composed.push(paint(clipPlain(footer, width), TUI_COLORS.dim));
@@ -2545,7 +2762,8 @@ function renderHelpOverlay(width: number, height: number): string {
     { text: "Browse", color: TUI_COLORS.muted },
     { text: "up/down navigate sessions" },
     { text: "enter   open session inspect view" },
-    { text: "s       sync Codex history" },
+    { text: "s       sync local Codex history" },
+    { text: "r       sync remote MuBit activity timeline" },
     { text: "" },
     { text: "Inspect", color: TUI_COLORS.muted },
     { text: "enter   from prompts -> focus thoughts" },
@@ -2553,6 +2771,8 @@ function renderHelpOverlay(width: number, height: number): string {
     { text: "tab     cycle pane focus" },
     { text: "d       toggle full diff overlay" },
     { text: "m       toggle MuBit chat" },
+    { text: "f       cycle actor filter" },
+    { text: "c       contributors overlay (enter to apply filter)" },
     { text: "left/esc back to browse" },
     { text: "" },
     { text: "Chat", color: TUI_COLORS.muted },
@@ -2573,6 +2793,115 @@ function renderHelpOverlay(width: number, height: number): string {
     ...padded,
     "",
     `${" ".repeat(leftPad)}${paint("[esc/?] close", TUI_COLORS.dim)}`,
+  ].join("\n");
+}
+
+function lastGitAuthorForFile(
+  projectPath: string,
+  filePath: string,
+  cache: Map<string, string | null>,
+): string | null {
+  const key = `${projectPath}::${filePath}`;
+  if (cache.has(key)) {
+    return cache.get(key) ?? null;
+  }
+  try {
+    const raw = execFileSync(
+      "git",
+      ["-C", projectPath, "log", "-1", "--format=%an", "--", filePath],
+      {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+        maxBuffer: 1024 * 1024,
+      },
+    );
+    const author = raw.trim();
+    const value = author.length > 0 ? author : null;
+    cache.set(key, value);
+    return value;
+  } catch {
+    cache.set(key, null);
+    return null;
+  }
+}
+
+function renderContributorOverlay(
+  state: TuiState,
+  analysis: SessionAnalysis,
+  width: number,
+  height: number,
+  gitAuthorCache: Map<string, string | null>,
+): string {
+  const contributors = analysis.contributors;
+  if (contributors.length === 0) {
+    return [
+      "",
+      paint("No contributors found for this session.", TUI_COLORS.muted),
+    ].join("\n");
+  }
+
+  const selected = Math.max(0, Math.min(state.selectedContributorIndex, contributors.length - 1));
+  state.selectedContributorIndex = selected;
+  const selectedContributor = contributors[selected] as ContributorSlice;
+
+  const leftLines: PaneLine[] = [];
+  for (let i = 0; i < contributors.length; i += 1) {
+    const contributor = contributors[i] as ContributorSlice;
+    leftLines.push({
+      text: `${i === selected ? ">" : " "} ${contributor.actorId}  p:${contributor.promptCount}  t:${contributor.thoughtCount}  f:${contributor.fileCount}`,
+      highlight: i === selected,
+    });
+  }
+
+  const rightLines: PaneLine[] = [
+    { text: `Actor: ${selectedContributor.actorId}` },
+    { text: `Prompts: ${selectedContributor.promptCount}  Thoughts: ${selectedContributor.thoughtCount}  Files: ${selectedContributor.fileCount}`, color: TUI_COLORS.muted },
+    { text: "" },
+  ];
+
+  for (const trace of selectedContributor.traces.slice(0, 14)) {
+    rightLines.push({
+      text: `#${trace.promptId} ${formatDateCell(trace.ts)}  ${promptPreview(trace.prompt, 60)}`,
+      color: TUI_COLORS.cyan,
+    });
+    rightLines.push({
+      text: `  thoughts:${trace.thoughtCount}  files:${trace.files.length}`,
+      color: TUI_COLORS.muted,
+    });
+    if (trace.files.length > 0) {
+      rightLines.push({
+        text: `  files: ${trace.files.slice(0, 4).join(", ")}`,
+      });
+      const authors = trace.files
+        .slice(0, 4)
+        .map((file) => lastGitAuthorForFile(state.projectPath, file, gitAuthorCache))
+        .filter((author): author is string => typeof author === "string" && author.length > 0);
+      if (authors.length > 0) {
+        rightLines.push({
+          text: `  git: ${[...new Set(authors)].join(", ")}`,
+          color: TUI_COLORS.muted,
+        });
+      }
+    }
+    rightLines.push({ text: "" });
+  }
+
+  const overlayWidth = Math.max(84, Math.min(width - 4, 146));
+  const overlayHeight = Math.max(16, Math.min(height - 4, 36));
+  const leftWidth = Math.max(28, Math.floor(overlayWidth * 0.36));
+  const rightWidth = Math.max(36, overlayWidth - leftWidth - 2);
+
+  const leftBox = boxLines("Contributors", leftWidth, overlayHeight, leftLines, true);
+  const rightBox = boxLines("Trace (prompt -> thoughts -> files)", rightWidth, overlayHeight, rightLines, true);
+  const joined = joinColumns(leftBox, rightBox);
+
+  const leftPad = Math.max(0, Math.floor((width - overlayWidth) / 2));
+  const topPad = Math.max(0, Math.floor((height - overlayHeight) / 2) - 1);
+  return [
+    ...Array.from({ length: topPad }, () => ""),
+    ...joined.map((line) => `${" ".repeat(leftPad)}${line}`),
+    "",
+    `${" ".repeat(leftPad)}${paint("[up/down] select contributor  [enter] filter prompts  [esc/c] close", TUI_COLORS.dim)}`,
   ].join("\n");
 }
 
@@ -2690,18 +3019,22 @@ async function tui(rest: string[]): Promise<void> {
     fullDiffScroll: 0,
     helpOpen: false,
     settingsOpen: false,
+    contributorsOpen: false,
+    selectedContributorIndex: 0,
     busy: false,
     statusLine: "",
+    actorFilter: null,
     inputMode: null,
     inputBuffer: "",
     chatBySession: new Map<string, ChatMessage[]>(),
   };
 
   let query = new QueryService(resolve(state.projectPath, ".codaph"));
-  let repoId = repoIdFromPath(state.projectPath);
   let settings = loadCodaphSettings();
+  let repoId = resolveRepoIdForProject(flags, state.projectPath, settings);
   let memory = createMubitMemory(flags, state.projectPath, settings);
   const analysisCache = new Map<string, CachedSessionAnalysis>();
+  const gitAuthorCache = new Map<string, string | null>();
   let screenReady = false;
 
   const getSize = (): { width: number; height: number } => ({
@@ -2760,6 +3093,9 @@ async function tui(rest: string[]): Promise<void> {
         screen = renderBrowseView(state, projectLabel, memory?.isEnabled() ?? false, width, height);
       } else {
         screen = renderInspectView(state, projectLabel, row, analysis, memory?.isEnabled() ?? false, width, height);
+        if (state.contributorsOpen) {
+          screen = renderContributorOverlay(state, analysis, width, height, gitAuthorCache);
+        }
       }
     }
 
@@ -2801,7 +3137,7 @@ async function tui(rest: string[]): Promise<void> {
 
   const refreshRows = async (progressLabel: string): Promise<void> => {
     query = new QueryService(resolve(state.projectPath, ".codaph"));
-    repoId = repoIdFromPath(state.projectPath);
+    repoId = resolveRepoIdForProject(flags, state.projectPath, settings);
 
     const sessions = await query.listSessions(repoId) as QuerySessionSummary[];
     const rows: SessionBrowseRow[] = [];
@@ -2875,10 +3211,13 @@ async function tui(rest: string[]): Promise<void> {
   const syncProject = async (): Promise<void> => {
     refreshSettingsAndMemory();
     const { pipeline, memory: syncMemory } = createPipeline(state.projectPath, flags, settings);
+    const actorId = resolveMubitActorId(flags, state.projectPath, settings);
     let lastRefresh = 0;
     const summary = await syncCodexHistory({
       projectPath: state.projectPath,
       pipeline,
+      repoId,
+      actorId,
       onProgress: (progress) => {
         state.statusLine = `Sync ${progress.matchedFiles}/${progress.scannedFiles} | events ${progress.importedEvents} | line ${progress.currentLine} | ${shortenPath(progress.currentFile, 42)}`;
         const now = Date.now();
@@ -2891,6 +3230,32 @@ async function tui(rest: string[]): Promise<void> {
     analysisCache.clear();
     await refreshRows("Refreshing sessions");
     state.statusLine = `${formatSummary(summary)} | MuBit ${syncMemory?.isEnabled() ? "enabled" : "disabled"}`;
+  };
+
+  const syncRemoteProject = async (): Promise<void> => {
+    refreshSettingsAndMemory();
+    const engine = createMubitMemory(flags, state.projectPath, settings);
+    if (!engine || !engine.isEnabled()) {
+      throw new Error("MuBit is disabled. Set MUBIT_API_KEY and enable --mubit.");
+    }
+    const projectId = resolveMubitProjectId(flags, state.projectPath, settings) ?? repoId;
+    const actorId = resolveMubitActorId(flags, state.projectPath, settings);
+    const mirror = new JsonlMirror(resolve(state.projectPath, ".codaph"));
+    const summary = await syncMubitRemoteActivity({
+      mirror,
+      memory: engine,
+      runId: mubitRunIdForProject(projectId),
+      repoId,
+      fallbackActorId: actorId,
+      timelineLimit: 1200,
+      onProgress: (progress) => {
+        state.statusLine = `Remote sync ${progress.current}/${progress.total} | imported ${progress.imported} | dedup ${progress.deduplicated} | skipped ${progress.skipped}`;
+        render();
+      },
+    });
+    analysisCache.clear();
+    await refreshRows("Refreshing sessions");
+    state.statusLine = `Remote sync imported=${summary.imported} dedup=${summary.deduplicated} contributors=${summary.contributors}`;
   };
 
   const cycleProject = async (): Promise<void> => {
@@ -2906,12 +3271,15 @@ async function tui(rest: string[]): Promise<void> {
     state.view = "browse";
     state.selectedSessionIndex = 0;
     state.selectedPromptIndex = 0;
+    state.actorFilter = null;
+    state.contributorsOpen = false;
     state.chatOpen = false;
     state.chatDraft = "";
     state.chatScroll = 0;
     state.fullDiffOpen = false;
     resetInspectScroll();
     analysisCache.clear();
+    gitAuthorCache.clear();
     refreshSettingsAndMemory();
     await setLastProject(state.projectPath);
     await refreshRows(`Loading ${basename(state.projectPath)}`);
@@ -2948,7 +3316,9 @@ async function tui(rest: string[]): Promise<void> {
     }
 
     const runId = mubitRunIdForContext(flags, repoId, session.sessionId, state.projectPath, settings);
-    const prompt = selectedPromptFromAnalysis(analysis, state.selectedPromptIndex);
+    const promptSelection = selectedPromptFromAnalysis(analysis, state.selectedPromptIndex, state.actorFilter);
+    const prompt = promptSelection.prompt;
+    state.selectedPromptIndex = promptSelection.index;
     const contextualQuery = `${question}\n\nCurrent prompt context:\n${clipText(prompt.prompt, 400)}`;
 
     const response = await withTimeout(
@@ -2984,6 +3354,42 @@ async function tui(rest: string[]): Promise<void> {
     state.statusLine = agentResult
       ? `OpenAI agent (${agentResult.model}) responded`
       : "MuBit responded";
+  };
+
+  const cycleActorFilter = (): void => {
+    const analysis = selectedAnalysis();
+    if (!analysis) {
+      state.statusLine = "No session selected.";
+      return;
+    }
+    const contributors = analysis.contributors.map((entry) => entry.actorId);
+    const sequence: Array<string | null> = [null, ...contributors];
+    const currentIndex = sequence.findIndex((entry) => entry === state.actorFilter);
+    const nextIndex = (currentIndex + 1 + sequence.length) % sequence.length;
+    state.actorFilter = sequence[nextIndex] ?? null;
+    const indices = promptIndicesForActor(analysis, state.actorFilter);
+    state.selectedPromptIndex = indices[0] ?? 0;
+    state.selectedThoughtIndex = 0;
+    state.thoughtsScroll = 0;
+    state.statusLine = `Actor filter: ${state.actorFilter ?? "all"}`;
+  };
+
+  const toggleContributors = (): void => {
+    if (state.view !== "inspect") {
+      state.statusLine = "Open a session first.";
+      return;
+    }
+    const analysis = selectedAnalysis();
+    if (!analysis) {
+      state.statusLine = "No session selected.";
+      return;
+    }
+    if (!state.contributorsOpen) {
+      const contributorIds = analysis.contributors.map((entry) => entry.actorId);
+      const current = state.actorFilter ? contributorIds.indexOf(state.actorFilter) : -1;
+      state.selectedContributorIndex = current >= 0 ? current : 0;
+    }
+    state.contributorsOpen = !state.contributorsOpen;
   };
 
   emitKeypressEvents(input);
@@ -3066,10 +3472,13 @@ async function tui(rest: string[]): Promise<void> {
       state.selectedSessionIndex = 0;
       state.selectedPromptIndex = 0;
       state.view = "browse";
+      state.actorFilter = null;
+      state.contributorsOpen = false;
       state.chatOpen = false;
       state.fullDiffOpen = false;
       resetInspectScroll();
       analysisCache.clear();
+      gitAuthorCache.clear();
       refreshSettingsAndMemory();
       await refreshRows(`Loading ${basename(normalized)}`);
       state.statusLine = `Project: ${normalized}`;
@@ -3293,6 +3702,45 @@ async function tui(rest: string[]): Promise<void> {
       return;
     }
 
+    if (state.contributorsOpen) {
+      if (key.name === "escape" || str === "c") {
+        state.contributorsOpen = false;
+        render();
+        return;
+      }
+      if (key.name === "up") {
+        const analysis = selectedAnalysis();
+        const count = analysis?.contributors.length ?? 0;
+        if (count > 0) {
+          state.selectedContributorIndex = Math.max(0, state.selectedContributorIndex - 1);
+          render();
+        }
+        return;
+      }
+      if (key.name === "down") {
+        const analysis = selectedAnalysis();
+        const count = analysis?.contributors.length ?? 0;
+        if (count > 0) {
+          state.selectedContributorIndex = Math.min(count - 1, state.selectedContributorIndex + 1);
+          render();
+        }
+        return;
+      }
+      if (key.name === "return") {
+        const analysis = selectedAnalysis();
+        const contributor = analysis?.contributors[state.selectedContributorIndex];
+        state.actorFilter = contributor?.actorId ?? null;
+        const indices = analysis ? promptIndicesForActor(analysis, state.actorFilter) : [0];
+        state.selectedPromptIndex = indices[0] ?? 0;
+        state.selectedThoughtIndex = 0;
+        state.contributorsOpen = false;
+        state.statusLine = `Actor filter: ${state.actorFilter ?? "all"}`;
+        render();
+        return;
+      }
+      return;
+    }
+
     if (str === "q" || key.name === "q") {
       close();
       return;
@@ -3306,6 +3754,18 @@ async function tui(rest: string[]): Promise<void> {
 
     if (str === "o") {
       state.settingsOpen = true;
+      render();
+      return;
+    }
+
+    if (str === "f") {
+      cycleActorFilter();
+      render();
+      return;
+    }
+
+    if (str === "c") {
+      toggleContributors();
       render();
       return;
     }
@@ -3344,6 +3804,8 @@ async function tui(rest: string[]): Promise<void> {
           state.view = "inspect";
           state.inspectPane = "prompts";
           state.selectedPromptIndex = 0;
+          state.actorFilter = null;
+          state.contributorsOpen = false;
           state.chatOpen = false;
           state.fullDiffOpen = false;
           state.chatScroll = 0;
@@ -3354,6 +3816,10 @@ async function tui(rest: string[]): Promise<void> {
       }
       if (str === "s") {
         runTask("Syncing Codex history...", syncProject);
+        return;
+      }
+      if (str === "r") {
+        runTask("Syncing MuBit remote...", syncRemoteProject);
         return;
       }
       return;
@@ -3367,7 +3833,9 @@ async function tui(rest: string[]): Promise<void> {
     }
 
     if (state.fullDiffOpen) {
-      const prompt = selectedPromptFromAnalysis(analysis, state.selectedPromptIndex);
+      const promptSelection = selectedPromptFromAnalysis(analysis, state.selectedPromptIndex, state.actorFilter);
+      const prompt = promptSelection.prompt;
+      state.selectedPromptIndex = promptSelection.index;
       const fullDiff = diffPreviewLines(prompt, analysis.files);
       const bodyHeight = Math.max(1, getSize().height - 6);
       const maxScroll = Math.max(0, fullDiff.length - bodyHeight);
@@ -3396,6 +3864,7 @@ async function tui(rest: string[]): Promise<void> {
         state.inspectPane = "thoughts";
       } else {
         state.view = "browse";
+        state.contributorsOpen = false;
       }
       render();
       return;
@@ -3436,7 +3905,11 @@ async function tui(rest: string[]): Promise<void> {
 
     if (key.name === "up") {
       if (state.inspectPane === "prompts") {
-        const nextIndex = Math.max(0, state.selectedPromptIndex - 1);
+        const indices = promptIndicesForActor(analysis, state.actorFilter);
+        const current = indices.indexOf(state.selectedPromptIndex);
+        const currentPos = current >= 0 ? current : 0;
+        const nextPos = Math.max(0, currentPos - 1);
+        const nextIndex = indices[nextPos] ?? state.selectedPromptIndex;
         if (nextIndex !== state.selectedPromptIndex) {
           state.selectedPromptIndex = nextIndex;
           resetInspectScroll();
@@ -3459,13 +3932,19 @@ async function tui(rest: string[]): Promise<void> {
 
     if (key.name === "down") {
       if (state.inspectPane === "prompts") {
-        const nextIndex = Math.min(analysis.prompts.length - 1, state.selectedPromptIndex + 1);
+        const indices = promptIndicesForActor(analysis, state.actorFilter);
+        const current = indices.indexOf(state.selectedPromptIndex);
+        const currentPos = current >= 0 ? current : 0;
+        const nextPos = Math.min(indices.length - 1, currentPos + 1);
+        const nextIndex = indices[nextPos] ?? state.selectedPromptIndex;
         if (nextIndex !== state.selectedPromptIndex) {
           state.selectedPromptIndex = nextIndex;
           resetInspectScroll();
         }
       } else if (state.inspectPane === "thoughts") {
-        const prompt = selectedPromptFromAnalysis(analysis, state.selectedPromptIndex);
+        const promptSelection = selectedPromptFromAnalysis(analysis, state.selectedPromptIndex, state.actorFilter);
+        const prompt = promptSelection.prompt;
+        state.selectedPromptIndex = promptSelection.index;
         const thoughtCount = thoughtEntriesForPrompt(prompt).length;
         state.selectedThoughtIndex = Math.min(thoughtCount - 1, state.selectedThoughtIndex + 1);
         state.diffScroll = 0;
@@ -3520,6 +3999,10 @@ async function main(): Promise<void> {
   }
 
   if (cmd === "sync") {
+    if (sub === "remote") {
+      await syncRemote(rest);
+      return;
+    }
     await syncHistory([sub, ...rest].filter(Boolean) as string[]);
     return;
   }

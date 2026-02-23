@@ -11,9 +11,11 @@ import { redactUnknown } from "@codaph/security";
 export interface IngestContext {
   source: AgentSource;
   repoId: string;
+  actorId?: string | null;
   sessionId: string;
   threadId: string | null;
   sequence: number;
+  eventId?: string;
   ts?: string;
 }
 
@@ -22,6 +24,8 @@ export interface IngestPipelineOptions {
   failOnMemoryError?: boolean;
   onMemoryError?: (error: unknown, event: CapturedEventEnvelope) => void;
   memoryWriteTimeoutMs?: number;
+  memoryMaxConsecutiveErrors?: number;
+  defaultActorId?: string | null;
 }
 
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
@@ -57,6 +61,9 @@ function getReasoningAvailability(payload: Record<string, unknown>): ReasoningAv
 }
 
 export class IngestPipeline {
+  private consecutiveMemoryErrors = 0;
+  private memoryCircuitOpen = false;
+
   constructor(
     private readonly mirror: MirrorAppender,
     private readonly options: IngestPipelineOptions = {},
@@ -71,8 +78,10 @@ export class IngestPipeline {
     const sanitized = redactUnknown(payload);
 
     const event = createCapturedEvent({
+      eventId: ctx.eventId,
       source: ctx.source,
       repoId: ctx.repoId,
+      actorId: ctx.actorId ?? this.options.defaultActorId ?? null,
       sessionId: ctx.sessionId,
       threadId: ctx.threadId,
       ts,
@@ -82,11 +91,28 @@ export class IngestPipeline {
       reasoningAvailability: getReasoningAvailability(sanitized),
     });
 
-    if (this.options.memoryEngine) {
+    const appendResult = await this.mirror.appendEvent(event);
+    if (appendResult.deduplicated) {
+      return event;
+    }
+
+    if (this.options.memoryEngine && !this.memoryCircuitOpen) {
       try {
         const timeoutMs = this.options.memoryWriteTimeoutMs ?? 15000;
         await withTimeout(this.options.memoryEngine.writeEvent(event), timeoutMs, "MuBit write");
+        this.consecutiveMemoryErrors = 0;
       } catch (error) {
+        this.consecutiveMemoryErrors += 1;
+        const maxConsecutiveErrors = this.options.memoryMaxConsecutiveErrors ?? 3;
+        if (this.consecutiveMemoryErrors >= maxConsecutiveErrors) {
+          this.memoryCircuitOpen = true;
+          if (this.options.onMemoryError) {
+            this.options.onMemoryError(
+              new Error(`MuBit write circuit opened after ${this.consecutiveMemoryErrors} consecutive errors`),
+              event,
+            );
+          }
+        }
         if (this.options.onMemoryError) {
           this.options.onMemoryError(error, event);
         }
@@ -96,7 +122,6 @@ export class IngestPipeline {
       }
     }
 
-    await this.mirror.appendEvent(event);
     return event;
   }
 

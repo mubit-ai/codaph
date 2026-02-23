@@ -13,6 +13,12 @@ export interface MubitSemanticQueryOptions {
   mode?: "agent_routed" | "direct_bypass";
 }
 
+export interface MubitContextSnapshotOptions {
+  runId: string;
+  timelineLimit?: number;
+  refresh?: boolean;
+}
+
 export interface MubitMemoryOptions {
   apiKey?: string;
   endpoint?: string;
@@ -30,6 +36,8 @@ export interface MubitMemoryOptions {
       ingest(payload?: Record<string, unknown>): Promise<unknown>;
       setVariable(payload?: Record<string, unknown>): Promise<unknown>;
       query(payload?: Record<string, unknown>): Promise<unknown>;
+      appendActivity?(payload?: Record<string, unknown>): Promise<unknown>;
+      contextSnapshot?(payload?: Record<string, unknown>): Promise<unknown>;
     };
   };
 }
@@ -119,10 +127,10 @@ function textFromUnknown(value: unknown): string | null {
 function eventToText(event: CapturedEventEnvelope): string {
   const payloadText = textFromUnknown(event.payload.item) ?? textFromUnknown(event.payload);
   if (!payloadText) {
-    return `${event.eventType} event in session ${event.sessionId}`;
+    return `${event.eventType}${event.actorId ? ` [actor:${event.actorId}]` : ""} event in session ${event.sessionId}`;
   }
 
-  return `${event.eventType}: ${truncate(payloadText)}`;
+  return `${event.eventType}${event.actorId ? ` [actor:${event.actorId}]` : ""}: ${truncate(payloadText)}`;
 }
 
 export function mubitRunIdForSession(
@@ -146,6 +154,8 @@ export class MubitMemoryEngine implements MemoryEngine {
       ingest(payload?: Record<string, unknown>): Promise<unknown>;
       setVariable(payload?: Record<string, unknown>): Promise<unknown>;
       query(payload?: Record<string, unknown>): Promise<unknown>;
+      appendActivity?(payload?: Record<string, unknown>): Promise<unknown>;
+      contextSnapshot?(payload?: Record<string, unknown>): Promise<unknown>;
     };
   };
 
@@ -187,6 +197,8 @@ export class MubitMemoryEngine implements MemoryEngine {
         ingest(payload?: Record<string, unknown>): Promise<unknown>;
         setVariable(payload?: Record<string, unknown>): Promise<unknown>;
         query(payload?: Record<string, unknown>): Promise<unknown>;
+        appendActivity?(payload?: Record<string, unknown>): Promise<unknown>;
+        contextSnapshot?(payload?: Record<string, unknown>): Promise<unknown>;
       };
     };
   }
@@ -228,7 +240,7 @@ export class MubitMemoryEngine implements MemoryEngine {
           metadata_json: toJson({
             repo_id: event.repoId,
             project_id: this.projectId ?? event.repoId,
-            actor_id: this.actorId ?? null,
+            actor_id: event.actorId ?? this.actorId ?? null,
             session_id: event.sessionId,
             thread_id: event.threadId,
             ts: event.ts,
@@ -239,6 +251,24 @@ export class MubitMemoryEngine implements MemoryEngine {
 
     const result = await this.client.control.ingest(ingestPayload);
     const record = asRecord(result);
+    if (this.client.control.appendActivity) {
+      try {
+        await this.client.control.appendActivity({
+          run_id: runId,
+          agent_id: this.agentId,
+          activity: {
+            type: "codaph_event",
+            payload: toJson(event),
+            ts: event.ts,
+            agent_id: this.agentId,
+            input_ref: event.sessionId,
+            output_ref: event.eventId,
+          },
+        });
+      } catch {
+        // Best effort only; ingestion remains source of truth.
+      }
+    }
     return {
       accepted: asBoolean(record?.accepted) ?? true,
       deduplicated: asBoolean(record?.deduplicated),
@@ -280,6 +310,33 @@ export class MubitMemoryEngine implements MemoryEngine {
     };
 
     const result = await this.client.control.query(payload);
+    const record = asRecord(result);
+    return record ?? { raw: result };
+  }
+
+  async fetchContextSnapshot(options: MubitContextSnapshotOptions): Promise<Record<string, unknown>> {
+    if (!this.isEnabled()) {
+      return {
+        disabled: true,
+        reason: "MuBit is not configured. Set MUBIT_API_KEY or pass --mubit-api-key.",
+      };
+    }
+    if (!this.client.control.contextSnapshot) {
+      return {
+        unsupported: true,
+        reason: "MuBit SDK does not expose control.contextSnapshot in this runtime.",
+      };
+    }
+
+    const payload: Record<string, unknown> = {
+      run_id: options.runId,
+      timeline_limit:
+        Number.isFinite(options.timelineLimit) && (options.timelineLimit ?? 0) > 0
+          ? Math.floor(options.timelineLimit as number)
+          : 500,
+      refresh: Boolean(options.refresh),
+    };
+    const result = await this.client.control.contextSnapshot(payload);
     const record = asRecord(result);
     return record ?? { raw: result };
   }

@@ -22,6 +22,7 @@ export interface SparseSessionIndex {
   eventCount: number;
   segments: string[];
   threads: string[];
+  actors: string[];
 }
 
 export interface SparseThreadIndex {
@@ -32,20 +33,43 @@ export interface SparseThreadIndex {
   segments: string[];
 }
 
+export interface SparseActorIndex {
+  from: string;
+  to: string;
+  eventCount: number;
+  sessions: string[];
+  segments: string[];
+}
+
 export interface SparseIndex {
   repoId: string;
   sessions: Record<string, SparseSessionIndex>;
   threads: Record<string, SparseThreadIndex>;
+  actors: Record<string, SparseActorIndex>;
+}
+
+export interface EventIdIndexEntry {
+  segment: string;
+  ts: string;
+  sessionId: string;
+  actorId: string | null;
+}
+
+export interface EventIdIndex {
+  repoId: string;
+  events: Record<string, EventIdIndexEntry>;
 }
 
 export function getIndexPaths(rootDir: string, repoId: string): {
   manifestPath: string;
   sparsePath: string;
+  eventIdsPath: string;
 } {
   const base = join(rootDir, "index", repoId);
   return {
     manifestPath: join(base, "manifest.json"),
     sparsePath: join(base, "sparse-index.json"),
+    eventIdsPath: join(base, "event-ids.json"),
   };
 }
 
@@ -78,7 +102,12 @@ export async function readManifest(rootDir: string, repoId: string): Promise<Rep
 
 export async function readSparseIndex(rootDir: string, repoId: string): Promise<SparseIndex> {
   const { sparsePath } = getIndexPaths(rootDir, repoId);
-  return readJsonOrDefault<SparseIndex>(sparsePath, { repoId, sessions: {}, threads: {} });
+  return readJsonOrDefault<SparseIndex>(sparsePath, { repoId, sessions: {}, threads: {}, actors: {} });
+}
+
+export async function readEventIdIndex(rootDir: string, repoId: string): Promise<EventIdIndex> {
+  const { eventIdsPath } = getIndexPaths(rootDir, repoId);
+  return readJsonOrDefault<EventIdIndex>(eventIdsPath, { repoId, events: {} });
 }
 
 export async function readEventsFromSegments(
@@ -128,6 +157,17 @@ export class JsonlMirror implements MirrorAppender {
 
     const manifest = await readManifest(this.rootDir, event.repoId);
     const sparse = await readSparseIndex(this.rootDir, event.repoId);
+    const eventIds = await readEventIdIndex(this.rootDir, event.repoId);
+
+    const existing = eventIds.events[event.eventId];
+    if (existing) {
+      return {
+        segment: existing.segment,
+        offset: 0,
+        checksum: createHash("sha256").update(event.eventId).digest("hex").slice(0, 16),
+        deduplicated: true,
+      };
+    }
 
     const currentSegment = manifest.segments[segmentId] ?? {
       id: segmentId,
@@ -146,13 +186,18 @@ export class JsonlMirror implements MirrorAppender {
     }
     manifest.segments[segmentId] = currentSegment;
 
-    const session = sparse.sessions[event.sessionId] ?? {
+    const rawSession = sparse.sessions[event.sessionId];
+    const session = rawSession ?? {
       from: event.ts,
       to: event.ts,
       eventCount: 0,
       segments: [],
       threads: [],
+      actors: [],
     };
+    if (!Array.isArray(session.actors)) {
+      session.actors = [];
+    }
     session.eventCount += 1;
     if (event.ts < session.from) {
       session.from = event.ts;
@@ -165,6 +210,9 @@ export class JsonlMirror implements MirrorAppender {
     }
     if (event.threadId && !session.threads.includes(event.threadId)) {
       session.threads.push(event.threadId);
+    }
+    if (event.actorId && !session.actors.includes(event.actorId)) {
+      session.actors.push(event.actorId);
     }
     sparse.sessions[event.sessionId] = session;
 
@@ -189,14 +237,47 @@ export class JsonlMirror implements MirrorAppender {
       sparse.threads[event.threadId] = thread;
     }
 
-    const { manifestPath, sparsePath } = getIndexPaths(this.rootDir, event.repoId);
+    if (event.actorId) {
+      const actor = sparse.actors[event.actorId] ?? {
+        from: event.ts,
+        to: event.ts,
+        eventCount: 0,
+        sessions: [],
+        segments: [],
+      };
+      actor.eventCount += 1;
+      if (event.ts < actor.from) {
+        actor.from = event.ts;
+      }
+      if (event.ts > actor.to) {
+        actor.to = event.ts;
+      }
+      if (!actor.sessions.includes(event.sessionId)) {
+        actor.sessions.push(event.sessionId);
+      }
+      if (!actor.segments.includes(relativePath)) {
+        actor.segments.push(relativePath);
+      }
+      sparse.actors[event.actorId] = actor;
+    }
+
+    eventIds.events[event.eventId] = {
+      segment: relativePath,
+      ts: event.ts,
+      sessionId: event.sessionId,
+      actorId: event.actorId ?? null,
+    };
+
+    const { manifestPath, sparsePath, eventIdsPath } = getIndexPaths(this.rootDir, event.repoId);
     await writeJson(manifestPath, manifest);
     await writeJson(sparsePath, sparse);
+    await writeJson(eventIdsPath, eventIds);
 
     return {
       segment: relativePath,
       offset: currentSegment.eventCount,
       checksum: createHash("sha256").update(line).digest("hex").slice(0, 16),
+      deduplicated: false,
     };
   }
 

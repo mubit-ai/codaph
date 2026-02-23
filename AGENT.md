@@ -352,3 +352,33 @@ Do not rewrite history; append a new snapshot each run.
 - unstaged: 0
 - untracked: 0
 - files: AGENT.md, README.md, packages/memory-mubit/src/index.ts, packages/memory-mubit/test/memory-mubit.test.ts, tools/codaph-cli/src/index.ts, tools/codaph-cli/src/settings-store.ts
+
+## Status Snapshot — 2026-02-23T15:45:31.203Z
+- source: manual
+- repo: /Users/anilp/Code/codaph
+- branch: main
+- head: cb6df59
+- staged: 1
+- unstaged: 14
+- untracked: 1
+- files: ackages/adapter-codex-exec/src/index.ts, packages/adapter-codex-sdk/src/index.ts, packages/core-types/src/index.ts, packages/core-types/test/core-types.test.ts, packages/diff-engine/test/diff-engine.test.ts, packages/ingest-pipeline/src/index.ts, packages/ingest-pipeline/test/ingest-pipeline.test.ts, packages/memory-mubit/src/index.ts, packages/memory-mubit/test/memory-mubit.test.ts, packages/mirror-jsonl/src/index.ts, packages/mirror-jsonl/test/mirror-jsonl.test.ts, packages/query-service/src/index.ts, packages/query-service/test/query-service.test.ts, tools/codaph-cli/src/codex-history-sync.ts, tools/codaph-cli/src/index.ts, tools/codaph-cli/src/mubit-remote-sync.ts
+
+## Status Snapshot — 2026-02-23T15:47:57.328Z
+- source: manual
+- repo: /Users/anilp/Code/codaph
+- branch: main
+- head: cb6df59
+- staged: 1
+- unstaged: 16
+- untracked: 1
+- files: GENT.md, README.md, packages/adapter-codex-exec/src/index.ts, packages/adapter-codex-sdk/src/index.ts, packages/core-types/src/index.ts, packages/core-types/test/core-types.test.ts, packages/diff-engine/test/diff-engine.test.ts, packages/ingest-pipeline/src/index.ts, packages/ingest-pipeline/test/ingest-pipeline.test.ts, packages/memory-mubit/src/index.ts, packages/memory-mubit/test/memory-mubit.test.ts, packages/mirror-jsonl/src/index.ts, packages/mirror-jsonl/test/mirror-jsonl.test.ts, packages/query-service/src/index.ts, packages/query-service/test/query-service.test.ts, tools/codaph-cli/src/codex-history-sync.ts, tools/codaph-cli/src/index.ts, tools/codaph-cli/src/mubit-remote-sync.ts
+
+## Status Snapshot — 2026-02-23T15:56:12.516Z
+- source: pre-commit
+- repo: /Users/anilp/Code/codaph
+- branch: main
+- head: cb6df59
+- staged: 18
+- unstaged: 0
+- untracked: 1
+- files: AGENT.md, README.md, docs/README.md, packages/adapter-codex-exec/src/index.ts, packages/adapter-codex-sdk/src/index.ts, packages/core-types/src/index.ts, packages/core-types/test/core-types.test.ts, packages/diff-engine/test/diff-engine.test.ts, packages/ingest-pipeline/src/index.ts, packages/ingest-pipeline/test/ingest-pipeline.test.ts, packages/memory-mubit/src/index.ts, packages/memory-mubit/test/memory-mubit.test.ts, packages/mirror-jsonl/src/index.ts, packages/mirror-jsonl/test/mirror-jsonl.test.ts, packages/query-service/src/index.ts, packages/query-service/test/query-service.test.ts, tools/codaph-cli/src/codex-history-sync.ts, tools/codaph-cli/src/index.ts, tools/codaph-cli/src/mubit-remote-sync.ts

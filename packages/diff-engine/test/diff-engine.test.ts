@@ -9,6 +9,7 @@ describe("diff-engine", () => {
         eventId: "1",
         source: "codex_sdk",
         repoId: "r",
+        actorId: null,
         sessionId: "s",
         threadId: "t",
         ts: new Date().toISOString(),

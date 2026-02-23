@@ -27,6 +27,7 @@ describe("core-types", () => {
     const ev = createCapturedEvent({
       source: "codex_exec",
       repoId: "abc",
+      actorId: "anil",
       sessionId: "s1",
       threadId: null,
       ts: "2026-02-21T20:10:05Z",
@@ -36,6 +37,7 @@ describe("core-types", () => {
     });
 
     expect(ev.source).toBe("codex_exec");
+    expect(ev.actorId).toBe("anil");
     expect(ev.reasoningAvailability).toBe("unavailable");
     expect(ev.eventId).toHaveLength(24);
   });
