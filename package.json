@@ -15,7 +15,8 @@
     "desktop:build": "bun run --cwd apps/desktop build",
     "desktop:start": "bun run --cwd apps/desktop start",
     "desktop": "bun run desktop:build && bun run desktop:start",
-    "cli": "bun run --cwd tools/codaph-cli src/index.ts",
+    "cli": "bun ./tools/codaph-cli/src/index.ts",
+    "tui": "bun run cli tui",
     "agent:status": "bun run ./tools/codaph-cli/src/append-agent-status.ts",
     "hooks:install": "bun run ./tools/codaph-cli/src/install-hooks.ts"
   },

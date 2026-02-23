@@ -65,6 +65,18 @@ export interface MirrorAppender {
   appendRawLine(sessionId: string, line: string): Promise<void>;
 }
 
+export interface MemoryWriteResult {
+  accepted: boolean;
+  deduplicated?: boolean;
+  jobId?: string;
+  raw?: unknown;
+}
+
+export interface MemoryEngine {
+  writeEvent(event: CapturedEventEnvelope): Promise<MemoryWriteResult>;
+  writeRunState?(runId: string, statePatch: Record<string, unknown>): Promise<void>;
+}
+
 export interface TimelineFilter {
   repoId: string;
   sessionId?: string;

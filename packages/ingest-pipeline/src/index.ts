@@ -2,6 +2,7 @@ import {
   createCapturedEvent,
   type AgentSource,
   type CapturedEventEnvelope,
+  type MemoryEngine,
   type MirrorAppender,
   type ReasoningAvailability,
 } from "@codaph/core-types";
@@ -14,6 +15,32 @@ export interface IngestContext {
   threadId: string | null;
   sequence: number;
   ts?: string;
+}
+
+export interface IngestPipelineOptions {
+  memoryEngine?: MemoryEngine;
+  failOnMemoryError?: boolean;
+  onMemoryError?: (error: unknown, event: CapturedEventEnvelope) => void;
+  memoryWriteTimeoutMs?: number;
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    return promise;
+  }
+
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const timeoutPromise = new Promise<T>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs);
+  });
+
+  try {
+    return await Promise.race([promise, timeoutPromise]);
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
 }
 
 function getReasoningAvailability(payload: Record<string, unknown>): ReasoningAvailability {
@@ -30,7 +57,10 @@ function getReasoningAvailability(payload: Record<string, unknown>): ReasoningAv
 }
 
 export class IngestPipeline {
-  constructor(private readonly mirror: MirrorAppender) {}
+  constructor(
+    private readonly mirror: MirrorAppender,
+    private readonly options: IngestPipelineOptions = {},
+  ) {}
 
   async ingest(
     eventType: string,
@@ -52,7 +82,20 @@ export class IngestPipeline {
       reasoningAvailability: getReasoningAvailability(sanitized),
     });
 
-    // TODO(MUBIT): write normalized event to MuBit once SDK is available.
+    if (this.options.memoryEngine) {
+      try {
+        const timeoutMs = this.options.memoryWriteTimeoutMs ?? 15000;
+        await withTimeout(this.options.memoryEngine.writeEvent(event), timeoutMs, "MuBit write");
+      } catch (error) {
+        if (this.options.onMemoryError) {
+          this.options.onMemoryError(error, event);
+        }
+        if (this.options.failOnMemoryError) {
+          throw error;
+        }
+      }
+    }
+
     await this.mirror.appendEvent(event);
     return event;
   }

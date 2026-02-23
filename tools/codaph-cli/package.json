@@ -10,6 +10,7 @@
     "@codaph/adapter-codex-sdk": "workspace:*",
     "@codaph/core-types": "workspace:*",
     "@codaph/ingest-pipeline": "workspace:*",
+    "@codaph/memory-mubit": "workspace:*",
     "@codaph/mirror-jsonl": "workspace:*",
     "@codaph/query-service": "workspace:*"
   },
