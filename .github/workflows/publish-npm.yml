@@ -54,6 +54,29 @@ jobs:
       - name: Dry-run package contents
         run: npm pack --dry-run
 
+      - name: NPM auth preflight
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          npm ping
+          NPM_USER="$(npm whoami)"
+          PACKAGE_NAME="$(node -e "console.log(JSON.parse(require('node:fs').readFileSync('package.json','utf8')).name)")"
+          echo "npm user: ${NPM_USER}"
+          echo "package: ${PACKAGE_NAME}"
+          if npm view "${PACKAGE_NAME}" version >/dev/null 2>&1; then
+            echo "package exists on npm; verifying owner rights"
+            OWNERS="$(npm owner ls "${PACKAGE_NAME}" || true)"
+            echo "${OWNERS}"
+            if ! echo "${OWNERS}" | grep -Eiq "^${NPM_USER}[[:space:]]"; then
+              echo "User ${NPM_USER} is not an owner of ${PACKAGE_NAME}."
+              echo "Fix: use an npm token from a package owner, add owner access, or publish under a scoped name."
+              exit 1
+            fi
+          else
+            echo "package does not currently exist (or is private); attempting first publish."
+          fi
+
       - name: Publish to npm
         run: npm publish --access public --provenance
         env:

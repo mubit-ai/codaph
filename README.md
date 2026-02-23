@@ -71,6 +71,8 @@ git push origin v0.1.0
 Workflow requirements:
 - GitHub repo secret `NPM_TOKEN` must be set.
 - Tag format must be `v<package.json version>` (example `v0.1.0`).
+- `NPM_TOKEN` must be from an npm account that can publish the package name.
+- If publish fails with `E403`, use an npm Automation/Publish token with write access (not read-only), or switch to a scoped name like `@anilperi/codaph`.
 
 ## Run TUI (Primary)
 

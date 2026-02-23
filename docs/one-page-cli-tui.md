@@ -148,6 +148,9 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
+If GitHub Actions publish fails with `E403`, the npm token cannot publish that package name.
+Use a publish-capable token or switch to a scoped package name (example `@anilperi/codaph`).
+
 For Homebrew release docs, advertise:
 
 ```bash

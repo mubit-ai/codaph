@@ -101,6 +101,27 @@ Fixes:
 - Disable aggressive terminal zoom.
 - Start from a fresh terminal session after upgrades.
 
+## NPM Publish Fails With `E403`
+
+Symptoms:
+
+- GitHub Actions publish step fails with `403 Forbidden`.
+- Error says: `You may not perform that action with these credentials.`
+
+Fixes:
+
+1. Ensure repo secret `NPM_TOKEN` is valid and not expired/revoked.
+2. Use an npm token type that can publish (Automation/Publish capable, not read-only).
+3. Confirm token account can publish package name:
+   - if package exists: account must be listed in `npm owner ls <package>`
+   - if package is new: account must be allowed to claim that name
+4. If unscoped name is blocked, publish with a scoped name (for example `@anilperi/codaph`) and use:
+   `npx @anilperi/codaph ...`
+
+Notes:
+
+- Workflow now runs an npm auth preflight (`npm whoami` and owner check) before publish to surface this earlier.
+
 ## Reset Local Codaph State (Safe)
 
 If local mirror is inconsistent and you want a fresh rebuild:
