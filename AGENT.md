@@ -262,3 +262,53 @@ Do not rewrite history; append a new snapshot each run.
 - unstaged: 0
 - untracked: 0
 - files: AGENT.md, README.md, tools/codaph-cli/src/index.ts
+
+## Status Snapshot — 2026-02-23T13:35:37.868Z
+- source: manual
+- repo: /Users/anilp/Code/codaph
+- branch: main
+- head: c5a4bc2
+- staged: 1
+- unstaged: 0
+- untracked: 0
+- files: ools/codaph-cli/src/index.ts
+
+## Status Snapshot — 2026-02-23T13:46:32.910Z
+- source: manual
+- repo: /Users/anilp/Code/codaph
+- branch: main
+- head: c5a4bc2
+- staged: 1
+- unstaged: 1
+- untracked: 0
+- files: GENT.md, tools/codaph-cli/src/index.ts
+
+## Status Snapshot — 2026-02-23T13:54:44.547Z
+- source: manual
+- repo: /Users/anilp/Code/codaph
+- branch: main
+- head: c5a4bc2
+- staged: 1
+- unstaged: 1
+- untracked: 0
+- files: GENT.md, tools/codaph-cli/src/index.ts
+
+## Status Snapshot — 2026-02-23T13:58:40.292Z
+- source: manual
+- repo: /Users/anilp/Code/codaph
+- branch: main
+- head: c5a4bc2
+- staged: 1
+- unstaged: 1
+- untracked: 0
+- files: GENT.md, tools/codaph-cli/src/index.ts
+
+## Status Snapshot — 2026-02-23T14:16:30.584Z
+- source: pre-commit
+- repo: /Users/anilp/Code/codaph
+- branch: main
+- head: c5a4bc2
+- staged: 2
+- unstaged: 0
+- untracked: 0
+- files: AGENT.md, tools/codaph-cli/src/index.ts

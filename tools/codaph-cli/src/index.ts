@@ -1,7 +1,8 @@
 #!/usr/bin/env bun
 import { emitKeypressEvents } from "node:readline";
 import { stdin as input, stdout as output } from "node:process";
-import { basename, resolve } from "node:path";
+import { basename, isAbsolute, relative, resolve } from "node:path";
+import { execFileSync } from "node:child_process";
 import type { CapturedEventEnvelope } from "@codaph/core-types";
 import { repoIdFromPath } from "@codaph/core-types";
 import { JsonlMirror } from "@codaph/mirror-jsonl";
@@ -1103,11 +1104,19 @@ interface FileStatRow {
   minus: number;
 }
 
+interface ThoughtSlice {
+  id: number;
+  ts: string;
+  text: string;
+  diffLines: string[];
+}
+
 interface PromptSlice {
   id: number;
   ts: string;
   prompt: string;
   thoughts: string[];
+  thoughtSlices: ThoughtSlice[];
   outputs: string[];
   files: Map<string, FileStatRow>;
   diffLines: string[];
@@ -1160,9 +1169,13 @@ interface TuiState {
   rows: SessionBrowseRow[];
   selectedSessionIndex: number;
   selectedPromptIndex: number;
+  selectedThoughtIndex: number;
   chatOpen: boolean;
   chatDraft: string;
   chatScroll: number;
+  thoughtsScroll: number;
+  filesScroll: number;
+  diffScroll: number;
   fullDiffOpen: boolean;
   fullDiffScroll: number;
   helpOpen: boolean;
@@ -1408,6 +1421,24 @@ function joinColumns(left: string[], right: string[], gap = 2): string[] {
   return rows;
 }
 
+function joinThreeColumns(left: string[], middle: string[], right: string[], gap = 2): string[] {
+  const count = Math.max(left.length, middle.length, right.length);
+  const leftWidth = visibleLength(left[0] ?? "");
+  const middleWidth = visibleLength(middle[0] ?? "");
+  const rightWidth = visibleLength(right[0] ?? "");
+  const leftBlank = " ".repeat(leftWidth);
+  const middleBlank = " ".repeat(middleWidth);
+  const rightBlank = " ".repeat(rightWidth);
+
+  const rows: string[] = [];
+  for (let i = 0; i < count; i += 1) {
+    rows.push(
+      `${left[i] ?? leftBlank}${" ".repeat(gap)}${middle[i] ?? middleBlank}${" ".repeat(gap)}${right[i] ?? rightBlank}`,
+    );
+  }
+  return rows;
+}
+
 function windowStart(total: number, selected: number, visible: number): number {
   if (total <= visible) {
     return 0;
@@ -1418,6 +1449,21 @@ function windowStart(total: number, selected: number, visible: number): number {
     start = total - visible;
   }
   return start;
+}
+
+function scrollPaneLines(
+  lines: PaneLine[],
+  paneHeight: number,
+  scroll: number,
+): { lines: PaneLine[]; scroll: number; maxScroll: number } {
+  const bodyHeight = Math.max(1, paneHeight - 2);
+  const maxScroll = Math.max(0, lines.length - bodyHeight);
+  const safeScroll = Math.max(0, Math.min(scroll, maxScroll));
+  return {
+    lines: lines.slice(safeScroll, safeScroll + bodyHeight),
+    scroll: safeScroll,
+    maxScroll,
+  };
 }
 
 function formatDateCell(ts: string): string {
@@ -1514,23 +1560,72 @@ function extractPatchDiffLines(event: CapturedEventEnvelope): string[] {
   return out;
 }
 
+function extractUnifiedDiffLines(rawText: string, maxLines = 2000): string[] {
+  const out: string[] = [];
+  for (const raw of rawText.split("\n")) {
+    const line = raw.trimEnd();
+    const isHeader =
+      line.startsWith("diff --git ") ||
+      line.startsWith("index ") ||
+      line.startsWith("--- ") ||
+      line.startsWith("+++ ") ||
+      line.startsWith("@@") ||
+      line.startsWith("Binary files ");
+    const isBody =
+      (line.startsWith("+") || line.startsWith("-")) &&
+      !line.startsWith("+++") &&
+      !line.startsWith("---");
+
+    if (isHeader || isBody) {
+      out.push(line);
+    }
+
+    if (out.length >= maxLines) {
+      break;
+    }
+  }
+
+  return out;
+}
+
+function extractToolResultDiffLines(event: CapturedEventEnvelope): string[] {
+  const item = getItem(event);
+  const itemType = getItemType(event);
+  if (!item || itemType !== "tool_result") {
+    return [];
+  }
+
+  const rawOutput =
+    stringFromUnknown(item.output) ??
+    (typeof item.output === "string" ? item.output : null);
+  if (!rawOutput) {
+    return [];
+  }
+
+  return extractUnifiedDiffLines(rawOutput, 1200);
+}
+
 function buildSessionAnalysis(sessionId: string, events: CapturedEventEnvelope[]): SessionAnalysis {
   const prompts: PromptSlice[] = [];
   const sessionFiles = new Map<string, FileStatRow>();
+  const pendingDiffByPrompt = new WeakMap<PromptSlice, string[]>();
   let nextPromptId = 1;
   let tokenChars = 0;
 
   const ensureCurrentPrompt = (): PromptSlice => {
     if (prompts.length === 0) {
-      prompts.push({
+      const created: PromptSlice = {
         id: nextPromptId,
         ts: events[0]?.ts ?? new Date().toISOString(),
         prompt: "(No prompt captured)",
         thoughts: [],
+        thoughtSlices: [],
         outputs: [],
         files: new Map<string, FileStatRow>(),
         diffLines: [],
-      });
+      };
+      prompts.push(created);
+      pendingDiffByPrompt.set(created, []);
       nextPromptId += 1;
     }
     return prompts[prompts.length - 1] as PromptSlice;
@@ -1539,15 +1634,18 @@ function buildSessionAnalysis(sessionId: string, events: CapturedEventEnvelope[]
   for (const event of events) {
     const promptText = getPromptText(event);
     if (promptText) {
-      prompts.push({
+      const created: PromptSlice = {
         id: nextPromptId,
         ts: event.ts,
         prompt: promptText,
         thoughts: [],
+        thoughtSlices: [],
         outputs: [],
         files: new Map<string, FileStatRow>(),
         diffLines: [],
-      });
+      };
+      prompts.push(created);
+      pendingDiffByPrompt.set(created, []);
       nextPromptId += 1;
       tokenChars += promptText.length;
       continue;
@@ -1557,6 +1655,14 @@ function buildSessionAnalysis(sessionId: string, events: CapturedEventEnvelope[]
     const thought = getThoughtText(event);
     if (thought) {
       current.thoughts.push(thought);
+      const pending = pendingDiffByPrompt.get(current) ?? [];
+      current.thoughtSlices.push({
+        id: current.thoughtSlices.length + 1,
+        ts: event.ts,
+        text: thought,
+        diffLines: pending.slice(0, 220),
+      });
+      pendingDiffByPrompt.set(current, []);
       tokenChars += thought.length;
     }
 
@@ -1566,33 +1672,72 @@ function buildSessionAnalysis(sessionId: string, events: CapturedEventEnvelope[]
       tokenChars += outputText.length;
     }
 
+    const eventDiffLines: string[] = [];
     for (const change of getFileChangeList(event)) {
       applyFileChange(current.files, change.path, change.kind);
       applyFileChange(sessionFiles, change.path, change.kind);
       const marker = change.kind === "delete" ? "-" : "+";
-      current.diffLines.push(`${marker} ${change.path}`);
+      eventDiffLines.push(`FILE ${marker} ${change.path}`);
     }
 
     const patchLines = extractPatchDiffLines(event);
     if (patchLines.length > 0) {
-      current.diffLines.push(...patchLines);
+      eventDiffLines.push(...patchLines);
+    }
+
+    const toolResultDiffLines = extractToolResultDiffLines(event);
+    if (toolResultDiffLines.length > 0) {
+      eventDiffLines.push(...toolResultDiffLines);
+    }
+
+    if (eventDiffLines.length > 0) {
+      current.diffLines.push(...eventDiffLines);
+      const lastThought = current.thoughtSlices[current.thoughtSlices.length - 1];
+      if (lastThought) {
+        lastThought.diffLines.push(...eventDiffLines);
+      } else {
+        const pending = pendingDiffByPrompt.get(current) ?? [];
+        pending.push(...eventDiffLines);
+        pendingDiffByPrompt.set(current, pending);
+      }
     }
   }
 
   if (prompts.length === 0) {
-    prompts.push({
+    const created: PromptSlice = {
       id: 1,
       ts: events[0]?.ts ?? new Date().toISOString(),
       prompt: "(No prompt captured)",
       thoughts: [],
+      thoughtSlices: [],
       outputs: [],
       files: new Map<string, FileStatRow>(),
       diffLines: [],
-    });
+    };
+    prompts.push(created);
+    pendingDiffByPrompt.set(created, []);
   }
 
   for (const prompt of prompts) {
     prompt.diffLines = prompt.diffLines.slice(0, 280);
+    const pending = pendingDiffByPrompt.get(prompt) ?? [];
+    if (pending.length > 0) {
+      const lastThought = prompt.thoughtSlices[prompt.thoughtSlices.length - 1];
+      if (lastThought) {
+        lastThought.diffLines.push(...pending);
+      } else {
+        prompt.thoughtSlices.push({
+          id: 1,
+          ts: prompt.ts,
+          text: "(No exposed reasoning text)",
+          diffLines: pending.slice(0, 220),
+        });
+      }
+    }
+
+    for (const thoughtSlice of prompt.thoughtSlices) {
+      thoughtSlice.diffLines = thoughtSlice.diffLines.slice(0, 220);
+    }
   }
 
   return {
@@ -1606,6 +1751,41 @@ function buildSessionAnalysis(sessionId: string, events: CapturedEventEnvelope[]
 function selectedPromptFromAnalysis(analysis: SessionAnalysis, selectedPromptIndex: number): PromptSlice {
   const safeIndex = Math.max(0, Math.min(selectedPromptIndex, analysis.prompts.length - 1));
   return analysis.prompts[safeIndex] as PromptSlice;
+}
+
+function thoughtEntriesForPrompt(prompt: PromptSlice): ThoughtSlice[] {
+  if (prompt.thoughtSlices.length > 0) {
+    return prompt.thoughtSlices;
+  }
+
+  if (prompt.outputs.length > 0) {
+    return prompt.outputs.map((output, index) => ({
+      id: index + 1,
+      ts: prompt.ts,
+      text: output,
+      diffLines: index === prompt.outputs.length - 1 ? prompt.diffLines : [],
+    }));
+  }
+
+  return [{
+    id: 1,
+    ts: prompt.ts,
+    text: "(No exposed reasoning text)",
+    diffLines: prompt.diffLines,
+  }];
+}
+
+function selectedThoughtFromPrompt(
+  prompt: PromptSlice,
+  selectedThoughtIndex: number,
+): { entries: ThoughtSlice[]; selected: ThoughtSlice; index: number } {
+  const entries = thoughtEntriesForPrompt(prompt);
+  const safeIndex = Math.max(0, Math.min(selectedThoughtIndex, entries.length - 1));
+  return {
+    entries,
+    selected: entries[safeIndex] as ThoughtSlice,
+    index: safeIndex,
+  };
 }
 
 function diffPreviewLines(prompt: PromptSlice, fallbackFiles: FileStatRow[]): string[] {
@@ -1623,6 +1803,215 @@ function diffPreviewLines(prompt: PromptSlice, fallbackFiles: FileStatRow[]): st
   }
 
   return ["(No diff captured)"];
+}
+
+function diffLineColor(line: string): string | undefined {
+  if (line.startsWith("=== ")) {
+    return TUI_COLORS.cyan;
+  }
+  if (line.startsWith("FILE ") || line.startsWith("index ")) {
+    return TUI_COLORS.muted;
+  }
+  if (line.startsWith("+")) {
+    return TUI_COLORS.green;
+  }
+  if (line.startsWith("-")) {
+    return TUI_COLORS.red;
+  }
+  if (
+    line.startsWith("@@") ||
+    line.startsWith("---") ||
+    line.startsWith("+++") ||
+    line.startsWith("diff --git ")
+  ) {
+    return TUI_COLORS.muted;
+  }
+  return undefined;
+}
+
+function fileLabelFromDiffLine(line: string): string | null {
+  if (line.startsWith("FILE ")) {
+    const maybePath = line.slice("FILE ".length).replace(/^[+-]\s+/, "").trim();
+    return maybePath.length > 0 ? maybePath : null;
+  }
+
+  if (line.startsWith("diff --git ")) {
+    const match = /^diff --git a\/(.+) b\/(.+)$/.exec(line);
+    if (!match) {
+      return null;
+    }
+    return (match[2] ?? match[1])?.trim() ?? null;
+  }
+
+  if (line.startsWith("+++ b/")) {
+    const maybePath = line.slice("+++ b/".length).trim();
+    return maybePath.length > 0 ? maybePath : null;
+  }
+
+  if (line.startsWith("--- a/")) {
+    const maybePath = line.slice("--- a/".length).trim();
+    return maybePath.length > 0 ? maybePath : null;
+  }
+
+  const summaryMatch = /^[+-]\s+(.+)\s+\(\+\d+\s+-\d+\)$/.exec(line);
+  if (summaryMatch?.[1]) {
+    return summaryMatch[1];
+  }
+
+  return null;
+}
+
+function isSummaryOnlyDiffLine(line: string): boolean {
+  return /^FILE [+-]\s+.+$/.test(line) || /^[+-]\s+.+\s+\(\+\d+\s+-\d+\)$/.test(line);
+}
+
+function hasCodeLevelDiffLines(lines: string[]): boolean {
+  return lines.some((line) =>
+    line.startsWith("@@") ||
+    line.startsWith("diff --git ") ||
+    line.startsWith("--- ") ||
+    line.startsWith("+++ ") ||
+    (
+      (line.startsWith("+") || line.startsWith("-")) &&
+      !line.startsWith("+++") &&
+      !line.startsWith("---") &&
+      !isSummaryOnlyDiffLine(line)
+    ),
+  );
+}
+
+function toGitPathspec(projectPath: string, filePath: string): string | null {
+  const cleaned = filePath
+    .replace(/^FILE [+-]\s+/, "")
+    .replace(/^a\//, "")
+    .replace(/^b\//, "")
+    .trim();
+
+  if (cleaned.length === 0) {
+    return null;
+  }
+
+  if (isAbsolute(cleaned)) {
+    const rel = relative(projectPath, cleaned);
+    if (!rel || rel.startsWith("..")) {
+      return null;
+    }
+    return rel;
+  }
+
+  return cleaned;
+}
+
+function collectDiffFiles(
+  projectPath: string,
+  preferredDiffLines: string[],
+  prompt: PromptSlice,
+  fallbackFiles: FileStatRow[],
+): string[] {
+  const fromDiff = preferredDiffLines
+    .map((line) => fileLabelFromDiffLine(line))
+    .filter((value): value is string => !!value)
+    .map((path) => toGitPathspec(projectPath, path))
+    .filter((value): value is string => !!value);
+
+  if (fromDiff.length > 0) {
+    return [...new Set(fromDiff)];
+  }
+
+  const promptFiles = toSortedFileStats(prompt.files)
+    .map((row) => toGitPathspec(projectPath, row.path))
+    .filter((value): value is string => !!value);
+  if (promptFiles.length > 0) {
+    return [...new Set(promptFiles)];
+  }
+
+  return [...new Set(
+    fallbackFiles
+      .map((row) => toGitPathspec(projectPath, row.path))
+      .filter((value): value is string => !!value),
+  )];
+}
+
+function getLiveGitDiffLines(projectPath: string, files: string[]): string[] {
+  if (files.length === 0) {
+    return [];
+  }
+
+  const limitedFiles = files.slice(0, 40);
+  const args = [
+    "-C",
+    projectPath,
+    "--no-pager",
+    "diff",
+    "--no-ext-diff",
+    "--unified=3",
+    "--",
+    ...limitedFiles,
+  ];
+
+  try {
+    const raw = execFileSync("git", args, {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      maxBuffer: 8 * 1024 * 1024,
+    });
+    return extractUnifiedDiffLines(raw, 2200);
+  } catch (error) {
+    const maybeError = error as { stdout?: string };
+    if (typeof maybeError.stdout === "string" && maybeError.stdout.trim().length > 0) {
+      return extractUnifiedDiffLines(maybeError.stdout, 2200);
+    }
+    return [];
+  }
+}
+
+function formatFullDiffLines(lines: string[]): string[] {
+  if (lines.length === 0) {
+    return ["(No diff captured)"];
+  }
+
+  const out: string[] = [];
+  let currentFile: string | null = null;
+  let sectionHasContent = false;
+  let hasAnyHeader = false;
+
+  const flushEmptySection = (): void => {
+    if (currentFile && !sectionHasContent) {
+      out.push("  (No code-level diff captured)");
+    }
+    sectionHasContent = false;
+  };
+
+  for (const rawLine of lines) {
+    const line = rawLine.trimEnd();
+    const label = fileLabelFromDiffLine(line);
+    if (label && label !== currentFile) {
+      flushEmptySection();
+      if (out.length > 0) {
+        out.push("");
+      }
+      out.push(`=== ${label} ===`);
+      hasAnyHeader = true;
+      currentFile = label;
+      sectionHasContent = false;
+    }
+
+    if (line.startsWith("FILE ") || line.startsWith("diff --git ")) {
+      continue;
+    }
+
+    if (line.length > 0) {
+      out.push(line);
+      sectionHasContent = true;
+    }
+  }
+
+  flushEmptySection();
+
+  if (out.length === 0 && hasAnyHeader) {
+    return ["(No code-level diff captured)"];
+  }
+  return out.length > 0 ? out : ["(No diff captured)"];
 }
 
 function composeMubitAnswer(
@@ -1702,7 +2091,25 @@ function renderDiffOverlay(
   height: number,
 ): string {
   const prompt = selectedPromptFromAnalysis(analysis, state.selectedPromptIndex);
-  const diffLines = diffPreviewLines(prompt, analysis.files);
+  const thoughtSelection = selectedThoughtFromPrompt(prompt, state.selectedThoughtIndex);
+  let rawDiffLines = thoughtSelection.selected.diffLines.length > 0
+    ? thoughtSelection.selected.diffLines
+    : diffPreviewLines(prompt, analysis.files);
+  let usedLiveFallback = false;
+  if (!hasCodeLevelDiffLines(rawDiffLines)) {
+    const files = collectDiffFiles(state.projectPath, rawDiffLines, prompt, analysis.files);
+    const liveDiff = getLiveGitDiffLines(state.projectPath, files);
+    if (liveDiff.length > 0) {
+      rawDiffLines = liveDiff;
+      usedLiveFallback = true;
+    }
+  }
+
+  const diffLines = formatFullDiffLines(rawDiffLines);
+  if (usedLiveFallback) {
+    diffLines.unshift("(Live git diff fallback from current working tree)");
+    diffLines.unshift("");
+  }
   const contentHeight = Math.max(8, height - 4);
   const bodyHeight = Math.max(1, contentHeight - 2);
   const maxScroll = Math.max(0, diffLines.length - bodyHeight);
@@ -1711,11 +2118,7 @@ function renderDiffOverlay(
 
   const lineRows: PaneLine[] = visible.map((line) => ({
     text: line,
-    color:
-      line.startsWith("+") ? TUI_COLORS.green :
-      line.startsWith("-") ? TUI_COLORS.red :
-      line.startsWith("@@") || line.startsWith("---") || line.startsWith("+++") ? TUI_COLORS.muted :
-      undefined,
+    color: line.startsWith("(Live git diff fallback") ? TUI_COLORS.yellow : diffLineColor(line),
   }));
 
   const top = headerLine(
@@ -1724,7 +2127,7 @@ function renderDiffOverlay(
     width,
   );
   const box = boxLines(
-    `Session ${selectedSession.sessionId.slice(0, 8)} - Prompt ${prompt.id}`,
+    `Session ${selectedSession.sessionId.slice(0, 8)} - Prompt ${prompt.id} - Thought ${thoughtSelection.index + 1}`,
     width,
     contentHeight,
     lineRows,
@@ -1753,6 +2156,7 @@ function renderInspectView(
 
   const prompt = selectedPromptFromAnalysis(analysis, state.selectedPromptIndex);
   const splitMode = width >= 104;
+  const threePaneMode = width >= 126;
   const chatHeight = state.chatOpen ? Math.max(10, Math.floor(height * 0.32)) : 0;
   const baseHeight = Math.max(14, height - 4 - (state.chatOpen ? chatHeight + 1 : 0));
 
@@ -1762,7 +2166,12 @@ function renderInspectView(
     width,
   );
 
-  const thoughtText = prompt.thoughts.length > 0 ? prompt.thoughts.join("\n\n") : "(No exposed reasoning text)";
+  if (threePaneMode && state.inspectPane === "files") {
+    state.inspectPane = "thoughts";
+  }
+
+  const thoughtSelection = selectedThoughtFromPrompt(prompt, state.selectedThoughtIndex);
+  state.selectedThoughtIndex = thoughtSelection.index;
   const promptFiles = toSortedFileStats(prompt.files);
   const filesToRender = promptFiles.length > 0 ? promptFiles : analysis.files;
   const buildPromptLines = (paneWidth: number, paneHeight: number): PaneLine[] => {
@@ -1781,8 +2190,21 @@ function renderInspectView(
     return lines;
   };
 
-  const buildThoughtLines = (paneWidth: number): PaneLine[] =>
-    wrapPlain(thoughtText, Math.max(12, paneWidth - 4)).map((line) => ({ text: line }));
+  const buildThoughtLines = (paneWidth: number, paneHeight: number): PaneLine[] => {
+    const lines: PaneLine[] = [];
+    const thoughtBody = Math.max(1, paneHeight - 2);
+    const thoughtStart = windowStart(thoughtSelection.entries.length, state.selectedThoughtIndex, thoughtBody);
+    const visibleThoughts = thoughtSelection.entries.slice(thoughtStart, thoughtStart + thoughtBody);
+    for (let i = 0; i < visibleThoughts.length; i += 1) {
+      const absoluteIndex = thoughtStart + i;
+      const row = visibleThoughts[i] as ThoughtSlice;
+      lines.push({
+        text: `${absoluteIndex === state.selectedThoughtIndex ? ">" : " "} ${row.id.toString().padStart(2, " ")}  ${promptPreview(row.text, Math.max(10, paneWidth - 10))}`,
+        highlight: absoluteIndex === state.selectedThoughtIndex,
+      });
+    }
+    return lines;
+  };
 
   const buildFileLines = (paneWidth: number): PaneLine[] =>
     filesToRender.length === 0
@@ -1791,18 +2213,72 @@ function renderInspectView(
           text: `${padPlain(file.path, Math.max(10, paneWidth - 18))}  +${file.plus}  -${file.minus}`,
         }));
 
-  const buildDiffLines = (): PaneLine[] =>
-    diffPreviewLines(prompt, analysis.files).map((line) => ({
-      text: line,
-      color:
-        line.startsWith("+") ? TUI_COLORS.green :
-        line.startsWith("-") ? TUI_COLORS.red :
-        line.startsWith("@@") || line.startsWith("---") || line.startsWith("+++") ? TUI_COLORS.muted :
-        undefined,
-    }));
+  const buildDiffLines = (): PaneLine[] => {
+    const selectedThoughtDiff = thoughtSelection.selected.diffLines;
+    const source = selectedThoughtDiff.length > 0 ? selectedThoughtDiff : diffPreviewLines(prompt, analysis.files);
+    const rows: PaneLine[] = [];
+    if (selectedThoughtDiff.length === 0 && thoughtSelection.entries.length > 0) {
+      rows.push({
+        text: `(No diff directly tied to thought ${thoughtSelection.index + 1}; showing prompt-level diff)`,
+        color: TUI_COLORS.muted,
+      });
+    }
+    for (const line of source) {
+      rows.push({
+        text: line,
+        color: diffLineColor(line),
+      });
+    }
+    return rows;
+  };
+
+  const withPaneScroll = (pane: "files" | "diff", paneHeight: number, lines: PaneLine[]): PaneLine[] => {
+    const current =
+      pane === "files" ? state.filesScroll :
+      state.diffScroll;
+    const scrolled = scrollPaneLines(lines, paneHeight, current);
+    if (pane === "files") {
+      state.filesScroll = scrolled.scroll;
+    } else {
+      state.diffScroll = scrolled.scroll;
+    }
+    return scrolled.lines;
+  };
 
   const composed: string[] = [topHeader, ""];
-  if (splitMode) {
+  if (threePaneMode) {
+    const minPane = 22;
+    const innerWidth = width - 4;
+    let leftWidth = Math.max(minPane, Math.floor(innerWidth * 0.3));
+    let middleWidth = Math.max(minPane, Math.floor(innerWidth * 0.33));
+    let rightWidth = innerWidth - leftWidth - middleWidth;
+    if (rightWidth < minPane) {
+      const deficit = minPane - rightWidth;
+      const takeLeft = Math.min(deficit, Math.max(0, leftWidth - minPane));
+      leftWidth -= takeLeft;
+      const takeMiddle = Math.min(deficit - takeLeft, Math.max(0, middleWidth - minPane));
+      middleWidth -= takeMiddle;
+      rightWidth = innerWidth - leftWidth - middleWidth;
+    }
+
+    const paneHeight = Math.max(8, baseHeight);
+    const promptsBox = boxLines("Prompts", leftWidth, paneHeight, buildPromptLines(leftWidth, paneHeight), state.inspectPane === "prompts");
+    const thoughtsBox = boxLines(
+      `Thoughts (${thoughtSelection.index + 1}/${thoughtSelection.entries.length})`,
+      middleWidth,
+      paneHeight,
+      buildThoughtLines(middleWidth, paneHeight),
+      state.inspectPane === "thoughts",
+    );
+    const diffBox = boxLines(
+      `Diff (thought ${thoughtSelection.index + 1})`,
+      rightWidth,
+      paneHeight,
+      withPaneScroll("diff", paneHeight, buildDiffLines()),
+      state.inspectPane === "diff",
+    );
+    composed.push(...joinThreeColumns(promptsBox, thoughtsBox, diffBox));
+  } else if (splitMode) {
     const minPane = 24;
     const leftWidth = Math.max(minPane, Math.min(Math.floor((width - 2) * 0.36), width - minPane - 2));
     const rightWidth = Math.max(minPane, width - leftWidth - 2);
@@ -1810,9 +2286,27 @@ function renderInspectView(
     const bottomHeight = Math.max(7, baseHeight - topHeight);
 
     const promptsBox = boxLines("Prompts", leftWidth, topHeight, buildPromptLines(leftWidth, topHeight), state.inspectPane === "prompts");
-    const thoughtsBox = boxLines("Thoughts", rightWidth, topHeight, buildThoughtLines(rightWidth), state.inspectPane === "thoughts");
-    const filesBox = boxLines("Files Changed", leftWidth, bottomHeight, buildFileLines(leftWidth), state.inspectPane === "files");
-    const diffBox = boxLines("Diff", rightWidth, bottomHeight, buildDiffLines(), state.inspectPane === "diff");
+    const thoughtsBox = boxLines(
+      "Thoughts",
+      rightWidth,
+      topHeight,
+      buildThoughtLines(rightWidth, topHeight),
+      state.inspectPane === "thoughts",
+    );
+    const filesBox = boxLines(
+      "Files Changed",
+      leftWidth,
+      bottomHeight,
+      withPaneScroll("files", bottomHeight, buildFileLines(leftWidth)),
+      state.inspectPane === "files",
+    );
+    const diffBox = boxLines(
+      "Diff",
+      rightWidth,
+      bottomHeight,
+      withPaneScroll("diff", bottomHeight, buildDiffLines()),
+      state.inspectPane === "diff",
+    );
 
     composed.push(...joinColumns(promptsBox, thoughtsBox));
     composed.push(...joinColumns(filesBox, diffBox));
@@ -1825,11 +2319,35 @@ function renderInspectView(
 
     composed.push(...boxLines("Prompts", paneWidth, promptsHeight, buildPromptLines(paneWidth, promptsHeight), state.inspectPane === "prompts"));
     composed.push("");
-    composed.push(...boxLines("Thoughts", paneWidth, thoughtsHeight, buildThoughtLines(paneWidth), state.inspectPane === "thoughts"));
+    composed.push(
+      ...boxLines(
+        "Thoughts",
+        paneWidth,
+        thoughtsHeight,
+        buildThoughtLines(paneWidth, thoughtsHeight),
+        state.inspectPane === "thoughts",
+      ),
+    );
     composed.push("");
-    composed.push(...boxLines("Files Changed", paneWidth, filesHeight, buildFileLines(paneWidth), state.inspectPane === "files"));
+    composed.push(
+      ...boxLines(
+        "Files Changed",
+        paneWidth,
+        filesHeight,
+        withPaneScroll("files", filesHeight, buildFileLines(paneWidth)),
+        state.inspectPane === "files",
+      ),
+    );
     composed.push("");
-    composed.push(...boxLines("Diff", paneWidth, diffHeight, buildDiffLines(), state.inspectPane === "diff"));
+    composed.push(
+      ...boxLines(
+        "Diff",
+        paneWidth,
+        diffHeight,
+        withPaneScroll("diff", diffHeight, buildDiffLines()),
+        state.inspectPane === "diff",
+      ),
+    );
   }
 
   if (state.chatOpen) {
@@ -1867,7 +2385,9 @@ function renderInspectView(
 
   const footer = state.chatOpen
     ? "[tab] focus pane   [esc] close chat   [up/down] navigate/scroll   [left] back"
-    : "[up/down] prompts   [tab] focus pane   [d] full diff   [m] MuBit chat   [left] back";
+    : threePaneMode
+      ? "[enter] prompt -> thoughts   [up/down] select/scroll   [tab] focus pane   [d] full diff   [m] MuBit chat   [left] back"
+      : "[up/down] prompts/scroll pane   [tab] focus pane   [d] full diff   [m] MuBit chat   [left] back";
 
   composed.push("");
   composed.push(paint(clipPlain(footer, width), TUI_COLORS.dim));
@@ -1888,7 +2408,8 @@ function renderHelpOverlay(width: number, height: number): string {
     { text: "s       sync Codex history" },
     { text: "" },
     { text: "Inspect", color: TUI_COLORS.muted },
-    { text: "up/down navigate prompts" },
+    { text: "enter   from prompts -> focus thoughts" },
+    { text: "up/down navigate prompts/thoughts or scroll pane" },
     { text: "tab     cycle pane focus" },
     { text: "d       toggle full diff overlay" },
     { text: "m       toggle MuBit chat" },
@@ -1915,8 +2436,11 @@ function renderHelpOverlay(width: number, height: number): string {
   ].join("\n");
 }
 
-function inspectPaneCycle(chatOpen: boolean): InspectPane[] {
-  return chatOpen ? ["prompts", "thoughts", "files", "diff", "chat"] : ["prompts", "thoughts", "files", "diff"];
+function inspectPaneCycle(chatOpen: boolean, includeFilesPane: boolean): InspectPane[] {
+  if (includeFilesPane) {
+    return chatOpen ? ["prompts", "thoughts", "files", "diff", "chat"] : ["prompts", "thoughts", "files", "diff"];
+  }
+  return chatOpen ? ["prompts", "thoughts", "diff", "chat"] : ["prompts", "thoughts", "diff"];
 }
 
 async function tui(rest: string[]): Promise<void> {
@@ -1943,9 +2467,13 @@ async function tui(rest: string[]): Promise<void> {
     rows: [],
     selectedSessionIndex: 0,
     selectedPromptIndex: 0,
+    selectedThoughtIndex: 0,
     chatOpen: false,
     chatDraft: "",
     chatScroll: 0,
+    thoughtsScroll: 0,
+    filesScroll: 0,
+    diffScroll: 0,
     fullDiffOpen: false,
     fullDiffScroll: 0,
     helpOpen: false,
@@ -1981,6 +2509,14 @@ async function tui(rest: string[]): Promise<void> {
       return null;
     }
     return analysisCache.get(row.sessionId)?.analysis ?? null;
+  };
+
+  const resetInspectScroll = (): void => {
+    state.selectedThoughtIndex = 0;
+    state.thoughtsScroll = 0;
+    state.filesScroll = 0;
+    state.diffScroll = 0;
+    state.fullDiffScroll = 0;
   };
 
   const render = (): void => {
@@ -2074,6 +2610,7 @@ async function tui(rest: string[]): Promise<void> {
     if (state.rows.length === 0) {
       state.selectedSessionIndex = 0;
       state.selectedPromptIndex = 0;
+      resetInspectScroll();
       state.view = "browse";
       return;
     }
@@ -2082,6 +2619,7 @@ async function tui(rest: string[]): Promise<void> {
       state.selectedSessionIndex = state.rows.length - 1;
     }
     state.selectedPromptIndex = 0;
+    resetInspectScroll();
   };
 
   const runTask = (label: string, task: () => Promise<void>): void => {
@@ -2149,7 +2687,7 @@ async function tui(rest: string[]): Promise<void> {
     state.chatDraft = "";
     state.chatScroll = 0;
     state.fullDiffOpen = false;
-    state.fullDiffScroll = 0;
+    resetInspectScroll();
     analysisCache.clear();
     await setLastProject(state.projectPath);
     await refreshRows(`Loading ${basename(state.projectPath)}`);
@@ -2310,6 +2848,7 @@ async function tui(rest: string[]): Promise<void> {
           state.view = "browse";
           state.chatOpen = false;
           state.fullDiffOpen = false;
+          resetInspectScroll();
           analysisCache.clear();
           await refreshRows(`Loading ${basename(normalized)}`);
           state.statusLine = `Project: ${normalized}`;
@@ -2374,6 +2913,8 @@ async function tui(rest: string[]): Promise<void> {
           state.selectedPromptIndex = 0;
           state.chatOpen = false;
           state.fullDiffOpen = false;
+          state.chatScroll = 0;
+          resetInspectScroll();
           render();
         }
         return;
@@ -2419,7 +2960,7 @@ async function tui(rest: string[]): Promise<void> {
     if (key.name === "left" || key.name === "escape") {
       if (state.chatOpen) {
         state.chatOpen = false;
-        state.inspectPane = "prompts";
+        state.inspectPane = "thoughts";
       } else {
         state.view = "browse";
       }
@@ -2428,7 +2969,8 @@ async function tui(rest: string[]): Promise<void> {
     }
 
     if (key.name === "tab") {
-      const panes = inspectPaneCycle(state.chatOpen);
+      const includeFilesPane = getSize().width < 126;
+      const panes = inspectPaneCycle(state.chatOpen, includeFilesPane);
       const current = panes.indexOf(state.inspectPane);
       const next = panes[(current + 1) % panes.length] ?? panes[0];
       state.inspectPane = next ?? "prompts";
@@ -2438,7 +2980,7 @@ async function tui(rest: string[]): Promise<void> {
 
     if (str === "m") {
       state.chatOpen = !state.chatOpen;
-      state.inspectPane = state.chatOpen ? "chat" : "prompts";
+      state.inspectPane = state.chatOpen ? "chat" : "thoughts";
       state.chatScroll = 0;
       render();
       return;
@@ -2451,9 +2993,28 @@ async function tui(rest: string[]): Promise<void> {
       return;
     }
 
+    if (key.name === "return" && state.inspectPane === "prompts") {
+      state.inspectPane = "thoughts";
+      state.selectedThoughtIndex = 0;
+      state.diffScroll = 0;
+      render();
+      return;
+    }
+
     if (key.name === "up") {
       if (state.inspectPane === "prompts") {
-        state.selectedPromptIndex = Math.max(0, state.selectedPromptIndex - 1);
+        const nextIndex = Math.max(0, state.selectedPromptIndex - 1);
+        if (nextIndex !== state.selectedPromptIndex) {
+          state.selectedPromptIndex = nextIndex;
+          resetInspectScroll();
+        }
+      } else if (state.inspectPane === "thoughts") {
+        state.selectedThoughtIndex = Math.max(0, state.selectedThoughtIndex - 1);
+        state.diffScroll = 0;
+      } else if (state.inspectPane === "files") {
+        state.filesScroll = Math.max(0, state.filesScroll - 1);
+      } else if (state.inspectPane === "diff") {
+        state.diffScroll = Math.max(0, state.diffScroll - 1);
       } else if (state.inspectPane === "chat") {
         const row = selectedRow();
         const chat = row ? ensureChat(row.sessionId) : [];
@@ -2465,7 +3026,20 @@ async function tui(rest: string[]): Promise<void> {
 
     if (key.name === "down") {
       if (state.inspectPane === "prompts") {
-        state.selectedPromptIndex = Math.min(analysis.prompts.length - 1, state.selectedPromptIndex + 1);
+        const nextIndex = Math.min(analysis.prompts.length - 1, state.selectedPromptIndex + 1);
+        if (nextIndex !== state.selectedPromptIndex) {
+          state.selectedPromptIndex = nextIndex;
+          resetInspectScroll();
+        }
+      } else if (state.inspectPane === "thoughts") {
+        const prompt = selectedPromptFromAnalysis(analysis, state.selectedPromptIndex);
+        const thoughtCount = thoughtEntriesForPrompt(prompt).length;
+        state.selectedThoughtIndex = Math.min(thoughtCount - 1, state.selectedThoughtIndex + 1);
+        state.diffScroll = 0;
+      } else if (state.inspectPane === "files") {
+        state.filesScroll += 1;
+      } else if (state.inspectPane === "diff") {
+        state.diffScroll += 1;
       } else if (state.inspectPane === "chat") {
         state.chatScroll = Math.max(0, state.chatScroll - 1);
       }
