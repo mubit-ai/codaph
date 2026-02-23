@@ -14,40 +14,40 @@ Codaph uses a dual-store architecture:
 
 ## Runtime Components
 
+All runtime code now lives under `src/` for readability.
+
 ### Adapters
 
-- `@codaph/adapter-codex-sdk`
+- `src/lib/adapter-codex-sdk.ts`
   Captures events from Codex SDK streamed runs.
-- `@codaph/adapter-codex-exec`
+- `src/lib/adapter-codex-exec.ts`
   Captures JSON output from `codex exec --json`.
-- `codex-history-sync` (`tools/codaph-cli`)
+- `codex-history-sync` (`src/codex-history-sync.ts`)
   Imports historical sessions from `~/.codex/sessions`.
 
 ### Ingestion
 
-- `@codaph/ingest-pipeline`
+- `src/lib/ingest-pipeline.ts`
   Normalizes and redacts payloads, appends mirror, and writes MuBit.
   The pipeline deduplicates before remote write and opens a fail-open circuit after repeated MuBit write failures.
 
 ### Storage
 
-- `@codaph/mirror-jsonl`
+- `src/lib/mirror-jsonl.ts`
   Append-only event store under `.codaph/`.
   Maintains manifest, sparse indexes, and `eventId` index.
-- `@codaph/memory-mubit`
+- `src/lib/memory-mubit.ts`
   Writes canonical events to MuBit control APIs.
   Supports project-scoped and session-scoped run ids.
   Appends `codaph_event` activity for remote replay.
 
 ### Query and Visualization
 
-- `@codaph/query-service`
+- `src/lib/query-service.ts`
   Reads local mirror and returns sessions, timelines, diffs, and contributors.
-- `tools/codaph-cli`
+- `src/index.ts`
   Exposes CLI commands and interactive TUI.
   Includes local sync and remote MuBit sync.
-- `apps/desktop`
-  Secondary Electron + Vue UI surface over the same mirror.
 
 ## Data Flow
 

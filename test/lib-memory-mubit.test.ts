@@ -1,0 +1,141 @@
+import { describe, expect, it } from "vitest";
+import { MubitMemoryEngine, mubitRunIdForProject, mubitRunIdForSession } from "../src/lib/memory-mubit";
+
+describe("memory-mubit", () => {
+  it("builds stable run ids", () => {
+    expect(mubitRunIdForSession("repo123", "session456")).toBe("codaph:repo123:session456");
+    expect(mubitRunIdForSession("repo123", "session456", "custom")).toBe(
+      "custom:repo123:session456",
+    );
+    expect(mubitRunIdForProject("repo123")).toBe("codaph:repo123");
+    expect(mubitRunIdForProject("repo123", "custom")).toBe("custom:repo123");
+  });
+
+  it("writes control ingest payloads with idempotency key", async () => {
+    const captures: Array<Record<string, unknown>> = [];
+    const activities: Array<Record<string, unknown>> = [];
+    const engine = new MubitMemoryEngine({
+      client: {
+        control: {
+          ingest: async (payload?: Record<string, unknown>) => {
+            captures.push(payload ?? {});
+            return { accepted: true, job_id: "job-1", deduplicated: true };
+          },
+          setVariable: async () => ({ success: true }),
+          query: async () => ({ final_answer: "ok" }),
+          appendActivity: async (payload?: Record<string, unknown>) => {
+            activities.push(payload ?? {});
+            return { success: true };
+          },
+        },
+      },
+    });
+
+    const result = await engine.writeEvent({
+      eventId: "evt-123",
+      source: "codex_exec",
+      repoId: "repo-abc",
+      actorId: "anil",
+      sessionId: "session-def",
+      threadId: "thread-1",
+      ts: "2026-02-23T09:00:00.000Z",
+      eventType: "prompt.submitted",
+      payload: { prompt: "summarize current repo" },
+      reasoningAvailability: "unavailable",
+    });
+
+    expect(result.accepted).toBe(true);
+    expect(result.jobId).toBe("job-1");
+    expect(result.deduplicated).toBe(true);
+    expect(captures).toHaveLength(1);
+    expect(captures[0].idempotency_key).toBe("evt-123");
+    expect(captures[0].run_id).toBe("codaph:repo-abc:session-def");
+    expect(activities).toHaveLength(1);
+    expect(activities[0].run_id).toBe("codaph:repo-abc:session-def");
+    const activity = activities[0].activity as Record<string, unknown>;
+    expect(activity.type).toBe("codaph_event");
+    expect(typeof activity.payload).toBe("string");
+    const envelope = JSON.parse(String(activity.payload)) as Record<string, unknown>;
+    expect(envelope.schema).toBe("codaph_event.v2");
+    const event = envelope.event as Record<string, unknown>;
+    expect(event.eventType).toBe("prompt.submitted");
+    const payload = event.payload as Record<string, unknown>;
+    expect(payload.prompt).toBe("summarize current repo");
+  });
+
+  it("truncates activity payloads so large prompts are still appendable", async () => {
+    const activities: Array<Record<string, unknown>> = [];
+    const engine = new MubitMemoryEngine({
+      client: {
+        control: {
+          ingest: async () => ({ accepted: true }),
+          setVariable: async () => ({ success: true }),
+          query: async () => ({ final_answer: "ok" }),
+          appendActivity: async (payload?: Record<string, unknown>) => {
+            activities.push(payload ?? {});
+            return { success: true };
+          },
+        },
+      },
+    });
+
+    await engine.writeEvent({
+      eventId: "evt-large",
+      source: "codex_exec",
+      repoId: "repo-abc",
+      actorId: "anil",
+      sessionId: "session-def",
+      threadId: "thread-1",
+      ts: "2026-02-23T09:00:00.000Z",
+      eventType: "prompt.submitted",
+      payload: { prompt: "x".repeat(30000) },
+      reasoningAvailability: "unavailable",
+    });
+
+    expect(activities).toHaveLength(1);
+    const activity = activities[0].activity as Record<string, unknown>;
+    const payloadRaw = String(activity.payload);
+    expect(payloadRaw.length).toBeLessThan(10000);
+  });
+
+  it("supports shared project scope and actor metadata", async () => {
+    const captures: Array<Record<string, unknown>> = [];
+    const engine = new MubitMemoryEngine({
+      projectId: "team-repo",
+      actorId: "anil",
+      runScope: "project",
+      client: {
+        control: {
+          ingest: async (payload?: Record<string, unknown>) => {
+            captures.push(payload ?? {});
+            return { accepted: true };
+          },
+          setVariable: async () => ({ success: true }),
+          query: async () => ({ final_answer: "ok" }),
+          appendActivity: async () => ({ success: true }),
+        },
+      },
+    });
+
+    await engine.writeEvent({
+      eventId: "evt-456",
+      source: "codex_exec",
+      repoId: "local-repo-id",
+      actorId: null,
+      sessionId: "session-xyz",
+      threadId: "thread-1",
+      ts: "2026-02-23T09:00:00.000Z",
+      eventType: "item.completed",
+      payload: { item: { type: "reasoning", text: "thinking" } },
+      reasoningAvailability: "full",
+    });
+
+    expect(captures).toHaveLength(1);
+    expect(captures[0].run_id).toBe("codaph:team-repo");
+    const item = (captures[0].items as Array<Record<string, unknown>>)[0];
+    const metadataRaw = typeof item.metadata_json === "string" ? item.metadata_json : "{}";
+    const metadata = JSON.parse(metadataRaw) as Record<string, unknown>;
+    expect(metadata.project_id).toBe("team-repo");
+    expect(metadata.actor_id).toBe("anil");
+  });
+});

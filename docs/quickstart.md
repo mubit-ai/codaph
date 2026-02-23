@@ -78,10 +78,6 @@ bun run cli inspect --session <session-id> --cwd /absolute/project/path
 bun run cli mubit query "what changed in auth?" --session <session-id> --cwd /absolute/project/path --mubit
 ```
 
-## 7) Desktop App (Secondary)
+## 7) Scope Note
 
-Desktop remains available and uses the same `.codaph` mirror.
-
-```bash
-bun run desktop
-```
+Codaph is CLI/TUI-first and currently ships without the Electron desktop app.

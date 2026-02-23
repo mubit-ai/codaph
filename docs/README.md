@@ -40,4 +40,3 @@ Codaph Phase 1A is operational for Codex-first ingestion and collaborative MuBit
 - MuBit writes and semantic queries are available.
 - Remote MuBit timeline import is available.
 - TUI supports actor filtering and contributor overlay.
-- Desktop app remains available as a secondary surface.

@@ -2,6 +2,19 @@
 
 Codaph is a Codex-first capture layer for coding agent activity, with a CLI/TUI-first workflow and MuBit-backed collaborative memory.
 
+## Repository Layout
+
+Codaph now uses a single-app layout for readability.
+
+```text
+src/
+  index.ts            # CLI + TUI entrypoint
+  lib/                # core modules (adapters, ingest, mirror, query, mubit)
+  *.ts                # sync, settings, project registry, hooks
+test/                 # all tests
+docs/                   # user and architecture docs
+```
+
 ## Documentation
 
 Deep docs live in `docs/`.
@@ -119,20 +132,4 @@ Team-shared MuBit setup:
    If unset, Codaph auto-detects via `gh api user`, then git config, then shell user.
 5. Use `bun run cli sync remote --cwd <project>` (or `r` in TUI) to import remote activity into local timeline and render per-actor prompts/thoughts/diffs.
 
-## Desktop App (Kept, Secondary)
-
-```bash
-bun run desktop
-```
-
-Desktop flow (unchanged):
-1. Click **Add Folder** and pick a project root.
-2. Keep using Codex CLI/Desktop as you normally do.
-3. In Codaph click **Sync Now** (or leave **Auto Sync** on).
-4. View **Prompts**, **Thoughts**, **Assistant Output**, and **Diff Summary**.
-5. Add more folders to switch between projects.
-
-Optional:
-- Use direct capture in the expandable panel if you want Codaph to initiate a run itself.
-
-All captured events are written under `<project>/.codaph`.
+Codaph is now CLI/TUI-only. All captured events are written under `<project>/.codaph`.

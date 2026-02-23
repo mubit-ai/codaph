@@ -2,23 +2,22 @@
   "name": "codaph",
   "private": true,
   "type": "module",
-  "workspaces": [
-    "apps/*",
-    "packages/*",
-    "tools/*"
-  ],
+  "bin": {
+    "codaph": "./dist/index.js"
+  },
   "scripts": {
-    "build": "bun run --workspaces build",
-    "test": "bun run --workspaces test",
-    "lint": "bun run --workspaces lint",
-    "typecheck": "bun run --workspaces typecheck",
-    "desktop:build": "bun run --cwd apps/desktop build",
-    "desktop:start": "bun run --cwd apps/desktop start",
-    "desktop": "bun run desktop:build && bun run desktop:start",
-    "cli": "bun ./tools/codaph-cli/src/index.ts",
+    "build": "bun build src/index.ts --outdir dist --target bun",
+    "test": "bun test",
+    "lint": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "cli": "bun ./src/index.ts",
     "tui": "bun run cli tui",
-    "agent:status": "bun run ./tools/codaph-cli/src/append-agent-status.ts",
-    "hooks:install": "bun run ./tools/codaph-cli/src/install-hooks.ts"
+    "agent:status": "bun run ./src/append-agent-status.ts",
+    "hooks:install": "bun run ./src/install-hooks.ts"
+  },
+  "dependencies": {
+    "@mubit-ai/sdk": "^0.1.1",
+    "@openai/codex-sdk": "^0.104.0"
   },
   "devDependencies": {
     "@types/node": "^22.13.11",
