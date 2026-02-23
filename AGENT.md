@@ -382,3 +382,33 @@ Do not rewrite history; append a new snapshot each run.
 - unstaged: 0
 - untracked: 1
 - files: AGENT.md, README.md, docs/README.md, packages/adapter-codex-exec/src/index.ts, packages/adapter-codex-sdk/src/index.ts, packages/core-types/src/index.ts, packages/core-types/test/core-types.test.ts, packages/diff-engine/test/diff-engine.test.ts, packages/ingest-pipeline/src/index.ts, packages/ingest-pipeline/test/ingest-pipeline.test.ts, packages/memory-mubit/src/index.ts, packages/memory-mubit/test/memory-mubit.test.ts, packages/mirror-jsonl/src/index.ts, packages/mirror-jsonl/test/mirror-jsonl.test.ts, packages/query-service/src/index.ts, packages/query-service/test/query-service.test.ts, tools/codaph-cli/src/codex-history-sync.ts, tools/codaph-cli/src/index.ts, tools/codaph-cli/src/mubit-remote-sync.ts
+
+## Status Snapshot — 2026-02-23T16:01:28.270Z
+- source: manual
+- repo: /Users/anilp/Code/codaph
+- branch: main
+- head: af48a2d
+- staged: 1
+- unstaged: 4
+- untracked: 6
+- files: EADME.md, docs/README.md, docs/architecture.md, docs/cli-reference.md, docs/collaboration-mubit.md, docs/data-model.md, docs/mubit-integration-todo.md, docs/quickstart.md, docs/roadmap.md, docs/troubleshooting.md, docs/tui-guide.md
+
+## Status Snapshot — 2026-02-23T16:05:47.503Z
+- source: manual
+- repo: /Users/anilp/Code/codaph
+- branch: main
+- head: af48a2d
+- staged: 1
+- unstaged: 5
+- untracked: 7
+- files: GENT.md, README.md, docs/README.md, docs/architecture.md, docs/cli-reference.md, docs/collaboration-mubit.md, docs/data-model.md, docs/mubit-integration-todo.md, docs/one-page-cli-tui.md, docs/quickstart.md, docs/roadmap.md, docs/troubleshooting.md, docs/tui-guide.md
+
+## Status Snapshot — 2026-02-23T16:13:56.322Z
+- source: pre-commit
+- repo: /Users/anilp/Code/codaph
+- branch: main
+- head: af48a2d
+- staged: 13
+- unstaged: 0
+- untracked: 0
+- files: AGENT.md, README.md, docs/README.md, docs/architecture.md, docs/cli-reference.md, docs/collaboration-mubit.md, docs/data-model.md, docs/mubit-integration-todo.md, docs/one-page-cli-tui.md, docs/quickstart.md, docs/roadmap.md, docs/troubleshooting.md, docs/tui-guide.md

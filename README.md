@@ -2,6 +2,21 @@
 
 Codaph is a Codex-first capture layer for coding agent activity, with a CLI/TUI-first workflow and MuBit-backed collaborative memory.
 
+## Documentation
+
+Deep docs live in `docs/`.
+
+- [docs/README.md](docs/README.md)
+- [docs/one-page-cli-tui.md](docs/one-page-cli-tui.md)
+- [docs/quickstart.md](docs/quickstart.md)
+- [docs/cli-reference.md](docs/cli-reference.md)
+- [docs/tui-guide.md](docs/tui-guide.md)
+- [docs/collaboration-mubit.md](docs/collaboration-mubit.md)
+- [docs/architecture.md](docs/architecture.md)
+- [docs/data-model.md](docs/data-model.md)
+- [docs/troubleshooting.md](docs/troubleshooting.md)
+- [docs/roadmap.md](docs/roadmap.md)
+
 ## Requirements
 
 - Bun `1.3.9+`
@@ -37,7 +52,7 @@ TUI flow:
 3. Sync Codex history from `~/.codex/sessions` into Codaph mirror + MuBit.
 4. Optionally sync shared remote MuBit timeline back into local mirror (`r`) to pull collaborator activity.
 5. Inspect prompts, thoughts, assistant output, and file changes by session.
-5. Query MuBit semantic memory for the active session.
+6. Query MuBit semantic memory for the active session.
 
 TUI keyboard map:
 - `q`: quit

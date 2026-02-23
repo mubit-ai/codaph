@@ -1,5 +1,13 @@
-# MuBit Integration TODO
+# MuBit Integration Status
 
-- TODO(MUBIT): post-normalization write hook in ingest pipeline
-- TODO(MUBIT): semantic context retrieval in query service
-- TODO(MUBIT): replay/sync job against MuBit store
+Codaph is now integrated with MuBit for write, query, and remote replay flows.
+
+Implemented:
+
+- post-normalization write hook in ingest pipeline
+- semantic query command (`mubit query`) with optional OpenAI synthesis
+- remote replay job (`sync remote`) from MuBit context snapshot timeline
+- project-scoped and session-scoped run ids
+- actor-aware metadata for collaborative attribution
+
+Remaining integration work is tracked in [Roadmap](./roadmap.md).

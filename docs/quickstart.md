@@ -1,33 +1,87 @@
 # Quickstart
 
-## 1) Install
+This guide gets Codaph running with collaborative MuBit memory in less than 10 minutes.
+
+## 1) Prerequisites
+
+- Bun `1.3.9+`
+- Codex CLI installed and authenticated
+- MuBit API key
+- Optional OpenAI API key for MuBit answer synthesis
+
+## 2) Install and Build
+
+Run commands from the repository root.
 
 ```bash
+cd /Users/anilp/Code/codaph
 bun install
-bun run hooks:install
-bun run agent:status -- --source manual
+bun run typecheck
+bun run build
 ```
 
-## 2) Verify Codex Login
+## 3) Configure Secrets
+
+Use root `.env` or shell exports.
 
 ```bash
-codex login status
+export MUBIT_API_KEY=your_mubit_key
+export OPENAI_API_KEY=your_openai_key
 ```
 
-## 3) Build and Launch Desktop
+Optional collaborative overrides:
+
+```bash
+export CODAPH_PROJECT_ID=owner/repo
+export CODAPH_ACTOR_ID=your-github-login
+export CODAPH_MUBIT_RUN_SCOPE=project
+```
+
+## 4) Validate Runtime Wiring
+
+```bash
+bun run cli doctor --cwd /Users/anilp/Code/codaph --mubit
+```
+
+Expected signals:
+
+- `MuBit runtime: enabled`
+- `MuBit project id:` is set (auto-detected from git remote or explicit override)
+- `MuBit actor id:` is set
+
+## 5) Run TUI (Primary UX)
+
+```bash
+bun run tui --cwd /Users/anilp/Code/codaph --mubit
+```
+
+Inside TUI:
+
+1. Press `a` to add/select project folder.
+2. Press `s` to sync local Codex sessions from `~/.codex/sessions`.
+3. Press `r` to sync shared MuBit remote activity into local mirror.
+4. Press `enter` on a session to inspect prompts, thoughts, and diffs.
+5. Press `m` to ask MuBit questions in context.
+
+## 6) CLI-Only Workflow (Optional)
+
+```bash
+# local codex history -> mirror (+ MuBit if enabled)
+bun run cli sync --cwd /absolute/project/path --mubit
+
+# remote MuBit timeline -> mirror
+bun run cli sync remote --cwd /absolute/project/path --mubit
+
+# inspect and query
+bun run cli sessions list --cwd /absolute/project/path
+bun run cli inspect --session <session-id> --cwd /absolute/project/path
+bun run cli mubit query "what changed in auth?" --session <session-id> --cwd /absolute/project/path --mubit
+```
+
+## 7) Desktop App (Secondary)
+
+Desktop remains available and uses the same `.codaph` mirror.
 
 ```bash
 bun run desktop
-```
-
-In the app:
-1. Add one or more project folders.
-2. Use Codex CLI/Desktop normally for those projects.
-3. Click `Sync Now` (or keep `Auto Sync` enabled).
-4. Inspect prompts, reasoning/thoughts, and diffs per session.
-
-## 4) Optional CLI
-
-```bash
-bun run cli run "Explain this codebase" --cwd /absolute/project/path
 ```
