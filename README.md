@@ -45,6 +45,33 @@ bun run typecheck
 bun run build
 ```
 
+## Use Via NPX
+
+After npm publish, users can run Codaph directly without cloning:
+
+```bash
+npx codaph --help
+npx codaph tui --cwd /absolute/project/path --mubit
+```
+
+## Release Tag Publish (GitHub Actions)
+
+Codaph now publishes to npm on release tags via:
+`/Users/anilp/Code/codaph/.github/workflows/publish-npm.yml`
+
+Release flow:
+
+```bash
+# 1) bump version in package.json (must match tag)
+# 2) commit and push
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+Workflow requirements:
+- GitHub repo secret `NPM_TOKEN` must be set.
+- Tag format must be `v<package.json version>` (example `v0.1.0`).
+
 ## Run TUI (Primary)
 
 ```bash

@@ -1,19 +1,49 @@
 {
   "name": "codaph",
-  "private": true,
+  "version": "0.1.0",
+  "description": "Codex-first CLI/TUI for prompts, thoughts, diffs, and collaborative MuBit memory.",
+  "license": "Apache-2.0",
   "type": "module",
+  "keywords": [
+    "codex",
+    "cli",
+    "tui",
+    "mubit",
+    "agent"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/anilperi/codaph.git"
+  },
+  "bugs": {
+    "url": "https://github.com/anilperi/codaph/issues"
+  },
+  "homepage": "https://github.com/anilperi/codaph#readme",
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "bin": {
     "codaph": "./dist/index.js"
   },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "docs/one-page-cli-tui.md"
+  ],
   "scripts": {
-    "build": "bun build src/index.ts --outdir dist --target bun",
+    "build": "bun build src/index.ts --outfile dist/index.js --target node && node scripts/prepare-bin.mjs",
     "test": "bun test",
     "lint": "tsc -p tsconfig.json --noEmit",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "cli": "bun ./src/index.ts",
     "tui": "bun run cli tui",
     "agent:status": "bun run ./src/append-agent-status.ts",
-    "hooks:install": "bun run ./src/install-hooks.ts"
+    "hooks:install": "bun run ./src/install-hooks.ts",
+    "prepublishOnly": "bun run typecheck && bun run test && bun run build"
   },
   "dependencies": {
     "@mubit-ai/sdk": "^0.1.1",

@@ -138,6 +138,16 @@ For npm release docs, advertise:
 npx codaph ...
 ```
 
+GitHub Actions release-tag publish is configured at:
+`/.github/workflows/publish-npm.yml`
+
+Tag format must match `package.json` version:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
 For Homebrew release docs, advertise:
 
 ```bash
