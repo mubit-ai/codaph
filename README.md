@@ -73,4 +73,9 @@ Please make sure to update tests and documentation as appropriate.
 
 ## License
 
-[MIT](LICENSE)
+Dual-licensed under either of the following, at your option:
+
+- MIT
+- Apache License 2.0
+
+See [LICENSE](LICENSE) for the full text of both licenses.
