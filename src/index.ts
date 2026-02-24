@@ -1950,15 +1950,21 @@ async function hooksRun(rest: string[]): Promise<void> {
   const quiet = getBooleanFlag(flags, "quiet", false);
 
   let mode: "all" | "push";
+  let pushMode: SyncPushMode | undefined;
   let triggerSource: SyncTriggerSource;
   if (hookName === "post-commit") {
     mode = "push";
+    pushMode = "queue";
     triggerSource = "hook-post-commit";
   } else if (hookName === "post-push") {
     mode = "all";
+    pushMode = "queue";
     triggerSource = "hook-post-push";
   } else if (hookName === "agent-complete") {
     mode = "all";
+    // Until the repo-local queue capture path is implemented, agent completion needs
+    // the Codex history ingest path to publish newly finished prompts/thoughts.
+    pushMode = "history";
     triggerSource = "hook-agent-complete";
   } else {
     throw new Error(`Unknown hook trigger: ${hookName}`);
@@ -1966,6 +1972,7 @@ async function hooksRun(rest: string[]): Promise<void> {
 
   const summary = await runSyncWorkflow({
     mode,
+    pushMode,
     cwd,
     flags,
     settings,
