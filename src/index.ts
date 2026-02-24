@@ -174,22 +174,24 @@ function help(): string {
     "  codaph init [--cwd <path>] [--yes] [--force] [--no-auto-sync] [--json]",
     "",
     "Daily Use:",
-    "  codaph sync [--cwd <path>] [--json]           (fast Mubit-first sync)",
+    "  codaph pull [--cwd <path>] [--json]           (cloud -> local, daily)",
+    "  codaph sync [--cwd <path>] [--json]           (compat alias for `codaph pull`)",
     "  codaph status [--cwd <path>] [--json]         (repo sync + automation status)",
     "  codaph tui [--cwd <path>]",
     "",
-    "Optional Backfill:",
-    "  codaph import [--cwd <path>] [--json] [--local-only]",
-    "    Replays historical Codex sessions from ~/.codex/sessions into Codaph + Mubit.",
+    "Push / Backfill:",
+    "  codaph push [--cwd <path>] [--json] [--local-only]",
+    "    Local Codex history -> Codaph + Mubit (incremental; historical backfill path).",
+    "  codaph import [--cwd <path>] [--json] [--local-only]   (compat alias for `codaph push`)",
     "",
     "Advanced / Compatibility (still supported):",
-    "  codaph sync pull|status|setup ...",
-    "  codaph sync push ...      (compat alias for `codaph import`)",
+    "  codaph sync all|pull|status|setup ...",
+    "  codaph sync push ...      (compat alias for `codaph push`)",
     "  codaph run|exec ...       (Codex capture wrappers)",
     "  codaph sessions|timeline|diff|inspect ...",
     "  codaph doctor, codaph hooks run ..., codaph mubit query ...",
     "",
-    "Tip: run `codaph init`, then `codaph sync` and `codaph tui`.",
+    "Tip: run `codaph init`, then `codaph pull` and `codaph tui`.",
   ].join("\n");
 }
 
@@ -654,7 +656,7 @@ async function runSyncQueuePushPhase(options: {
   if (!localPush?.lastSuccessAt) {
     return {
       skipped: true,
-      reason: "No repo-local push queue. Use `codaph import` once to backfill Codex history into Mubit.",
+      reason: "No repo-local push queue. Use `codaph push` once to backfill Codex history into Mubit.",
     };
   }
   return {
@@ -873,7 +875,7 @@ async function maybePromptForMubitApiKeyDuringInit(
     }
     if (normalized === "skip") {
       const confirmSkip = await promptYesNo(
-        "Continue without Mubit cloud sync? (`codaph sync` will stay local until you add a key)",
+        "Continue without Mubit cloud sync? (`codaph pull` will stay local-only until you add a key)",
       );
       if (confirmSkip) {
         console.log("Continuing local-only. Add a key later with `codaph setup --mubit-api-key <key>`.");
@@ -1011,7 +1013,7 @@ async function runSyncPullPhase(options: {
 function formatPushPhaseLine(result: SyncPushPhaseResult | { skipped: true; reason: string }): string {
   if (isSyncPushPhaseSkipped(result)) {
     if (result.reason.includes("No repo-local push queue")) {
-      return `Push (local->cloud): no queued local uploads (fast path). Use \`codaph import\` for Codex history backfill.`;
+      return `Push (local->cloud): no queued local uploads (fast path). Use \`codaph push\` for Codex history backfill.`;
     }
     return `Push (local->cloud): skipped (${result.reason})`;
   }
@@ -1454,7 +1456,7 @@ function printSyncWorkflowSummary(summary: SyncWorkflowSummary): void {
     isSyncPushPhaseSkipped(summary.push) && summary.push.reason.includes("No repo-local push queue");
   if (summary.mode === "all" && pushNoQueue) {
     console.log("Fast sync: Mubit-first remote pull + repo-local queue (no global Codex history replay).");
-    console.log("Backfill history: run `codaph import` (one-time/occasional).");
+    console.log("Backfill history: run `codaph push` (one-time/occasional).");
   }
   if (!summary.automation.enabled) {
     console.log("Tip: run `codaph sync setup` to enable auto-sync hooks for this repo.");
@@ -1494,13 +1496,13 @@ async function importCommand(rest: string[]): Promise<void> {
     return;
   }
   console.log(formatPushPhaseLine(result));
-  console.log("Import complete. Daily `codaph sync` no longer replays Codex history by default.");
+  console.log("Push complete. Daily `codaph pull` does not replay Codex history.");
 }
 
 async function syncPushCommand(rest: string[]): Promise<void> {
   const { flags } = parseArgs(rest);
   if (flags.json !== true) {
-    console.log("Note: `codaph sync push` is a compatibility alias for `codaph import` (Codex history backfill).");
+    console.log("Note: `codaph sync push` is a compatibility alias for `codaph push` (Codex history -> Mubit).");
   }
   await importCommand(rest);
 }
@@ -1593,12 +1595,12 @@ async function syncStatus(rest: string[]): Promise<void> {
       console.log(`Local push last error: ${localPushState.lastError}`);
     }
     if (!localPushState.lastSuccessAt) {
-      console.log("Backfill: run `codaph import` if you want historical Codex sessions in Mubit.");
+      console.log("Backfill: run `codaph push` if you want historical Codex sessions in Mubit.");
     }
   }
   if (!remoteState) {
     console.log("Remote sync state: none");
-    console.log("Fast sync note: `codaph sync` now skips Codex history replay; use `codaph import` for backfill.");
+    console.log("Fast sync note: `codaph pull` skips Codex history replay; use `codaph push` for backfill.");
     return;
   }
   console.log(
@@ -1764,8 +1766,8 @@ async function initCommand(rest: string[]): Promise<void> {
     automation: resolveSyncAutomationConfig(settings, cwd),
     automationInstall: automationInstalled,
     recommendedNext: [
-      "codaph sync",
-      "codaph import (optional one-time Codex history backfill)",
+      "codaph pull",
+      "codaph push (optional one-time Codex history backfill)",
       "codaph tui",
     ],
   };
@@ -1796,8 +1798,8 @@ async function initCommand(rest: string[]): Promise<void> {
     console.log("Auto-sync install skipped (`--no-auto-sync`).");
   }
   console.log("Next:");
-  console.log("  1. `codaph sync` (fast Mubit-first sync)");
-  console.log("  2. `codaph import` (optional one-time Codex history backfill)");
+  console.log("  1. `codaph pull` (cloud -> local, daily)");
+  console.log("  2. `codaph push` (optional one-time Codex history backfill)");
   console.log("  3. `codaph tui`");
 }
 
@@ -1880,7 +1882,7 @@ async function syncCommand(rest: string[]): Promise<void> {
     );
   } else {
     if (forcePushOnly) {
-      console.log("Note: `--local-only` is a compatibility alias and will be deprecated. Prefer `codaph import`.");
+      console.log("Note: `--local-only` is a compatibility alias and will be deprecated. Prefer `codaph push`.");
     }
     printSyncWorkflowSummary(summary);
   }
@@ -1949,16 +1951,15 @@ async function hooksRun(rest: string[]): Promise<void> {
   const settings = loadCodaphSettings();
   const quiet = getBooleanFlag(flags, "quiet", false);
 
-  let mode: "all" | "push";
+  let mode: "all" | "push" | "pull";
   let pushMode: SyncPushMode | undefined;
   let triggerSource: SyncTriggerSource;
   if (hookName === "post-commit") {
     mode = "push";
-    pushMode = "queue";
+    pushMode = "history";
     triggerSource = "hook-post-commit";
   } else if (hookName === "post-push") {
-    mode = "all";
-    pushMode = "queue";
+    mode = "pull";
     triggerSource = "hook-post-push";
   } else if (hookName === "agent-complete") {
     mode = "all";
@@ -5591,7 +5592,21 @@ async function main(): Promise<void> {
   }
 
   if (cmd === "import") {
+    const parsed = parseArgs([sub, ...rest].filter(Boolean) as string[]);
+    if (parsed.flags.json !== true) {
+      console.log("Note: `codaph import` is a compatibility alias for `codaph push`.");
+    }
     await importCommand([sub, ...rest].filter(Boolean) as string[]);
+    return;
+  }
+
+  if (cmd === "push") {
+    await importCommand([sub, ...rest].filter(Boolean) as string[]);
+    return;
+  }
+
+  if (cmd === "pull") {
+    await syncPullCommand([sub, ...rest].filter(Boolean) as string[]);
     return;
   }
 
@@ -5602,7 +5617,7 @@ async function main(): Promise<void> {
 
   if (cmd === "sync") {
     if (!sub) {
-      await syncCommand(rest);
+      await syncPullCommand(rest);
       return;
     }
     if (sub === "all") {
