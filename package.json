@@ -35,7 +35,7 @@
     "docs/one-page-cli-tui.md"
   ],
   "scripts": {
-    "build": "bun build src/index.ts --outfile dist/index.js --target node && node scripts/prepare-bin.mjs",
+    "build": "bun build src/index.ts --outfile dist/index.js --target node --packages external && node scripts/prepare-bin.mjs",
     "test": "bun test",
     "lint": "tsc -p tsconfig.json --noEmit",
     "typecheck": "tsc -p tsconfig.json --noEmit",
