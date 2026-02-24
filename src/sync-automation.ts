@@ -13,6 +13,7 @@ export type SyncTriggerSource =
   | "tui-sync"
   | "tui-pull"
   | "hook-post-commit"
+  | "hook-post-push"
   | "hook-agent-complete";
 
 export interface SyncAutomationLockHandle {
@@ -311,7 +312,7 @@ export async function installGitPostCommitHook(
 
 export async function installGitPostPushHook(
   repoRoot: string,
-  commandLine: string | string[] = "codaph hooks run post-commit --quiet",
+  commandLine: string | string[] = "codaph hooks run post-push --quiet",
 ): Promise<{ ok: boolean; warning?: string }> {
   const hookPath = join(repoRoot, ".git", "hooks", "post-push");
   const result = await upsertManagedShellHook(hookPath, commandLine);

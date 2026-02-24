@@ -4,6 +4,8 @@ set -euo pipefail
 # >>> codaph sync >>>
 if command -v codaph >/dev/null 2>&1; then
   codaph hooks run agent-complete --quiet
+elif command -v '/opt/homebrew/Cellar/bun/1.3.9/bin/bun' >/dev/null 2>&1; then
+  '/opt/homebrew/Cellar/bun/1.3.9/bin/bun' '/Users/anilp/Code/codaph/src/index.ts' hooks run agent-complete --quiet
 elif command -v bun >/dev/null 2>&1; then
   bun --cwd '/Users/anilp/Code/codaph' run cli hooks run agent-complete --quiet
 fi

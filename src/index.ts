@@ -83,10 +83,15 @@ function shellQuote(text: string): string {
   return `'${text.replace(/'/g, `'\"'\"'`)}'`;
 }
 
-function hookCommandCandidates(hookName: "post-commit" | "agent-complete"): string[] {
+function hookCommandCandidates(hookName: "post-commit" | "post-push" | "agent-complete"): string[] {
   const out = [`codaph hooks run ${hookName} --quiet`];
 
   const scriptPath = process.argv[1];
+  const runtimePath = typeof process.execPath === "string" && process.execPath.length > 0 ? process.execPath : null;
+  if (runtimePath && scriptPath && isAbsolute(scriptPath)) {
+    out.push(`${shellQuote(runtimePath)} ${shellQuote(scriptPath)} hooks run ${hookName} --quiet`);
+  }
+
   if (scriptPath && /(?:^|\/)(?:src\/index\.ts|dist\/index\.js)$/.test(scriptPath)) {
     const codaphRoot = resolve(dirname(scriptPath), "..");
     out.push(`bun --cwd ${shellQuote(codaphRoot)} run cli hooks run ${hookName} --quiet`);
@@ -1177,7 +1182,8 @@ async function enableSyncAutomationForProject(cwd: string, settings: CodaphSetti
   if (!gitPostCommit.ok) {
     warnings.push(`Git post-commit hook automation was not installed: ${gitPostCommit.warning ?? "unknown error"}`);
   }
-  const gitPostPush = await installGitPostPushHook(repoRoot, postCommitCommands);
+  const postPushCommands = hookCommandCandidates("post-push");
+  const gitPostPush = await installGitPostPushHook(repoRoot, postPushCommands);
   if (!gitPostPush.ok) {
     warnings.push(`Git post-push hook automation was not installed: ${gitPostPush.warning ?? "unknown error"}`);
   }
@@ -1263,6 +1269,7 @@ async function maybeOfferSyncAutomationSetup(
   }
 
   const result = await enableSyncAutomationForProject(cwd, settings);
+  await writeLocalProjectConfigSnapshot(cwd, flags, result.settings).catch(() => {});
   console.log(
     `${paint("Updated auto-sync:", TUI_COLORS.dim)} ${cliStatusWord("enabled", "ok")} (${paint("post-commit", TUI_COLORS.dim)}:${result.installed.gitPostCommit ? cliStatusWord("installed", "ok") : cliStatusWord("unavailable", "warn")}, ${paint("agent-complete", TUI_COLORS.dim)}:${result.installed.agentComplete ? cliStatusWord("installed", "ok") : cliStatusWord("partial", "warn")})`,
   );
@@ -1352,7 +1359,10 @@ async function runSyncWorkflow(options: {
     } else {
       const remoteState = await maybeReadRemoteSyncStateForProject(cwd, repoId).catch(() => null);
       const isCooldownSensitive =
-        triggerSource === "hook-agent-complete" || triggerSource === "hook-post-commit" || triggerSource === "tui-startup";
+        triggerSource === "hook-agent-complete" ||
+        triggerSource === "hook-post-commit" ||
+        triggerSource === "hook-post-push" ||
+        triggerSource === "tui-startup";
       const cooldownBlocks =
         mode === "all" &&
         isCooldownSensitive &&
@@ -1360,7 +1370,13 @@ async function runSyncWorkflow(options: {
         !shouldRunRemotePullNow(remoteState?.lastRunAt ?? null, automation.remotePullCooldownSec);
       const autoPullDisabled =
         mode === "all" &&
-        (triggerSource === "tui-sync" || triggerSource === "sync-manual" || triggerSource === "tui-startup" || triggerSource === "hook-agent-complete") &&
+        (
+          triggerSource === "tui-sync" ||
+          triggerSource === "sync-manual" ||
+          triggerSource === "tui-startup" ||
+          triggerSource === "hook-agent-complete" ||
+          triggerSource === "hook-post-push"
+        ) &&
         automation.enabled &&
         !automation.autoPullOnSync;
 
@@ -1417,9 +1433,7 @@ async function runSyncWorkflow(options: {
     throw error;
   } finally {
     await releaseSyncLock(lockHandle);
-    if (!quiet) {
-      await appendSyncAutomationLog(logPath, "sync workflow finished", { triggerSource, mode }).catch(() => {});
-    }
+    await appendSyncAutomationLog(logPath, "sync workflow finished", { triggerSource, mode }).catch(() => {});
   }
 }
 
@@ -1926,19 +1940,23 @@ function cwdFromHookPayload(payload: Record<string, unknown> | null): string | n
 async function hooksRun(rest: string[]): Promise<void> {
   const [hookName, ...args] = rest;
   if (!hookName) {
-    throw new Error("Hook name is required (post-commit | agent-complete)");
+    throw new Error("Hook name is required (post-commit | post-push | agent-complete)");
   }
   const { flags } = parseArgs(args);
   const payload = await readOptionalStdinJson();
-  const cwd = resolve(getStringFlag(flags, "cwd") ?? cwdFromHookPayload(payload) ?? process.cwd());
+  const requestedCwd = resolve(getStringFlag(flags, "cwd") ?? cwdFromHookPayload(payload) ?? process.cwd());
+  const cwd = hookName === "post-commit" || hookName === "post-push" ? resolveGitRepoRootOrCwd(requestedCwd) : requestedCwd;
   const settings = loadCodaphSettings();
   const quiet = getBooleanFlag(flags, "quiet", false);
 
   let mode: "all" | "push";
   let triggerSource: SyncTriggerSource;
   if (hookName === "post-commit") {
-    mode = "all";
+    mode = "push";
     triggerSource = "hook-post-commit";
+  } else if (hookName === "post-push") {
+    mode = "all";
+    triggerSource = "hook-post-push";
   } else if (hookName === "agent-complete") {
     mode = "all";
     triggerSource = "hook-agent-complete";
