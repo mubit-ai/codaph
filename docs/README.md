@@ -1,3 +1,7 @@
+---
+layout: docs
+---
+
 # Codaph Documentation
 
 Codaph helps you inspect coding-agent activity with a local terminal UI and shared Mubit-backed memory.

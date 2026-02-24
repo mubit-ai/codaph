@@ -119,6 +119,10 @@ function textFromUnknown(value: unknown): string | null {
     record.output,
     record.input,
     record.value,
+    record.stdout,
+    record.stderr,
+    record.stdout_text,
+    record.stderr_text,
   ];
 
   for (const candidate of candidates) {

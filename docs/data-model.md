@@ -1,3 +1,7 @@
+---
+layout: docs
+---
+
 # Data Model
 
 Codaph stores canonical events in both Mubit and local JSONL mirror.

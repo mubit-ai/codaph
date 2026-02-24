@@ -1,3 +1,7 @@
+---
+layout: docs
+---
+
 # Quickstart
 
 This guide gets Codaph running with shared Mubit memory in a few minutes.

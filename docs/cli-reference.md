@@ -1,3 +1,7 @@
+---
+layout: docs
+---
+
 # CLI Reference
 
 Codaph is Mubit-first by default. The primary CLI path is:

@@ -1,3 +1,7 @@
+---
+layout: docs
+---
+
 # Troubleshooting
 
 This page covers common Codaph issues and the fastest recovery path.

@@ -4,6 +4,7 @@ import { stdin as input, stdout as output } from "node:process";
 import { mkdir, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import type { CapturedEventEnvelope } from "./lib/core-types";
 import { repoIdFromPath } from "./lib/core-types";
 import { JsonlMirror } from "./lib/mirror-jsonl";
@@ -51,6 +52,7 @@ import {
   getSyncLockPath,
   installAgentCompleteHookBestEffort,
   installGitPostCommitHook,
+  installGitPostPushHook,
   markPendingSyncTrigger,
   normalizeSyncAutomationSettings,
   releaseSyncLock,
@@ -75,6 +77,30 @@ interface CodaphProjectFile {
   };
   createdAt: string;
   updatedAt: string;
+}
+
+function shellQuote(text: string): string {
+  return `'${text.replace(/'/g, `'\"'\"'`)}'`;
+}
+
+function hookCommandCandidates(hookName: "post-commit" | "agent-complete"): string[] {
+  const out = [`codaph hooks run ${hookName} --quiet`];
+
+  const scriptPath = process.argv[1];
+  if (scriptPath && /(?:^|\/)(?:src\/index\.ts|dist\/index\.js)$/.test(scriptPath)) {
+    const codaphRoot = resolve(dirname(scriptPath), "..");
+    out.push(`bun --cwd ${shellQuote(codaphRoot)} run cli hooks run ${hookName} --quiet`);
+  } else {
+    try {
+      const thisFile = fileURLToPath(import.meta.url);
+      const codaphRoot = resolve(dirname(thisFile), "..");
+      out.push(`bun --cwd ${shellQuote(codaphRoot)} run cli hooks run ${hookName} --quiet`);
+    } catch {
+      // best-effort fallback not available
+    }
+  }
+
+  return [...new Set(out)];
 }
 
 function parseArgs(args: string[]): { positionals: string[]; flags: Flags } {
@@ -773,6 +799,29 @@ function isInteractiveTerminal(): boolean {
   return Boolean(input.isTTY && output.isTTY);
 }
 
+function cliOnOff(value: boolean): string {
+  return paint(value ? "on" : "off", value ? TUI_COLORS.green : TUI_COLORS.red);
+}
+
+function cliEnabledOff(value: boolean): string {
+  return paint(value ? "enabled" : "off", value ? TUI_COLORS.green : TUI_COLORS.yellow);
+}
+
+function cliStatusWord(text: string, tone: "ok" | "warn" | "dim" = "dim"): string {
+  const color =
+    tone === "ok" ? TUI_COLORS.green :
+    tone === "warn" ? TUI_COLORS.yellow :
+    TUI_COLORS.dim;
+  return paint(text, color);
+}
+
+function formatAutoSyncSummaryLine(
+  label: string,
+  auto: { enabled: boolean; gitPostCommit: boolean; agentComplete: boolean },
+): string {
+  return `${paint(label, TUI_COLORS.dim)} ${cliEnabledOff(auto.enabled)} (${paint("post-commit", TUI_COLORS.dim)}:${cliOnOff(auto.gitPostCommit)}, ${paint("agent-complete", TUI_COLORS.dim)}:${cliOnOff(auto.agentComplete)})`;
+}
+
 async function promptInput(question: string): Promise<string> {
   const rl = createInterface({ input, output });
   try {
@@ -1123,12 +1172,18 @@ async function enableSyncAutomationForProject(cwd: string, settings: CodaphSetti
   const warnings = await detectHookManagerWarnings(repoRoot);
   const manualSteps: string[] = [];
 
-  const gitPostCommit = await installGitPostCommitHook(repoRoot);
+  const postCommitCommands = hookCommandCandidates("post-commit");
+  const gitPostCommit = await installGitPostCommitHook(repoRoot, postCommitCommands);
   if (!gitPostCommit.ok) {
     warnings.push(`Git post-commit hook automation was not installed: ${gitPostCommit.warning ?? "unknown error"}`);
   }
+  const gitPostPush = await installGitPostPushHook(repoRoot, postCommitCommands);
+  if (!gitPostPush.ok) {
+    warnings.push(`Git post-push hook automation was not installed: ${gitPostPush.warning ?? "unknown error"}`);
+  }
 
-  const agentComplete = await installAgentCompleteHookBestEffort(repoRoot);
+  const agentCompleteCommands = hookCommandCandidates("agent-complete");
+  const agentComplete = await installAgentCompleteHookBestEffort(repoRoot, agentCompleteCommands);
   if (!agentComplete.ok) {
     warnings.push(agentComplete.warning ?? "Agent-complete hook auto-install was not possible.");
     manualSteps.push(`Attach this command to your agent-complete hook: ${agentComplete.manualSnippet}`);
@@ -1209,10 +1264,10 @@ async function maybeOfferSyncAutomationSetup(
 
   const result = await enableSyncAutomationForProject(cwd, settings);
   console.log(
-    `Automation: enabled (${result.installed.gitPostCommit ? "post-commit" : "post-commit unavailable"}, ${result.installed.agentComplete ? "agent-complete" : "agent-complete partial"})`,
+    `${paint("Updated auto-sync:", TUI_COLORS.dim)} ${cliStatusWord("enabled", "ok")} (${paint("post-commit", TUI_COLORS.dim)}:${result.installed.gitPostCommit ? cliStatusWord("installed", "ok") : cliStatusWord("unavailable", "warn")}, ${paint("agent-complete", TUI_COLORS.dim)}:${result.installed.agentComplete ? cliStatusWord("installed", "ok") : cliStatusWord("partial", "warn")})`,
   );
   for (const warning of result.installed.warnings) {
-    console.log(`Warning: ${warning}`);
+    console.log(`${cliStatusWord("Warning:", "warn")} ${warning}`);
   }
   for (const step of result.installed.manualSteps) {
     console.log(step);
@@ -1507,14 +1562,12 @@ async function syncStatus(rest: string[]): Promise<void> {
   }
 
   console.log(`Repo: ${repoId}`);
-  console.log(
-    `Automation: ${automation.enabled ? "enabled" : "disabled"} (post-commit:${automation.gitPostCommit ? "on" : "off"}, agent-complete:${automation.agentComplete ? "on" : "off"})`,
-  );
+  console.log(formatAutoSyncSummaryLine("Auto-sync:", automation));
   if (!automation.enabled) {
     console.log("Onboarding: run `codaph sync setup` to install auto-sync hooks for this repo.");
   }
   console.log(
-    `Auto pull on sync: ${automation.autoPullOnSync ? "on" : "off"} | TUI warm: ${automation.autoWarmTuiOnOpen ? "on" : "off"} | cooldown=${automation.remotePullCooldownSec}s`,
+    `${paint("Auto pull on sync", TUI_COLORS.dim)}:${cliOnOff(automation.autoPullOnSync)} | ${paint("TUI warm", TUI_COLORS.dim)}:${cliOnOff(automation.autoWarmTuiOnOpen)} | ${paint("cooldown", TUI_COLORS.dim)}=${automation.remotePullCooldownSec}s`,
   );
   if (!localPushState) {
     console.log("Local push state: none");
@@ -1568,9 +1621,7 @@ async function syncSetupCommand(rest: string[]): Promise<void> {
   }
 
   console.log(`Repo: ${cwd}`);
-  console.log(
-    `Auto-sync: ${auto.enabled ? "enabled" : "off"} (post-commit:${auto.gitPostCommit ? "on" : "off"}, agent-complete:${auto.agentComplete ? "on" : "off"})`,
-  );
+  console.log(formatAutoSyncSummaryLine("Current auto-sync:", auto));
   console.log("This installs repo-scoped hooks so sync runs automatically after commits and agent completion.");
   if (auto.enabled && !force) {
     console.log("Auto-sync is already enabled for this repo. Re-run with `codaph sync setup --force` to reinstall hooks.");
@@ -1942,6 +1993,10 @@ function stringFromUnknown(value: unknown): string | null {
       value.value,
       value.input_text,
       value.output_text,
+      value.stdout,
+      value.stderr,
+      value.stdout_text,
+      value.stderr_text,
     ];
 
     for (const candidate of candidates) {
@@ -2712,10 +2767,10 @@ interface TuiState {
 
 const ANSI_ESCAPE_REGEX = /\u001b\[[0-9;]*m/g;
 const TUI_COLORS = {
-  brand: "38;2;255;69;0",
+  brand: "38;2;122;162;247",
   activeBorder: "97",
   inactiveBorder: "90",
-  selected: "48;2;255;69;0;30",
+  selected: "48;2;122;162;247;30",
   dim: "2",
   muted: "90",
   cyan: "36",
@@ -3421,6 +3476,29 @@ function diffPreviewLines(prompt: PromptSlice, fallbackFiles: FileStatRow[]): st
   return ["(No diff captured)"];
 }
 
+function preferredDiffLinesForThought(
+  prompt: PromptSlice,
+  thought: ThoughtSlice,
+  fallbackFiles: FileStatRow[],
+): { lines: string[]; source: "thought" | "prompt"; thoughtHadOnlySummary: boolean } {
+  const thoughtLines = thought.diffLines;
+  const promptLines = diffPreviewLines(prompt, fallbackFiles);
+
+  if (thoughtLines.length === 0) {
+    return { lines: promptLines, source: "prompt", thoughtHadOnlySummary: false };
+  }
+
+  if (hasCodeLevelDiffLines(thoughtLines)) {
+    return { lines: thoughtLines, source: "thought", thoughtHadOnlySummary: false };
+  }
+
+  if (hasCodeLevelDiffLines(promptLines)) {
+    return { lines: promptLines, source: "prompt", thoughtHadOnlySummary: true };
+  }
+
+  return { lines: thoughtLines, source: "thought", thoughtHadOnlySummary: true };
+}
+
 function diffLineColor(line: string): string | undefined {
   if (line.startsWith("=== ")) {
     return TUI_COLORS.cyan;
@@ -3667,9 +3745,8 @@ function buildFullDiffOverlayData(
   const thoughtSelection = selectedThoughtFromPrompt(prompt, state.selectedThoughtIndex);
   const key = `${selectedSession.sessionId}:${prompt.id}:${thoughtSelection.index}:${state.projectPath}`;
 
-  let rawDiffLines = thoughtSelection.selected.diffLines.length > 0
-    ? thoughtSelection.selected.diffLines
-    : diffPreviewLines(prompt, analysis.files);
+  const preferred = preferredDiffLinesForThought(prompt, thoughtSelection.selected, analysis.files);
+  let rawDiffLines = preferred.lines;
 
   let usedLiveFallback = false;
   if (!hasCodeLevelDiffLines(rawDiffLines)) {
@@ -3682,6 +3759,10 @@ function buildFullDiffOverlayData(
   }
 
   const lines = formatFullDiffLines(rawDiffLines);
+  if (preferred.source === "prompt" && preferred.thoughtHadOnlySummary) {
+    lines.unshift(`(Selected thought ${thoughtSelection.index + 1} only had file summaries; showing prompt-level diff)`);
+    lines.unshift("");
+  }
   if (usedLiveFallback) {
     lines.unshift("(Live git diff fallback from current working tree)");
     lines.unshift("");
@@ -3828,7 +3909,7 @@ function renderInspectView(
   const baseHeight = Math.max(14, height - 4 - (state.chatOpen ? chatHeight + 1 : 0));
 
   const inspectRightText = clipPlain(
-    `AutoSync:${state.autoSyncEnabled ? "on" : "off"} Cloud:${state.autoSyncCloudStatus}${state.autoSyncPending ? "*" : ""} Push:${formatTimeAgo(state.lastLocalSyncAt) ?? "never"} Pull:${state.autoSyncLastPullAgo ?? "never"}  [f] actor:${state.actorFilter ?? "all"}  [c] contributors  [left] back  [?] help`,
+    `AutoSync:${state.autoSyncEnabled ? "on" : "off"} Cloud:${state.autoSyncCloudStatus}${state.autoSyncPending ? "*" : ""} Push:${formatTimeAgo(state.lastLocalSyncAt) ?? "never"} Pull:${state.autoSyncLastPullAgo ?? "never"}  [f] actor:${state.actorFilter ?? "all"}  [c] contributors  [esc] back  [?] help`,
     Math.max(18, Math.floor(width * 0.58)),
   );
   const topHeader = headerLine(
@@ -3888,12 +3969,14 @@ function renderInspectView(
         }));
 
   const buildDiffLines = (): PaneLine[] => {
-    const selectedThoughtDiff = thoughtSelection.selected.diffLines;
-    const source = selectedThoughtDiff.length > 0 ? selectedThoughtDiff : diffPreviewLines(prompt, analysis.files);
+    const preferred = preferredDiffLinesForThought(prompt, thoughtSelection.selected, analysis.files);
+    const source = preferred.lines;
     const rows: PaneLine[] = [];
-    if (selectedThoughtDiff.length === 0 && thoughtSelection.entries.length > 0) {
+    if (preferred.source === "prompt" && thoughtSelection.entries.length > 0) {
       rows.push({
-        text: `(No diff directly tied to thought ${thoughtSelection.index + 1}; showing prompt-level diff)`,
+        text: preferred.thoughtHadOnlySummary
+          ? `(Thought ${thoughtSelection.index + 1} only had file summaries; showing prompt-level diff)`
+          : `(No diff directly tied to thought ${thoughtSelection.index + 1}; showing prompt-level diff)`,
         color: TUI_COLORS.muted,
       });
     }
@@ -4078,10 +4161,10 @@ function renderInspectView(
   }
 
   const footer = state.chatOpen
-    ? "[tab] focus pane   [esc] close chat   [up/down] navigate/scroll   [left] back"
+    ? "[tab/left/right] focus pane   [esc] close chat   [up/down] navigate/scroll"
     : threePaneMode
-      ? "[enter] prompt -> thoughts   [up/down] select/scroll   [tab] focus pane   [d] full diff   [m] Mubit chat   [f] actor filter   [c] contributors   [o] settings   [left] back"
-      : "[up/down] prompts/scroll pane   [tab] focus pane   [d] full diff   [m] Mubit chat   [f] actor filter   [c] contributors   [o] settings   [left] back";
+      ? "[enter] prompt -> thoughts   [up/down] select/scroll   [tab/left/right] focus pane   [d] full diff   [m] Mubit chat   [f] actor filter   [c] contributors   [o] settings   [esc] back"
+      : "[up/down] prompts/scroll pane   [tab/left/right] focus pane   [d] full diff   [m] Mubit chat   [f] actor filter   [c] contributors   [o] settings   [esc] back";
 
   composed.push("");
   composed.push(paint(clipPlain(footer, width), TUI_COLORS.dim));
@@ -4111,7 +4194,8 @@ function renderHelpOverlay(width: number, height: number): string {
     { text: "m       toggle Mubit chat" },
     { text: "f       cycle actor filter" },
     { text: "c       contributors overlay (enter to apply filter)" },
-    { text: "left/esc back to browse" },
+    { text: "left/right move pane focus" },
+    { text: "esc     back to browse" },
     { text: "" },
     { text: "Chat", color: TUI_COLORS.muted },
     { text: "type    edit prompt" },
@@ -5297,7 +5381,27 @@ async function tui(rest: string[]): Promise<void> {
       return;
     }
 
-    if (key.name === "left" || key.name === "escape") {
+    if (key.name === "left") {
+      const includeFilesPane = getSize().width < 126;
+      const panes = inspectPaneCycle(state.chatOpen, includeFilesPane);
+      const current = Math.max(0, panes.indexOf(state.inspectPane));
+      const prev = panes[Math.max(0, current - 1)] ?? panes[0];
+      state.inspectPane = prev ?? "prompts";
+      render();
+      return;
+    }
+
+    if (key.name === "right") {
+      const includeFilesPane = getSize().width < 126;
+      const panes = inspectPaneCycle(state.chatOpen, includeFilesPane);
+      const current = Math.max(0, panes.indexOf(state.inspectPane));
+      const next = panes[Math.min(panes.length - 1, current + 1)] ?? panes[panes.length - 1];
+      state.inspectPane = next ?? "diff";
+      render();
+      return;
+    }
+
+    if (key.name === "escape") {
       if (state.chatOpen) {
         state.chatOpen = false;
         state.inspectPane = "thoughts";

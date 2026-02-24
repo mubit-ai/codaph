@@ -1,0 +1,22 @@
+title: Codaph Docs
+description: Codaph documentation
+markdown: kramdown
+highlighter: rouge
+permalink: pretty
+
+kramdown:
+  input: GFM
+
+plugins:
+  - jekyll-relative-links
+
+relative_links:
+  enabled: true
+  collections: false
+
+defaults:
+  - scope:
+      path: ""
+      type: "pages"
+    values:
+      layout: docs

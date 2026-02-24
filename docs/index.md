@@ -1,3 +1,7 @@
+---
+layout: docs
+---
+
 # Codaph Docs
 
 Codaph is a terminal-first viewer for coding-agent activity with shared Mubit memory.

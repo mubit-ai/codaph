@@ -1,3 +1,7 @@
+---
+layout: docs
+---
+
 # Architecture
 
 Codaph uses a dual-store architecture:

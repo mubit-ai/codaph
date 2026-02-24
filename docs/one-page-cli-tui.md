@@ -1,3 +1,7 @@
+---
+layout: docs
+---
+
 # Codaph: Mubit-Powered Memory for Codex Workflows
 
 Codaph helps you inspect coding-agent activity in a terminal UI and share project memory through Mubit.

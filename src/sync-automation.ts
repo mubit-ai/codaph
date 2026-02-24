@@ -219,17 +219,47 @@ function isLikelyTextFile(content: string): boolean {
   return !content.includes("\u0000");
 }
 
-function buildManagedHookBlock(commandLine: string): string {
+function commandBinaryFromLine(commandLine: string): string | null {
+  const trimmed = commandLine.trim();
+  if (trimmed.length === 0) {
+    return null;
+  }
+  const first = trimmed.split(/\s+/, 1)[0];
+  return first && !first.startsWith("$") ? first : null;
+}
+
+function buildManagedHookBlock(commandLine: string | string[]): string {
+  const commandLines = (Array.isArray(commandLine) ? commandLine : [commandLine])
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+
+  if (commandLines.length === 0) {
+    return `${CODAPH_HOOK_BEGIN}
+${CODAPH_HOOK_END}`;
+  }
+
+  const body: string[] = [];
+  for (let i = 0; i < commandLines.length; i += 1) {
+    const line = commandLines[i] as string;
+    const binary = commandBinaryFromLine(line);
+    const keyword = i === 0 ? "if" : "elif";
+    if (binary) {
+      body.push(`${keyword} command -v ${binary} >/dev/null 2>&1; then`);
+    } else {
+      body.push(`${keyword} true; then`);
+    }
+    body.push(`  ${line}`);
+  }
+  body.push("fi");
+
   return `${CODAPH_HOOK_BEGIN}
-if command -v codaph >/dev/null 2>&1; then
-  ${commandLine}
-fi
+${body.join("\n")}
 ${CODAPH_HOOK_END}`;
 }
 
 export async function upsertManagedShellHook(
   hookPath: string,
-  commandLine: string,
+  commandLine: string | string[],
 ): Promise<{ updated: boolean; created: boolean; reason?: string }> {
   await mkdir(dirname(hookPath), { recursive: true });
   const existing = await readTextFile(hookPath);
@@ -269,12 +299,24 @@ function escapeRegExp(text: string): string {
 
 export async function installGitPostCommitHook(
   repoRoot: string,
-  commandLine = "codaph hooks run post-commit --quiet",
+  commandLine: string | string[] = "codaph hooks run post-commit --quiet",
 ): Promise<{ ok: boolean; warning?: string }> {
   const hookPath = join(repoRoot, ".git", "hooks", "post-commit");
   const result = await upsertManagedShellHook(hookPath, commandLine);
   if (!result.updated) {
     return { ok: false, warning: result.reason ?? "unable to update post-commit hook" };
+  }
+  return { ok: true };
+}
+
+export async function installGitPostPushHook(
+  repoRoot: string,
+  commandLine: string | string[] = "codaph hooks run post-commit --quiet",
+): Promise<{ ok: boolean; warning?: string }> {
+  const hookPath = join(repoRoot, ".git", "hooks", "post-push");
+  const result = await upsertManagedShellHook(hookPath, commandLine);
+  if (!result.updated) {
+    return { ok: false, warning: result.reason ?? "unable to update post-push hook" };
   }
   return { ok: true };
 }
@@ -305,16 +347,22 @@ async function detectExistingCodexHookDir(repoRoot: string): Promise<string | nu
 
 export async function installAgentCompleteHookBestEffort(
   repoRoot: string,
-  commandLine = "codaph hooks run agent-complete --quiet",
+  commandLine: string | string[] = "codaph hooks run agent-complete --quiet",
 ): Promise<{ ok: boolean; installedPath?: string; warning?: string; manualSnippet: string }> {
-  const hookDir = await detectExistingCodexHookDir(repoRoot);
-  const manualSnippet = commandLine;
+  let hookDir = await detectExistingCodexHookDir(repoRoot);
+  const manualSnippet = Array.isArray(commandLine) ? (commandLine[0] ?? "codaph hooks run agent-complete --quiet") : commandLine;
   if (!hookDir) {
-    return {
-      ok: false,
-      warning: "No repo-local Codex hook directory detected; install the agent-complete hook manually.",
-      manualSnippet,
-    };
+    const createdHookDir = join(repoRoot, ".codex", "hooks");
+    try {
+      await mkdir(createdHookDir, { recursive: true });
+      hookDir = createdHookDir;
+    } catch {
+      return {
+        ok: false,
+        warning: "No repo-local Codex hook directory detected; install the agent-complete hook manually.",
+        manualSnippet,
+      };
+    }
   }
 
   const hookPath = join(hookDir, "agent-complete");

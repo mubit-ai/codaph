@@ -1,3 +1,7 @@
+---
+layout: docs
+---
+
 # Mubit Integration Status
 
 Codaph is now integrated with Mubit for write, query, and remote replay flows.

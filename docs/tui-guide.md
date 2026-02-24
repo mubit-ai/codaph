@@ -1,3 +1,7 @@
+---
+layout: docs
+---
+
 # TUI Guide
 
 Codaph TUI is the fastest way to inspect prompts, thoughts, and diffs after sync.
@@ -97,11 +101,12 @@ If the cloud is unchanged, Codaph shows a `no-change` state instead of looking l
 
 - `up/down` move selection or scroll active pane
 - `tab` cycle focused pane
+- `left/right` move pane focus
 - `d` open full diff overlay
 - `m` open/close Mubit chat
 - `f` cycle actor filter
 - `c` open contributors overlay
-- `left` or `esc` go back to browse view
+- `esc` go back to browse view
 
 ### Contributors overlay
 

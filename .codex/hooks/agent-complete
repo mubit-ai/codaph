@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# >>> codaph sync >>>
+if command -v codaph >/dev/null 2>&1; then
+  codaph hooks run agent-complete --quiet
+elif command -v bun >/dev/null 2>&1; then
+  bun --cwd '/Users/anilp/Code/codaph' run cli hooks run agent-complete --quiet
+fi
+# <<< codaph sync <<<

@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    {% assign derived_title = page.name | replace: '.md', '' | replace: '-', ' ' %}
+    {% assign page_label = page.title %}
+    {% if page_label == nil or page_label == "" %}
+      {% case page.url %}
+        {% when '/' %}{% assign page_label = 'Overview' %}
+        {% when '/quickstart/' %}{% assign page_label = 'Quickstart' %}
+        {% when '/one-page-cli-tui/' %}{% assign page_label = 'One-Page Guide' %}
+        {% when '/tui-guide/' %}{% assign page_label = 'TUI Guide' %}
+        {% when '/cli-reference/' %}{% assign page_label = 'CLI Reference' %}
+        {% when '/collaboration-mubit/' %}{% assign page_label = 'Mubit Collaboration' %}
+        {% when '/troubleshooting/' %}{% assign page_label = 'Troubleshooting' %}
+        {% when '/architecture/' %}{% assign page_label = 'Architecture' %}
+        {% when '/data-model/' %}{% assign page_label = 'Data Model' %}
+        {% when '/roadmap/' %}{% assign page_label = 'Roadmap' %}
+        {% else %}{% assign page_label = derived_title %}
+      {% endcase %}
+    {% endif %}
+    <title>{{ page_label }} | {{ site.title }}</title>
+    <meta name="description" content="{{ page.description | default: site.description }}" />
+    <link rel="stylesheet" href="{{ '/assets/css/docs.css' | relative_url }}" />
+  </head>
+  <body>
+    <div class="page">
+      <div class="docs-shell">
+        <header class="top-bar">
+          <a class="top-brand" href="{{ '/' | relative_url }}">codaph</a>
+          <nav class="top-links" aria-label="External links">
+            <a class="top-nav-btn" href="https://console.mubit.ai" target="_blank" rel="noreferrer">Mubit</a>
+            <a class="top-nav-btn is-active" href="{{ '/' | relative_url }}">Docs</a>
+            <a class="top-nav-btn top-nav-icon-btn" href="https://github.com/anilperi/codaph" target="_blank" rel="noreferrer" aria-label="GitHub">
+              <svg class="top-nav-icon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                <path d="M12 .5a12 12 0 0 0-3.79 23.38c.6.11.82-.26.82-.58v-2.23c-3.34.73-4.04-1.43-4.04-1.43-.55-1.38-1.33-1.75-1.33-1.75-1.09-.74.08-.73.08-.73 1.2.09 1.83 1.22 1.83 1.22 1.08 1.82 2.83 1.3 3.52 1 .11-.77.42-1.3.77-1.59-2.67-.3-5.48-1.31-5.48-5.85 0-1.29.47-2.34 1.22-3.16-.12-.3-.53-1.53.12-3.18 0 0 .99-.31 3.25 1.2a11.5 11.5 0 0 1 5.92 0c2.26-1.51 3.24-1.2 3.24-1.2.65 1.65.24 2.88.12 3.18.76.82 1.22 1.87 1.22 3.16 0 4.55-2.82 5.54-5.51 5.84.43.37.82 1.09.82 2.21v3.28c0 .32.22.7.83.58A12 12 0 0 0 12 .5Z"/>
+              </svg>
+            </a>
+          </nav>
+        </header>
+
+        <div class="docs-layout">
+          <aside class="docs-nav" aria-label="Docs navigation">
+            <div class="docs-nav-section">
+              <div class="docs-nav-label">Start</div>
+              <a class="docs-nav-link{% if page.url == '/' %} is-active{% endif %}" href="{{ '/' | relative_url }}">Overview</a>
+              <a class="docs-nav-link{% if page.url contains '/quickstart' %} is-active{% endif %}" href="{{ '/quickstart/' | relative_url }}">Quickstart</a>
+              <a class="docs-nav-link{% if page.url contains '/one-page-cli-tui' %} is-active{% endif %}" href="{{ '/one-page-cli-tui/' | relative_url }}">One-Page Guide</a>
+              <a class="docs-nav-link{% if page.url contains '/tui-guide' %} is-active{% endif %}" href="{{ '/tui-guide/' | relative_url }}">TUI Guide</a>
+              <a class="docs-nav-link{% if page.url contains '/cli-reference' %} is-active{% endif %}" href="{{ '/cli-reference/' | relative_url }}">CLI Reference</a>
+              <a class="docs-nav-link{% if page.url contains '/collaboration-mubit' %} is-active{% endif %}" href="{{ '/collaboration-mubit/' | relative_url }}">Mubit Collaboration</a>
+              <a class="docs-nav-link{% if page.url contains '/troubleshooting' %} is-active{% endif %}" href="{{ '/troubleshooting/' | relative_url }}">Troubleshooting</a>
+            </div>
+
+            <div class="docs-nav-section">
+              <div class="docs-nav-label">Technical</div>
+              <a class="docs-nav-link{% if page.url contains '/architecture' %} is-active{% endif %}" href="{{ '/architecture/' | relative_url }}">Architecture</a>
+              <a class="docs-nav-link{% if page.url contains '/data-model' %} is-active{% endif %}" href="{{ '/data-model/' | relative_url }}">Data Model</a>
+              <a class="docs-nav-link{% if page.url contains '/roadmap' %} is-active{% endif %}" href="{{ '/roadmap/' | relative_url }}">Roadmap</a>
+            </div>
+          </aside>
+
+          <main class="docs-main">
+            <div class="docs-crumbs">
+              <a href="{{ '/' | relative_url }}">docs</a>
+              <span>›</span>
+              <span>{{ page_label }}</span>
+            </div>
+
+            <article class="docs-card markdown-body">
+              {{ content }}
+            </article>
+          </main>
+        </div>
+      </div>
+    </div>
+  </body>
+  </html>

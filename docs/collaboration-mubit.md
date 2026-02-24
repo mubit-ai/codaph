@@ -1,3 +1,7 @@
+---
+layout: docs
+---
+
 # Mubit Collaboration
 
 This guide explains how Codaph shares activity through Mubit across contributors working in the same repository.
