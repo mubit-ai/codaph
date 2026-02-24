@@ -169,6 +169,92 @@ function compactItem(item: Record<string, unknown>): Record<string, unknown> {
     output.type = itemType;
   }
 
+  if (itemType === "codaph_session_summary") {
+    const snapshotId = asString(item.snapshot_id);
+    const sessionId = asString(item.session_id);
+    const promptCount = typeof item.prompt_count === "number" ? item.prompt_count : null;
+    const fileCount = typeof item.file_count === "number" ? item.file_count : null;
+    const tokenEstimate = typeof item.token_estimate === "number" ? item.token_estimate : null;
+    if (snapshotId) {
+      output.snapshot_id = snapshotId;
+    }
+    if (sessionId) {
+      output.session_id = sessionId;
+    }
+    if (promptCount !== null) {
+      output.prompt_count = promptCount;
+    }
+    if (fileCount !== null) {
+      output.file_count = fileCount;
+    }
+    if (tokenEstimate !== null) {
+      output.token_estimate = tokenEstimate;
+    }
+    if (Array.isArray(item.files)) {
+      const files = item.files
+        .filter((entry): entry is Record<string, unknown> => typeof entry === "object" && entry !== null && !Array.isArray(entry))
+        .map((entry) => ({
+          path: asString(entry.path) ?? "(unknown)",
+          plus: typeof entry.plus === "number" ? entry.plus : 0,
+          minus: typeof entry.minus === "number" ? entry.minus : 0,
+        }))
+        .slice(0, 300);
+      if (files.length > 0) {
+        output.files = files;
+      }
+    }
+    return output;
+  }
+
+  if (itemType === "codaph_prompt_diff_part") {
+    const promptId = typeof item.prompt_id === "number" ? item.prompt_id : null;
+    const promptEventId = asString(item.prompt_event_id);
+    const snapshotId = asString(item.snapshot_id);
+    const partIndex = typeof item.part_index === "number" ? item.part_index : null;
+    const partCount = typeof item.part_count === "number" ? item.part_count : null;
+    if (snapshotId) {
+      output.snapshot_id = snapshotId;
+    }
+    if (promptId !== null) {
+      output.prompt_id = promptId;
+    }
+    if (promptEventId) {
+      output.prompt_event_id = promptEventId;
+    }
+    if (partIndex !== null) {
+      output.part_index = partIndex;
+    }
+    if (partCount !== null) {
+      output.part_count = partCount;
+    }
+    if (typeof item.truncated === "boolean") {
+      output.truncated = item.truncated;
+    }
+    if (Array.isArray(item.lines)) {
+      const lines = item.lines
+        .map((line) => (typeof line === "string" ? truncate(line, 500) : null))
+        .filter((line): line is string => !!line)
+        .slice(0, 220);
+      if (lines.length > 0) {
+        output.lines = lines;
+      }
+    }
+    if (Array.isArray(item.files)) {
+      const files = item.files
+        .filter((entry): entry is Record<string, unknown> => typeof entry === "object" && entry !== null && !Array.isArray(entry))
+        .map((entry) => ({
+          path: asString(entry.path) ?? "(unknown)",
+          plus: typeof entry.plus === "number" ? entry.plus : 0,
+          minus: typeof entry.minus === "number" ? entry.minus : 0,
+        }))
+        .slice(0, 120);
+      if (files.length > 0) {
+        output.files = files;
+      }
+    }
+    return output;
+  }
+
   const role = asString(item.role);
   if (role) {
     output.role = role;

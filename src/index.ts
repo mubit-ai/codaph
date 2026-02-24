@@ -3320,12 +3320,27 @@ function getSyntheticSessionSummary(event: CapturedEventEnvelope): SyntheticSess
   if (!item || item.type !== "codaph_session_summary") {
     return null;
   }
+  const promptCountRaw = numberFromUnknown(item.prompt_count);
+  const fileCountRaw = numberFromUnknown(item.file_count);
+  const tokenEstimateRaw = numberFromUnknown(item.token_estimate);
+  const files = parseSyntheticFileRows(item.files, 300);
+
+  // Ignore malformed compacted records that only preserved `type` and lost counters/files.
+  const hasMeaningfulCounts =
+    promptCountRaw !== null ||
+    fileCountRaw !== null ||
+    tokenEstimateRaw !== null ||
+    files.length > 0;
+  if (!hasMeaningfulCounts) {
+    return null;
+  }
+
   return {
     ts: event.ts,
-    promptCount: Math.max(0, numberFromUnknown(item.prompt_count) ?? 0),
-    fileCount: Math.max(0, numberFromUnknown(item.file_count) ?? 0),
-    tokenEstimate: Math.max(0, numberFromUnknown(item.token_estimate) ?? 0),
-    files: parseSyntheticFileRows(item.files, 300),
+    promptCount: Math.max(0, promptCountRaw ?? 0),
+    fileCount: Math.max(0, fileCountRaw ?? 0),
+    tokenEstimate: Math.max(0, tokenEstimateRaw ?? 0),
+    files,
   };
 }
 
@@ -3337,12 +3352,16 @@ function getSyntheticPromptDiffPart(event: CapturedEventEnvelope): SyntheticProm
   const promptId = numberFromUnknown(item.prompt_id);
   const partIndexRaw = numberFromUnknown(item.part_index);
   const partCountRaw = numberFromUnknown(item.part_count);
-  const snapshotId = stringFromUnknown(item.snapshot_id) ?? event.eventId;
+  const snapshotId = stringFromUnknown(item.snapshot_id);
   const lineValues = Array.isArray(item.lines) ? item.lines : [];
   const lines = lineValues
     .map((line) => (typeof line === "string" ? line : null))
     .filter((line): line is string => !!line)
     .slice(0, 220);
+
+  if (!snapshotId || (lines.length === 0 && !Array.isArray(item.files))) {
+    return null;
+  }
 
   return {
     ts: event.ts,
@@ -3707,6 +3726,7 @@ function buildSyntheticSessionSummaryEvent(
   const fileCount = analysis.canonicalFileCount ?? analysis.files.length;
   const files = fileRowsForSnapshot(analysis.files, 300);
   const snapshotCore = {
+    schema_version: 2,
     session_id: session.sessionId,
     prompt_count: promptCount,
     file_count: fileCount,
@@ -3715,7 +3735,7 @@ function buildSyntheticSessionSummaryEvent(
   };
   const snapshotId = hashObjectShort(snapshotCore);
   return {
-    eventId: `codaph-session-summary-${session.sessionId}-${snapshotId}`,
+    eventId: `codaph-session-summary-v2-${session.sessionId}-${snapshotId}`,
     source: "codex_exec",
     repoId,
     actorId,
@@ -3748,6 +3768,7 @@ function buildSyntheticPromptDiffPartEvents(
   }
   const truncated = prompt.diffLines.length > rawLines.length;
   const snapshotId = hashObjectShort({
+    schemaVersion: 2,
     sessionId,
     promptId: prompt.id,
     promptEventId: prompt.promptEventId,
@@ -3764,7 +3785,7 @@ function buildSyntheticPromptDiffPartEvents(
   }
 
   return parts.map((lines, index) => ({
-    eventId: `codaph-prompt-diff-${sessionId}-${prompt.promptEventId ?? prompt.id}-${snapshotId}-${index}`,
+    eventId: `codaph-prompt-diff-v2-${sessionId}-${prompt.promptEventId ?? prompt.id}-${snapshotId}-${index}`,
     source: "codex_exec",
     repoId,
     actorId,
@@ -3777,6 +3798,7 @@ function buildSyntheticPromptDiffPartEvents(
       item: {
         type: "codaph_prompt_diff_part",
         snapshot_id: snapshotId,
+        schema_version: 2,
         prompt_id: prompt.id,
         prompt_event_id: prompt.promptEventId,
         part_index: index,
