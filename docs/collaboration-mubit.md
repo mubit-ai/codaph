@@ -1,129 +1,147 @@
 # Mubit Collaboration
 
-This document explains how Codaph uses Mubit as a shared memory backend across contributors on the same project.
+This guide explains how Codaph shares activity through Mubit across contributors working in the same repository.
 
-## Collaboration Model
+## The Model (What Is Shared vs Local)
 
-Codaph combines two stores:
+Codaph uses two storage layers:
 
-- Mubit stores shared cross-contributor memory.
-- Local `.codaph` mirror stores deterministic timeline and diff read models.
+- Mubit stores shared cloud memory for the repo.
+- `.codaph/` stores the local read model (sessions, prompts, diffs, indexes).
 
-Each contributor writes events with actor metadata to the same Mubit project scope.
-Each contributor then syncs remote activity into their local mirror to inspect shared history.
+Each contributor can see shared cloud activity after running `codaph sync`, but local-only history from `~/.codex/sessions` appears only after that user runs `codaph import` on their own machine.
+
+This is the most important distinction to understand.
+
+## Team Setup Checklist
+
+For a team to see each other in Codaph:
+
+1. Everyone uses the same repository.
+2. Everyone uses the same Mubit backend key.
+3. Everyone resolves to the same project id (`owner/repo` recommended).
+4. Everyone uses `project` run scope (recommended).
+5. Everyone has a unique actor id.
+6. Everyone runs `codaph init` and `codaph sync`.
+
+## Recommended Team Workflow
+
+### Once per contributor
+
+```bash
+cd /path/to/repo
+codaph init
+```
+
+### Daily workflow
+
+```bash
+codaph sync
+codaph tui
+```
+
+### Optional historical backfill (per machine)
+
+```bash
+codaph import
+```
+
+Run `codaph import` when you want old local Codex sessions from that machine to be added to Codaph and Mubit.
 
 ## Identity Resolution
 
-Codaph resolves project and actor automatically, but allows explicit override.
+Codaph tries to auto-detect the project id and actor id. You can still override both.
 
-Project id resolution order:
+### Project id resolution (highest priority first)
 
 1. `--mubit-project-id`
 2. `CODAPH_PROJECT_ID`
 3. `MUBIT_PROJECT_ID`
-4. saved project setting
-5. auto-detect `owner/repo` from `git remote origin`
-6. fallback local path hash
+4. saved project settings
+5. git `origin` (`owner/repo`)
+6. local path hash fallback
 
-Actor id resolution order:
+### Actor id resolution (highest priority first)
 
 1. `--mubit-actor-id`
 2. `CODAPH_ACTOR_ID`
-3. saved global setting
-4. `gh api user` login
-5. `git config github.user`
-6. `git config user.name`
-7. shell user
+3. saved global settings
+4. GitHub CLI (`gh api user`)
+5. git config
+6. shell user
 
-## Run Scope
+## Run Scope (Use `project` for Collaboration)
 
-### Project Scope (Collaborative Default)
+### Project scope (recommended)
 
-Run id:
+Run id format:
 
 ```text
 codaph:<projectId>
 ```
 
-Use this mode to aggregate all contributor activity into one shared memory timeline.
+Use this mode to aggregate contributor activity in one shared memory space.
 
-### Session Scope
+### Session scope (advanced)
 
-Run id:
+Run id format:
 
 ```text
 codaph:<projectId>:<sessionId>
 ```
 
-Use this mode when you want strict per-session isolation.
+Use this when you need strict isolation per session.
 
-## Team Setup Checklist
+## Why Two People Can See Different Prompt Counts
 
-Every contributor should:
+This usually happens even when both contributors use the same Mubit key and project id.
 
-1. Use the same `MUBIT_API_KEY`.
-2. Use the same `projectId` (`owner/repo` recommended).
-3. Use unique actor id.
-4. Use `project` run scope for collaboration.
-5. Run both local and remote sync regularly.
+Common reasons:
 
-Recommended shell setup:
+- one person ran `codaph import` and the other did not
+- cloud pull is based on a snapshot and may return a partial event slice
+- event-level snapshots can be dominated by thoughts/tool events instead of prompts
 
-```bash
-export MUBIT_API_KEY=...
-export CODAPH_PROJECT_ID=owner/repo
-export CODAPH_ACTOR_ID=<your-login>
-export CODAPH_MUBIT_RUN_SCOPE=project
-```
+Codaph now writes a prompt-focused cloud stream to improve prompt parity, but local backfill can still show more complete history on the originating machine.
 
-## Operational Flow
+## Verify Team Configuration
 
-1. Contributor uses Codex normally.
-2. Codaph `sync` imports local sessions and writes canonical events to Mubit.
-3. Codaph writes `codaph_event` activity entries for remote replay.
-4. Other contributors run `sync remote` to import remote Mubit activity into local mirror.
-5. TUI shows contributor-attributed prompts, thoughts, and file changes.
-
-## Commands
-
-Local ingest + Mubit write:
+Run this on both machines:
 
 ```bash
-bun run cli sync --cwd /absolute/project/path --mubit
+codaph status
+cat .codaph/project.json
 ```
 
-Remote replay into mirror:
+Compare:
+
+- `repoId`
+- `mubitProjectId`
+- `mubitRunScope`
+- remote pull counters and snapshot fingerprint
+
+If the snapshot fingerprint matches, both users are pulling the same cloud snapshot.
+
+## Commands You Will Actually Use
 
 ```bash
-bun run cli sync remote --cwd /absolute/project/path --mubit --limit 1200
+# normal daily sync
+codaph sync
+
+# optional history backfill for this machine
+codaph import
+
+# inspect sync + cloud state
+codaph status
+
+# view prompts/thoughts/diffs
+codaph tui
 ```
 
-Contributor-level inspection:
+## Current Limits (Important)
 
-```bash
-bun run tui --cwd /absolute/project/path --mubit
-```
+- Cloud pull uses a Mubit snapshot timeline and may be bounded.
+- Prompt parity is better than full thought/diff parity when the cloud snapshot is capped.
+- `codaph import` is machine-local because it reads that machine's `~/.codex/sessions`.
 
-Then in inspect view:
-
-- press `c` for contributors overlay
-- press `enter` on contributor to filter prompts
-
-## What Gets Attributed
-
-For each event, Codaph stores:
-
-- `actorId`
-- `project_id` / `repo_id`
-- `session_id`
-- `thread_id`
-- event timestamp
-- normalized event payload
-
-This metadata powers per-contributor views and actor filters.
-
-## Current Limits
-
-- Remote replay currently imports events from Mubit activity entries with type `codaph_event`.
-- Query service does not yet merge semantic Mubit context directly into timeline rows.
-- Local mirror encryption-at-rest is not yet implemented.
+These are product limits, not usually user mistakes.

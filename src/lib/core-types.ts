@@ -79,6 +79,7 @@ export interface MemoryWriteResult {
 
 export interface MemoryEngine {
   writeEvent(event: CapturedEventEnvelope): Promise<MemoryWriteResult>;
+  writeEventsBatch?(events: CapturedEventEnvelope[]): Promise<void>;
   writeRunState?(runId: string, statePatch: Record<string, unknown>): Promise<void>;
 }
 

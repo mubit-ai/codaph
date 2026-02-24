@@ -26,6 +26,7 @@ export interface IngestPipelineOptions {
   memoryWriteTimeoutMs?: number;
   memoryMaxConsecutiveErrors?: number;
   memoryWriteConcurrency?: number;
+  memoryBatchSize?: number;
   defaultActorId?: string | null;
 }
 
@@ -66,6 +67,7 @@ export class IngestPipeline {
   private memoryCircuitOpen = false;
   private readonly pendingMemoryWrites = new Set<Promise<void>>();
   private pendingMemoryWriteError: unknown = null;
+  private pendingMemoryBatch: CapturedEventEnvelope[] = [];
 
   constructor(
     private readonly mirror: MirrorAppender,
@@ -80,6 +82,40 @@ export class IngestPipeline {
     return Math.max(1, Math.trunc(raw));
   }
 
+  private getMemoryBatchSize(): number {
+    if (!this.options.memoryEngine?.writeEventsBatch) {
+      return 1;
+    }
+    const raw = this.options.memoryBatchSize ?? 1;
+    if (!Number.isFinite(raw)) {
+      return 1;
+    }
+    return Math.max(1, Math.trunc(raw));
+  }
+
+  private getMemoryWriteTimeoutMsForBatch(batchSize: number): number {
+    const baseTimeoutMs = this.options.memoryWriteTimeoutMs ?? 15000;
+    const multiplier = Math.max(1, Math.min(6, Math.ceil(batchSize / 8)));
+    return baseTimeoutMs * multiplier;
+  }
+
+  private handleMemoryWriteError(error: unknown, event: CapturedEventEnvelope): void {
+    this.consecutiveMemoryErrors += 1;
+    const maxConsecutiveErrors = this.options.memoryMaxConsecutiveErrors ?? 3;
+    if (!this.memoryCircuitOpen && this.consecutiveMemoryErrors >= maxConsecutiveErrors) {
+      this.memoryCircuitOpen = true;
+      if (this.options.onMemoryError) {
+        this.options.onMemoryError(
+          new Error(`Mubit write circuit opened after ${this.consecutiveMemoryErrors} consecutive errors`),
+          event,
+        );
+      }
+    }
+    if (this.options.onMemoryError) {
+      this.options.onMemoryError(error, event);
+    }
+  }
+
   private async writeMemoryEvent(event: CapturedEventEnvelope): Promise<void> {
     if (!this.options.memoryEngine || this.memoryCircuitOpen) {
       return;
@@ -90,30 +126,39 @@ export class IngestPipeline {
       await withTimeout(this.options.memoryEngine.writeEvent(event), timeoutMs, "Mubit write");
       this.consecutiveMemoryErrors = 0;
     } catch (error) {
-      this.consecutiveMemoryErrors += 1;
-      const maxConsecutiveErrors = this.options.memoryMaxConsecutiveErrors ?? 3;
-      if (!this.memoryCircuitOpen && this.consecutiveMemoryErrors >= maxConsecutiveErrors) {
-        this.memoryCircuitOpen = true;
-        if (this.options.onMemoryError) {
-          this.options.onMemoryError(
-            new Error(`Mubit write circuit opened after ${this.consecutiveMemoryErrors} consecutive errors`),
-            event,
-          );
-        }
-      }
-      if (this.options.onMemoryError) {
-        this.options.onMemoryError(error, event);
-      }
+      this.handleMemoryWriteError(error, event);
       if (this.options.failOnMemoryError) {
         throw error;
       }
     }
   }
 
-  private async enqueueMemoryWrite(event: CapturedEventEnvelope): Promise<void> {
+  private async writeMemoryBatch(events: CapturedEventEnvelope[]): Promise<void> {
+    if (!this.options.memoryEngine?.writeEventsBatch || this.memoryCircuitOpen || events.length === 0) {
+      return;
+    }
+
+    const representativeEvent = events[events.length - 1] ?? events[0];
+    if (!representativeEvent) {
+      return;
+    }
+
+    try {
+      const timeoutMs = this.getMemoryWriteTimeoutMsForBatch(events.length);
+      await withTimeout(this.options.memoryEngine.writeEventsBatch(events), timeoutMs, "Mubit write");
+      this.consecutiveMemoryErrors = 0;
+    } catch (error) {
+      this.handleMemoryWriteError(error, representativeEvent);
+      if (this.options.failOnMemoryError) {
+        throw error;
+      }
+    }
+  }
+
+  private async enqueueMemoryTask(taskFactory: () => Promise<void>): Promise<void> {
     const concurrency = this.getMemoryWriteConcurrency();
     if (concurrency <= 1) {
-      await this.writeMemoryEvent(event);
+      await taskFactory();
       return;
     }
 
@@ -122,7 +167,7 @@ export class IngestPipeline {
     }
 
     let task: Promise<void>;
-    task = this.writeMemoryEvent(event)
+    task = taskFactory()
       .catch((error) => {
         if (this.pendingMemoryWriteError == null) {
           this.pendingMemoryWriteError = error;
@@ -133,6 +178,38 @@ export class IngestPipeline {
       });
 
     this.pendingMemoryWrites.add(task);
+  }
+
+  private async flushPendingMemoryBatch(): Promise<void> {
+    if (this.pendingMemoryBatch.length === 0 || this.memoryCircuitOpen) {
+      this.pendingMemoryBatch = [];
+      return;
+    }
+
+    const batch = this.pendingMemoryBatch;
+    this.pendingMemoryBatch = [];
+    const canBatch = Boolean(this.options.memoryEngine?.writeEventsBatch) && batch.length > 1;
+    if (canBatch) {
+      await this.enqueueMemoryTask(() => this.writeMemoryBatch(batch));
+      return;
+    }
+
+    for (const event of batch) {
+      await this.enqueueMemoryTask(() => this.writeMemoryEvent(event));
+    }
+  }
+
+  private async enqueueMemoryWrite(event: CapturedEventEnvelope): Promise<void> {
+    const batchSize = this.getMemoryBatchSize();
+    if (batchSize <= 1) {
+      await this.enqueueMemoryTask(() => this.writeMemoryEvent(event));
+      return;
+    }
+
+    this.pendingMemoryBatch.push(event);
+    if (this.pendingMemoryBatch.length >= batchSize) {
+      await this.flushPendingMemoryBatch();
+    }
   }
 
   async ingest(
@@ -174,6 +251,7 @@ export class IngestPipeline {
   }
 
   async flush(): Promise<void> {
+    await this.flushPendingMemoryBatch();
     if (this.pendingMemoryWrites.size > 0) {
       await Promise.allSettled([...this.pendingMemoryWrites]);
     }

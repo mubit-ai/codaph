@@ -1,110 +1,139 @@
 # TUI Guide
 
-Codaph TUI is the fastest workflow for browsing sessions, investigating prompt-to-diff history, and querying Mubit in context.
+Codaph TUI is the fastest way to inspect prompts, thoughts, and diffs after sync.
 
-## Start TUI
+The TUI is primarily a viewer. Codaph sync and hooks keep the local mirror warm, and the TUI lets you inspect what happened.
+
+## Start the TUI
+
+From the project root:
 
 ```bash
-bun run tui --cwd /absolute/project/path --mubit
+codaph tui
 ```
 
-If `--cwd` is omitted, Codaph uses the current working directory.
+From a different directory:
 
-## Views
+```bash
+codaph tui --cwd /absolute/path/to/project
+```
 
-### Browse View
+If Mubit is enabled, the header shows `Mubit:on`.
 
-Browse view lists sessions with counts and status.
+## What You See
 
-Use it to:
+### Browse view
 
-- sync local Codex history (`s`)
-- sync remote Mubit timeline (`r`)
-- add/switch projects (`a` / `p`)
+Browse view lists sessions for the current repo.
+
+Use browse view to:
+
+- inspect recent sessions
+- run sync now (`s`)
+- pull cloud activity now (`r`)
+- switch project (`p`)
 - open settings (`o`)
-- inspect a session (`enter`)
 
-### Inspect View
+### Inspect view
 
-Inspect view renders structured panes:
+Inspect view shows the selected session in panes.
+
+Typical panes include:
 
 - prompts
 - thoughts
-- files changed
-- diff
+- diffs / changed files
 - optional Mubit chat panel
 
-Inspect supports actor filtering and contributor overlay for collaborative analysis.
+Use this view to answer questions like:
 
-### Full Diff Overlay
+- what prompt caused this change?
+- what did the agent think before editing?
+- what files changed across a session?
+- which contributor authored this prompt?
 
-Press `d` in inspect view to open full diff.
-Use `up/down` to scroll and `d` or `esc` to close.
+### Status line / header
 
-### Settings Overlay
+The header shows operational state, including:
 
-Press `o` to open settings.
+- `Mubit:on/off`
+- `AutoSync:on/off`
+- cloud status (`ok`, `no-change`, `capped?`, `error`)
+- last push / pull timestamps
+- actor filter
 
-You can set:
+This helps you tell whether you are looking at fresh data.
 
-- project name override
-- Mubit project id override
-- global actor id
-- global Mubit key
-- global OpenAI key
-- auto-fill from git/GitHub
-- run scope toggle (`project`/`session`)
+## Recommended Workflow
 
-## Keyboard Map
+1. Open `codaph tui` in the repo.
+2. Press `s` to run sync now (push + pull).
+3. Open a session with `enter`.
+4. Use `c` to inspect contributors.
+5. Filter by actor when needed.
+6. Use `d` for a larger diff view.
+7. Use `m` to ask a Mubit question in context.
 
-Global:
+If the cloud is unchanged, Codaph shows a `no-change` state instead of looking like a failed sync.
+
+## Keyboard Shortcuts
+
+### Global
 
 - `q` quit
 - `?` help
 - `o` settings
 
-Browse:
+### Browse view
 
-- `up/down` select session
-- `enter` inspect selected session
-- `s` sync local Codex history
-- `r` sync remote Mubit timeline
+- `up/down` move selection
+- `enter` open selected session
+- `s` sync now (push + pull)
+- `r` pull cloud now (manual fallback)
 - `p` switch project
 - `a` add project
 
-Inspect:
+### Inspect view
 
-- `up/down` move list selection or scroll active pane
+- `up/down` move selection or scroll active pane
 - `tab` cycle focused pane
-- `enter` move prompt focus into thoughts navigation
-- `d` open full diff
+- `d` open full diff overlay
 - `m` open/close Mubit chat
 - `f` cycle actor filter
-- `c` open contributor overlay
-- `left` or `esc` go back to browse
+- `c` open contributors overlay
+- `left` or `esc` go back to browse view
 
-Contributor overlay:
+### Contributors overlay
 
 - `up/down` select contributor
 - `enter` apply actor filter
 - `esc` or `c` close overlay
 
-Chat:
+### Chat panel
 
 - type question and press `enter`
-- `esc` closes chat panel
+- `esc` closes the chat panel
 
-## Recommended Workflow
+## Sync Behavior Inside the TUI
 
-1. Open TUI in project root.
-2. Run `s` to import latest local Codex sessions.
-3. Run `r` to pull shared Mubit activity from collaborators.
-4. Open active session with `enter`.
-5. Use `c` to inspect contributor list and choose one.
-6. Use `f` to cycle actor filter quickly.
-7. Ask contextual question in chat with `m`.
+The TUI does not replace setup or import.
 
-## Notes on Thoughts
+- `s` runs the normal sync workflow (fast daily sync)
+- `r` runs a cloud pull fallback
+- `codaph import` remains the command for historical Codex backfill
 
-Codaph only renders reasoning text that Codex exposes in captured events.
-When interfaces do not expose full reasoning, Codaph marks reasoning availability and shows limited thought slices.
+If collaborators still see fewer prompts than you do, read [Troubleshooting](./troubleshooting.md) and [Mubit Collaboration](./collaboration-mubit.md).
+
+## Settings You Might Change
+
+Open settings with `o`.
+
+Common settings:
+
+- Mubit project id override
+- actor id override
+- run scope (`project` or `session`)
+- Mubit API key (global)
+- OpenAI API key (global)
+
+Use `project` run scope for shared team memory in most cases.

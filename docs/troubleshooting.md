@@ -1,152 +1,229 @@
 # Troubleshooting
 
-This page covers common Codaph issues and fast recovery steps.
+This page covers common Codaph issues and the fastest recovery path.
 
-## Mubit Shows Disabled
+## Start Here (Quick Diagnostics)
+
+Run these first:
+
+```bash
+codaph status
+codaph doctor --mubit
+```
+
+`codaph status` explains repo automation and recent sync state.
+`codaph doctor` explains resolved runtime configuration.
+
+## `codaph import` Looks Stuck or Runs for a Long Time
+
+Symptoms:
+
+- spinner keeps moving, but progress feels slow
+- `Mubit write timed out` messages appear
+- import takes much longer than expected
+
+What is usually happening:
+
+- `codaph import` is scanning local Codex history and writing to Mubit
+- Mubit writes are slow or timing out
+- some events may still succeed, so the run is partial rather than fully broken
+
+What to do:
+
+1. Retry with a longer timeout:
+
+```bash
+codaph import --mubit-write-timeout-ms 30000
+```
+
+2. If you only need the local mirror first, run local-only and retry cloud later:
+
+```bash
+codaph import --local-only
+codaph sync
+```
+
+3. Check cloud results after import:
+
+```bash
+codaph status
+```
+
+Notes:
+
+- Codaph batches Mubit ingest during `import`, but cloud latency can still dominate runtime.
+- Repeated timeout messages do not always mean zero progress. Some writes may already have succeeded.
+
+## Teammate Sees Fewer Prompts Than You Do
+
+Symptoms:
+
+- same repo, same Mubit key, same project id
+- teammate sees some of your prompts, but not all
+
+What this usually means:
+
+- sharing works
+- cloud pull is partial (snapshot-limited)
+- your local machine also has extra history from `codaph import`
+
+What to check:
+
+```bash
+codaph status
+cat .codaph/project.json
+```
+
+Compare on both machines:
+
+- `mubitProjectId`
+- `mubitRunScope`
+- snapshot fingerprint (`fp=...`)
+- `received`, `imported`, `dedup`
+
+If both users have the same snapshot fingerprint, they are pulling the same cloud snapshot.
+
+What to do:
+
+- run `codaph sync` again on the teammate machine
+- run `codaph import` on the originating machine to backfill history into Mubit
+- use a smaller/fresher session for demos when snapshot limits matter
+
+Read [Mubit Collaboration](./collaboration-mubit.md) for the full explanation.
+
+## `codaph sync` Does Not Show Historical Codex Sessions
+
+Symptoms:
+
+- `codaph sync` runs quickly but old Codex sessions do not appear
+
+This is expected.
+
+`codaph sync` is the fast daily sync path. Historical Codex replay moved to:
+
+```bash
+codaph import
+```
+
+Use `codaph import` once (or occasionally) when you need backfill from `~/.codex/sessions`.
+
+## Mubit Shows Disabled (`Mubit:off`)
 
 Symptoms:
 
 - TUI header shows `Mubit:off`
-- Mubit commands return disabled message
+- cloud pull fails
+- Mubit query commands show disabled state
 
 Checks:
 
 ```bash
-bun run cli doctor --cwd /absolute/project/path --mubit
+codaph doctor --mubit
 ```
 
 Fixes:
 
-- Ensure `MUBIT_API_KEY` is set in shell or root `.env`.
-- Run commands from repo root so Bun loads root `.env`.
-- Verify `--mubit` is present when forcing Mubit mode.
-- Set key in TUI settings (`o`) if you prefer saved settings.
+- set `MUBIT_API_KEY`
+- run `codaph init` again if you skipped Mubit during setup
+- verify your shell environment is available in the terminal where you run Codaph
+- confirm you did not force `--no-mubit`
 
-## `sync` Appears Stuck
-
-Symptoms:
-
-- progress line continues for long duration
-- previous runs timed out after large imports
-
-Fixes:
-
-- Re-run with local-only to isolate network impact:
-  `bun run cli sync --cwd /absolute/project/path --no-mubit`
-- Then enable Mubit and retry:
-  `bun run cli sync --cwd /absolute/project/path --mubit`
-- Check sync diagnostics (automation + remote snapshot state):
-  `bun run cli sync status --cwd /absolute/project/path --json`
-- Use `sync pull` (or `sync remote`) to pull shared state separately:
-  `bun run cli sync pull --cwd /absolute/project/path --mubit`
-
-Notes:
-
-- Codaph uses dedupe-first ingest and a Mubit write circuit-breaker to prevent repeated blocking failures.
-
-## No Collaborator Prompts or Diffs
+## Auto-Sync Is Off
 
 Symptoms:
 
-- you see only your own sessions
-- contributor overlay is empty
-
-Fixes:
-
-1. Confirm team uses same `projectId`:
-   `CODAPH_PROJECT_ID=owner/repo`
-2. Confirm each teammate has unique actor id.
-3. Run `s` (sync now) in TUI. Use `r` only as a manual cloud-pull fallback.
-4. Confirm run scope is `project` in settings overlay.
-
-## Mubit Query Returns No Useful Answer
-
-Symptoms:
-
-- empty or weak query answer
-- no evidence shown
-
-Fixes:
-
-- Use a tighter question:
-  `what changed in <file> between prompts 3 and 5?`
-- Ensure target session exists in project scope.
-- Increase limit:
-  `--limit 12`
-- Disable synthesis for debugging:
-  `--raw` or `--no-agent`
-
-## Codex CLI Not Found for Direct Capture
-
-Symptoms:
-
-- direct `run`/`exec` capture reports missing codex binary
-
-Fixes:
-
-- Install Codex CLI and verify:
-  `codex --version`
-- Use history sync path meanwhile:
-  `bun run cli sync --cwd /absolute/project/path`
-
-## TUI Layout Issues in Terminal
-
-Symptoms:
-
-- borders overflow
-- content shifts or clips
-
-Fixes:
-
-- Increase terminal width and height.
-- Use a monospaced font with normal character width.
-- Disable aggressive terminal zoom.
-- Start from a fresh terminal session after upgrades.
-
-## NPM Publish Fails With `E403`
-
-Symptoms:
-
-- GitHub Actions publish step fails with `403 Forbidden`.
-- Error says: `You may not perform that action with these credentials.`
-
-Fixes:
-
-1. Ensure repo secret `NPM_TOKEN` is valid and not expired/revoked.
-2. Use an npm token type that can publish (Automation/Publish capable, not read-only).
-3. Confirm token account can publish package name:
-   - if package exists: account must be listed in `npm owner ls <package>`
-   - if package is new: account must be allowed to claim that name
-4. For this repo, publish under the org scope and use:
-   `npx @codaph/codaph ...`
-
-Notes:
-
-- Workflow now runs an npm auth preflight (`npm whoami` and owner check) before publish to surface this earlier.
-
-## `npx @codaph/codaph` Says `codaph: command not found`
-
-Symptoms:
-
-- `npx @codaph/codaph` returns shell error `codaph: command not found`
+- `codaph status` shows `Automation: disabled`
+- commits do not trigger Codaph sync behavior
 
 Fix:
 
-- Run with explicit package+bin form:
-  `npx --yes --package @codaph/codaph codaph --help`
+```bash
+codaph sync setup --yes
+```
 
-Notes:
+If agent-complete hook setup is partial, Codaph prints a manual command to attach:
 
-- This happens on some npm/npx combinations where automatic bin inference for scoped packages is inconsistent.
+```bash
+codaph hooks run agent-complete --quiet
+```
+
+Git post-commit hook can still be enabled even when agent-complete auto-detection is unavailable.
+
+## Another Sync Is Already Running
+
+Symptoms:
+
+- `Another Codaph sync is already running for this repo`
+
+Cause:
+
+- another sync process is active
+- or a previous run exited unexpectedly and left a stale lock
+
+What to do:
+
+- wait a few seconds and retry
+- rerun `codaph sync` (Codaph now attempts to reclaim stale locks automatically)
+
+## No Codex History for This Repo
+
+Symptoms:
+
+- push/import output says `No Codex history for this repo`
+
+What it means:
+
+- Codaph scanned `~/.codex/sessions`
+- no session files matched the current repository path
+
+What to do:
+
+- confirm you are in the correct repo root
+- confirm the Codex sessions you expect were created in this repo path
+- run `codaph import --cwd /absolute/path/to/repo` if you are invoking from another directory
+
+## Mubit Query Returns Weak Results
+
+Symptoms:
+
+- answer is empty or generic
+- evidence list is small
+
+What to do:
+
+- ask a narrower question
+- point to a specific file, prompt, or session
+- increase `--limit`
+- use `--raw` or `--no-agent` to debug the underlying Mubit response
+
+Example:
+
+```bash
+codaph mubit query "what changed in auth.ts during the last session?" --session <session-id> --limit 12
+```
+
+## TUI Layout Looks Broken
+
+Symptoms:
+
+- borders wrap or clip
+- panes overlap
+
+Fixes:
+
+- use a wider terminal window
+- reduce terminal zoom
+- use a monospaced font
+- restart the terminal after upgrading Codaph
 
 ## Reset Local Codaph State (Safe)
 
-If local mirror is inconsistent and you want a fresh rebuild:
+Use this when local mirror files are inconsistent and you want to rebuild from scratch.
 
 ```bash
-rm -rf /absolute/project/path/.codaph
-bun run cli sync --cwd /absolute/project/path --mubit
-bun run cli sync remote --cwd /absolute/project/path --mubit
+rm -rf .codaph
+codaph import
+codaph sync
 ```
 
-This does not delete Mubit remote memory.
+This resets local state only. It does not delete Mubit cloud data.

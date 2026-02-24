@@ -85,4 +85,39 @@ describe("ingest pipeline", () => {
 
     expect(writeEvent).toHaveBeenCalledTimes(2);
   });
+
+  it("uses batched memory writes when supported", async () => {
+    const appendEvent = vi.fn(async () => ({ segment: "x", offset: 1, checksum: "abc", deduplicated: false }));
+    const appendRawLine = vi.fn(async () => {});
+    const writeEventsBatch = vi.fn(async () => {});
+    const writeEvent = vi.fn(async () => ({ accepted: true }));
+
+    const pipeline = new IngestPipeline(
+      { appendEvent, appendRawLine },
+      {
+        memoryEngine: {
+          writeEvent,
+          writeEventsBatch,
+        },
+        memoryBatchSize: 2,
+      },
+    );
+
+    const base = {
+      source: "codex_exec" as const,
+      repoId: "r",
+      sessionId: "s",
+      threadId: "t",
+    };
+
+    await pipeline.ingest("prompt.submitted", { prompt: "a" }, { ...base, sequence: 1 });
+    await pipeline.ingest("item.completed", { item: { type: "message", text: "b" } }, { ...base, sequence: 2 });
+    await pipeline.flush();
+
+    expect(writeEventsBatch).toHaveBeenCalledTimes(1);
+    expect(writeEvent).toHaveBeenCalledTimes(0);
+    const firstCallArgs = (writeEventsBatch.mock.calls[0] ?? []) as unknown[];
+    const batchArg = (firstCallArgs[0] ?? []) as Array<{ eventId: string }>;
+    expect(batchArg.length).toBe(2);
+  });
 });

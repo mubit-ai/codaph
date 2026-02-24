@@ -1,17 +1,23 @@
 # Quickstart
 
-This guide gets Codaph running with collaborative Mubit memory in less than 10 minutes.
+This guide gets Codaph running with shared Mubit memory in a few minutes.
 
-## 1) Prerequisites
+## What You Need
 
+- A repository you want to inspect
 - Bun `1.3.9+`
 - Codex CLI installed and authenticated
-- Mubit API key
-- Optional OpenAI API key for Mubit answer synthesis
+- A Mubit API key from [console.mubit.ai](https://console.mubit.ai)
 
-## 2) Install and Build
+Optional:
 
-Run commands from the repository root.
+- `OPENAI_API_KEY` for Mubit query answer synthesis
+
+## Install Codaph
+
+Choose one path.
+
+### Option A: Run from source (current repo)
 
 ```bash
 cd /Users/anilp/Code/codaph
@@ -20,64 +26,117 @@ bun run typecheck
 bun run build
 ```
 
-## 3) Configure Secrets
+Run commands with `bun run cli ...` while developing from source.
 
-Use root `.env` or shell exports.
-
-```bash
-export MUBIT_API_KEY=your_mubit_key
-export OPENAI_API_KEY=your_openai_key
-```
-
-Optional collaborative overrides:
+### Option B: Published binary (recommended for docs/site users)
 
 ```bash
-export CODAPH_PROJECT_ID=owner/repo
-export CODAPH_ACTOR_ID=your-github-login
-export CODAPH_MUBIT_RUN_SCOPE=project
+codaph --help
 ```
 
-## 4) Validate Runtime Wiring
+If you install through `npx`, use the fallback form when your shell does not resolve the scoped bin automatically:
 
 ```bash
-bun run cli doctor --cwd /Users/anilp/Code/codaph --mubit
+npx --yes --package @codaph/codaph codaph --help
 ```
 
-Expected signals:
+## 1. Initialize Codaph in a Project
 
-- `Mubit runtime: enabled`
-- `Mubit project id:` is set (auto-detected from git remote or explicit override)
-- `Mubit actor id:` is set
-
-## 5) Run TUI (Primary UX)
+Open the target project and run:
 
 ```bash
-bun run tui --cwd /Users/anilp/Code/codaph --mubit
+cd /absolute/path/to/your/project
+codaph init
 ```
 
-Inside TUI:
+What `codaph init` does:
 
-1. Press `a` to add/select project folder.
-2. Press `s` to sync local Codex sessions from `~/.codex/sessions`.
-3. Press `r` to sync shared Mubit remote activity into local mirror.
-4. Press `enter` on a session to inspect prompts, thoughts, and diffs.
-5. Press `m` to ask Mubit questions in context.
+- creates repo-local `.codaph/project.json`
+- prompts for a Mubit API key if one is not configured yet
+- enables repo-scoped auto-sync hooks (post-commit, and agent-complete when detectable)
+- stores repo sync settings
 
-## 6) CLI-Only Workflow (Optional)
+If you do not have a Mubit key yet, the wizard points you to [console.mubit.ai](https://console.mubit.ai).
+
+## 2. Run Fast Sync (Daily Sync Path)
 
 ```bash
-# local codex history -> mirror (+ Mubit if enabled)
-bun run cli sync --cwd /absolute/project/path --mubit
-
-# remote Mubit timeline -> mirror
-bun run cli sync remote --cwd /absolute/project/path --mubit
-
-# inspect and query
-bun run cli sessions list --cwd /absolute/project/path
-bun run cli inspect --session <session-id> --cwd /absolute/project/path
-bun run cli mubit query "what changed in auth?" --session <session-id> --cwd /absolute/project/path --mubit
+codaph sync
 ```
 
-## 7) Scope Note
+What `codaph sync` does:
 
-Codaph is CLI/TUI-first and currently ships without the Electron desktop app.
+- runs the fast Mubit-first sync path
+- pulls cloud activity into your local `.codaph` mirror
+- uses repo-local sync state and automation settings
+- does not replay global Codex history by default
+
+Use this command for normal day-to-day usage.
+
+## 3. Open the TUI
+
+```bash
+codaph tui
+```
+
+Inside the TUI:
+
+- press `s` to run sync now (push + pull)
+- press `r` to pull cloud activity now (manual fallback)
+- press `enter` on a session to inspect prompts, thoughts, and diffs
+- press `c` to filter by contributor
+
+## 4. Backfill Historical Codex Sessions (Optional)
+
+If you want older Codex sessions from `~/.codex/sessions` to appear in Codaph and Mubit, run:
+
+```bash
+codaph import
+```
+
+Use `codaph import` once (or occasionally). It is not part of the default daily `sync` path.
+
+## 5. Check Status
+
+```bash
+codaph status
+```
+
+`codaph status` shows:
+
+- auto-sync state
+- last local push timestamp
+- last remote pull timestamp
+- Mubit snapshot diagnostics (including snapshot cap hints)
+
+## Team Quickstart (Shared Mubit Memory)
+
+For a team using the same repo:
+
+1. Everyone runs `codaph init` in the repo.
+2. Everyone uses the same Mubit backend key and project id.
+3. Each person has a unique actor id (auto-detected in most cases).
+4. One or more contributors run `codaph import` to backfill local Codex history.
+5. Everyone runs `codaph sync` and opens `codaph tui`.
+
+Read [Mubit Collaboration](./collaboration-mubit.md) for details and current limits.
+
+## Non-Interactive Setup (CI / demos / scripted envs)
+
+```bash
+codaph setup --mubit-api-key <your-key>
+cd /absolute/path/to/your/project
+codaph init --yes
+codaph sync
+```
+
+## If Something Looks Wrong
+
+Start with:
+
+```bash
+codaph status
+codaph doctor --mubit
+```
+
+Then check [Troubleshooting](./troubleshooting.md).
