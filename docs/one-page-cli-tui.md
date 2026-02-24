@@ -1,16 +1,27 @@
-# Codaph CLI/TUI One-Page Guide
+# Codaph: Mubit-Powered Memory for Codex Workflows
 
-This is the single-page guide you can publish for Codaph users.
+Codaph helps you inspect coding-agent activity in a terminal UI and share project memory through Mubit.
 
-## What Codaph Does
+Use it to answer:
 
-Codaph captures Codex sessions, stores collaborative memory in Mubit, and lets you inspect prompts, thoughts, and diffs in a terminal UI.
+- what prompt caused this diff?
+- what did the agent think before changing this file?
+- what changed across contributors on this repo?
+
+## Why Codaph Feels Different
+
+Codaph is built around a simple split:
+
+- `codaph sync` is fast and Mubit-first for daily use.
+- `codaph import` is explicit historical backfill from local Codex history.
+
+This keeps the common path fast while still supporting full history when you want it.
 
 ## Install
 
-Pick one method.
+Choose one path.
 
-### A) Local (today)
+### Source (today)
 
 ```bash
 git clone <your-repo-url>
@@ -19,145 +30,131 @@ bun install
 bun run build
 ```
 
-Run:
+Run from source with:
 
 ```bash
-bun run tui --cwd /absolute/project/path --mubit
+bun run cli <command>
 ```
 
-### B) npx (after npm publish)
+### npm / npx (publish path)
 
 ```bash
-npx @codaph/codaph tui --cwd /absolute/project/path --mubit
-# fallback if npx does not auto-pick the bin:
-npx --yes --package @codaph/codaph codaph tui --cwd /absolute/project/path --mubit
+npx @codaph/codaph --help
 ```
 
-### C) Homebrew (after formula publish)
+Fallback when your environment does not resolve the scoped bin automatically:
 
 ```bash
-brew install codaph
-codaph tui --cwd /absolute/project/path --mubit
+npx --yes --package @codaph/codaph codaph --help
 ```
 
-## Required Environment
-
-```bash
-export MUBIT_API_KEY=your_mubit_key
-```
-
-Optional for Mubit answer synthesis:
-
-```bash
-export OPENAI_API_KEY=your_openai_key
-```
-
-Optional explicit collaboration identity:
-
-```bash
-export CODAPH_PROJECT_ID=owner/repo
-export CODAPH_ACTOR_ID=your-github-login
-export CODAPH_MUBIT_RUN_SCOPE=project
-```
-
-## First 60 Seconds
-
-1. Start TUI:
-   `codaph tui --cwd /absolute/project/path --mubit`
-2. Press `s` to sync local Codex history (`~/.codex/sessions`).
-3. Press `r` to sync shared Mubit remote timeline.
-4. Press `enter` on a session to inspect.
-5. Press `m` to ask a Mubit question in session context.
-
-## TUI Keys
-
-- `q` quit
-- `?` help
-- `o` settings
-- `a` add project
-- `p` switch project
-- Browse: `up/down`, `enter`, `s`, `r`
-- Inspect: `up/down`, `tab`, `d`, `m`, `f`, `c`, `left`
-
-## CLI Essentials
-
-```bash
-# health check
-codaph doctor --cwd /absolute/project/path --mubit
-
-# local codex history -> local mirror (+ Mubit if enabled)
-codaph sync --cwd /absolute/project/path --mubit
-
-# shared Mubit timeline -> local mirror
-codaph sync remote --cwd /absolute/project/path --mubit
-
-# inspect
-codaph sessions list --cwd /absolute/project/path
-codaph inspect --session <session-id> --cwd /absolute/project/path
-codaph diff --session <session-id> --cwd /absolute/project/path
-
-# query memory
-codaph mubit query "what changed in auth?" --session <session-id> --cwd /absolute/project/path --mubit
-```
-
-## Team / Collaboration Model
-
-- Everyone uses the same project id (`owner/repo`).
-- Everyone uses the same Mubit backend key for that workspace.
-- Each contributor has a unique actor id.
-- Use run scope `project` for shared memory.
-
-Run ids:
-
-- project scope: `codaph:<owner/repo>`
-- session scope: `codaph:<owner/repo>:<sessionId>`
-
-## Settings (inside TUI)
-
-Press `o` and set:
-
-- project name
-- Mubit project id
-- actor id
-- Mubit API key
-- OpenAI API key
-- run scope (`project` or `session`)
-
-## Common Issues
-
-- `Mubit:off`
-  Run `codaph doctor --mubit` and verify `MUBIT_API_KEY`.
-- No teammate activity
-  Ensure same `CODAPH_PROJECT_ID`, then run `sync remote`.
-- Query has no useful answer
-  Ask a narrower question and increase `--limit`.
-
-## Publish Notes
-
-For npm release docs, advertise:
-
-```bash
-npx @codaph/codaph ...
-```
-
-GitHub Actions release-tag publish is configured at:
-`/.github/workflows/publish-npm.yml`
-
-Tag format must match `package.json` version:
-
-```bash
-git tag v0.1.0
-git push origin v0.1.0
-```
-
-If GitHub Actions publish fails with `E403`, the npm token cannot publish that package name.
-Use a publish-capable token and ensure it has scope access to `@codaph`.
-
-For Homebrew release docs, advertise:
+### Homebrew (publish path)
 
 ```bash
 brew install codaph
-codaph ...
+codaph --help
 ```
 
-If your final package or formula names differ, replace `codaph` in this page before publishing.
+## Quickstart (Recommended)
+
+From your project root:
+
+```bash
+codaph init
+codaph sync
+codaph tui
+```
+
+What happens:
+
+- `init` sets up `.codaph/`, prompts for a Mubit key if needed, and enables auto-sync hooks
+- `sync` performs the fast daily sync path
+- `tui` opens the viewer for prompts, thoughts, and diffs
+
+### Optional history backfill
+
+```bash
+codaph import
+```
+
+Use `import` when you want old local Codex sessions from `~/.codex/sessions` to be added to Codaph and Mubit.
+
+## Daily Workflow
+
+```bash
+codaph sync
+codaph status
+codaph tui
+```
+
+Inside the TUI:
+
+- `s` sync now (push + pull)
+- `r` pull cloud now (manual fallback)
+- `c` contributors overlay
+- `f` actor filter
+- `m` ask Mubit in context
+
+## Team / Collaboration Setup
+
+To share memory across contributors:
+
+- use the same Mubit backend key
+- use the same project id (`owner/repo` recommended)
+- use `project` run scope (default in shared setups)
+- give each contributor a unique actor id
+
+Then each contributor runs:
+
+```bash
+codaph init
+codaph sync
+codaph tui
+```
+
+## Core Commands (User-Facing)
+
+```bash
+# one-time global setup (optional if init wizard handles it)
+codaph setup --mubit-api-key <key>
+
+# one-time repo setup
+codaph init
+
+# fast daily sync (Mubit-first)
+codaph sync
+
+# status + diagnostics summary
+codaph status
+
+# optional historical Codex backfill
+codaph import
+
+# terminal UI
+codaph tui
+```
+
+## Troubleshooting in 30 Seconds
+
+Run these first:
+
+```bash
+codaph status
+codaph doctor --mubit
+```
+
+Common cases:
+
+- `Mubit:off`: missing API key or Mubit disabled
+- teammate sees fewer prompts: cloud snapshot is partial, local import differs
+- `import` is slow: Mubit writes are timing out; retry with higher timeout
+
+## Publish-Ready Notes
+
+This page is written for user-facing docs. For technical internals, link to:
+
+- `docs/architecture.md`
+- `docs/data-model.md`
+- `docs/troubleshooting.md`
+
+For release docs, prefer showing `codaph ...` commands instead of `bun run cli ...`.

@@ -1,42 +1,79 @@
 # Codaph Documentation
 
-Codaph captures Codex activity, stores structured memory in Mubit, and renders inspectable timelines and diffs in a CLI/TUI-first workflow.
+Codaph helps you inspect coding-agent activity with a local terminal UI and shared Mubit-backed memory.
 
-This folder gives you the operational and technical docs to run Codaph in solo and team modes.
+Use these docs in this order:
+
+1. [Quickstart](./quickstart.md) for first-time setup.
+2. [One-Page CLI/TUI Guide](./one-page-cli-tui.md) for a publishable overview.
+3. [TUI Guide](./tui-guide.md) for the day-to-day workflow.
+4. [Troubleshooting](./troubleshooting.md) when sync or Mubit behavior looks wrong.
 
 ## Start Here
 
-1. Read [Quickstart](./quickstart.md).
-2. Run `bun run cli doctor`.
-3. Start `bun run tui`.
-4. Sync local Codex history with `s`, then sync shared Mubit activity with `r`.
+### New user (recommended)
+
+1. Open the target repository.
+2. Run `codaph init`.
+3. Run `codaph sync`.
+4. Open `codaph tui`.
+5. Run `codaph import` once if you want historical Codex sessions in Mubit.
+
+### Team setup (shared Mubit memory)
+
+1. Everyone uses the same Mubit backend key and project id.
+2. Everyone runs `codaph init` inside the same repo.
+3. One person runs `codaph import` to backfill local Codex history (optional but useful).
+4. Everyone runs `codaph sync` and then `codaph tui`.
+
+Read [Mubit Collaboration](./collaboration-mubit.md) for the shared-memory model and limits.
+
+## Product Mental Model
+
+Codaph has two sync paths on purpose:
+
+- `codaph sync` is the fast daily path.
+  It focuses on Mubit-first synchronization and repo-local state.
+- `codaph import` is the historical backfill path.
+  It scans `~/.codex/sessions` and imports matching sessions for the current repo.
+
+This split keeps daily sync fast and makes history replay explicit.
 
 ## Documentation Map
 
-- [One-Page CLI/TUI Guide](./one-page-cli-tui.md)
-  Single publish-facing page for npx/brew users.
+### User docs
+
 - [Quickstart](./quickstart.md)
-  End-to-end setup for first run.
+  Wizard-first setup and first run.
+- [One-Page CLI/TUI Guide](./one-page-cli-tui.md)
+  Publish-ready overview page.
 - [CLI Reference](./cli-reference.md)
-  Commands, flags, and examples.
+  User-facing commands with minimal flags first.
 - [TUI Guide](./tui-guide.md)
-  Views, keyboard controls, and workflows.
+  Views, keys, and recommended workflow.
 - [Mubit Collaboration](./collaboration-mubit.md)
-  Shared project memory model and contributor attribution.
-- [Architecture](./architecture.md)
-  Package-level design and data flow.
-- [Data Model](./data-model.md)
-  Canonical event schema and local index layout.
+  Team setup, project scope, and cloud sync behavior.
 - [Troubleshooting](./troubleshooting.md)
-  Fixes for common runtime and sync problems.
+  Common errors and recovery steps.
+
+### Technical docs
+
+- [Architecture](./architecture.md)
+- [Data Model](./data-model.md)
 - [Roadmap](./roadmap.md)
-  What is done and what remains.
 
 ## Current Product Status
 
-Codaph Phase 1A is operational for Codex-first ingestion and collaborative Mubit-backed memory.
+Codaph is production-usable for CLI/TUI workflows and Mubit-backed collaboration.
 
-- Codex history ingestion is available through local session sync.
-- Mubit writes and semantic queries are available.
-- Remote Mubit timeline import is available.
-- TUI supports actor filtering and contributor overlay.
+- `codaph init` provides a repo setup flow and Mubit onboarding.
+- `codaph sync` is a fast, Mubit-first daily sync path.
+- `codaph import` backfills local Codex history on demand.
+- TUI supports prompt/thought/diff inspection with contributor filters.
+- Cloud pull includes a prompt-focused stream to improve collaborator prompt parity.
+
+## Conventions Used in This Docs Set
+
+- `codaph ...` examples assume a published install (`npm`, `brew`, or local bin on `PATH`).
+- If you are developing from source, replace `codaph` with `bun run cli`.
+- Commands assume you run them from the project root unless `--cwd` is shown.

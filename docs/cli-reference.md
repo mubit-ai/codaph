@@ -1,139 +1,233 @@
 # CLI Reference
 
-Codaph CLI is the primary non-UI interface for capture, sync, query, and automation workflows.
+Codaph is Mubit-first by default. The primary CLI path is:
+
+1. `codaph init`
+2. `codaph sync`
+3. `codaph status`
+4. `codaph tui`
+5. `codaph import` (optional backfill)
+
+This page documents the user-facing commands first and keeps advanced commands at the end.
 
 ## Command Overview
 
 ```bash
-bun run cli --help
+codaph --help
 ```
 
-Core command groups:
+Primary commands:
 
-- Capture: `run`, `exec`
-- Sync: `sync`, `sync remote`
-- Read: `sessions list`, `timeline`, `diff`, `inspect`
-- Mubit: `mubit query`, `mubit backfill`
-- Project registry: `projects list|add|remove`
-- Diagnostics: `doctor`
-- TUI launcher: `tui`
+- `setup` (global config)
+- `init` (repo setup + onboarding)
+- `sync` (fast daily sync)
+- `status` (repo sync + automation status)
+- `import` (historical Codex backfill)
+- `tui` (terminal UI)
 
-## Capture Commands
+Advanced commands are available but not required for normal usage.
 
-`run`
+## `codaph setup`
+
+Use this command to set global secrets and defaults.
 
 ```bash
-bun run cli run "Summarize this repo" --cwd /absolute/project/path
+codaph setup --mubit-api-key <key>
 ```
 
-Uses Codex SDK adapter and stores normalized events.
+Common uses:
 
-`exec`
+- set Mubit API key globally
+- set OpenAI API key for query synthesis
+- set global actor id
+
+Examples:
 
 ```bash
-bun run cli exec "Refactor auth flow" --cwd /absolute/project/path
+codaph setup --mubit-api-key <key>
+codaph setup --openai-api-key <key>
+codaph setup --mubit-actor-id <your-login>
 ```
 
-Uses `codex exec --json` adapter and stores normalized events.
+## `codaph init`
 
-## Sync Commands
-
-`sync`
+Use this command once per repository.
 
 ```bash
-bun run cli sync --cwd /absolute/project/path --mubit
+cd /absolute/path/to/project
+codaph init
 ```
 
-Imports local Codex history from `~/.codex/sessions`.
-Writes to local mirror and Mubit when enabled.
+What it does:
 
-`sync remote`
+- detects or stores repo identity (`owner/repo` when available)
+- creates `.codaph/project.json`
+- prompts for Mubit API key if missing
+- installs repo-scoped auto-sync hooks (best effort)
+
+Useful flags:
+
+- `--yes` non-interactive mode
+- `--force` reinstall/reapply setup behavior
+- `--no-auto-sync` skip hook install
+- `--cwd <path>` run init for another repo
+
+## `codaph sync`
+
+Use this command for day-to-day syncing.
 
 ```bash
-bun run cli sync remote --cwd /absolute/project/path --mubit --limit 1200
+codaph sync
 ```
 
-Imports remote Mubit timeline activity into local mirror for collaborator visibility.
+Behavior:
 
-## Read Commands
+- fast Mubit-first sync path
+- cloud pull into local mirror
+- repo-local automation/status integration
+- no global Codex history replay by default
 
-`sessions list`
+Useful flags (most users do not need these):
+
+- `--cwd <path>` run from another directory
+- `--json` machine-readable output
+- `--no-auto-enable` skip first-run automation prompt during sync
+- `--mubit-write-timeout-ms <ms>` tune write timeout for slow networks
+
+### `codaph sync` subcommands (advanced / compatibility)
+
+These are available when you need manual control.
 
 ```bash
-bun run cli sessions list --cwd /absolute/project/path
+codaph sync all
+codaph sync pull
+codaph sync status
+codaph sync setup
 ```
 
-`timeline`
+Compatibility aliases are still supported:
+
+- `codaph sync remote` (alias for `codaph sync pull`)
+- `codaph sync push` (compat alias for `codaph import`)
+
+## `codaph import`
+
+Use this command for historical backfill from local Codex session files.
 
 ```bash
-bun run cli timeline --session <session-id> --cwd /absolute/project/path --json
+codaph import
 ```
 
-`diff`
+Behavior:
 
-```bash
-bun run cli diff --session <session-id> --cwd /absolute/project/path
-```
+- scans `~/.codex/sessions`
+- imports only sessions that match the current repo path
+- writes to local `.codaph` mirror
+- writes to Mubit when enabled
 
-`inspect`
+Use this command:
 
-```bash
-bun run cli inspect --session <session-id> --cwd /absolute/project/path
-```
+- once after onboarding
+- after long periods of running Codex outside Codaph hooks
+- when rebuilding a local mirror from your machine's Codex history
 
-## Mubit Query Command
+Useful flags:
 
-```bash
-bun run cli mubit query "why did this file change?" --session <session-id> --cwd /absolute/project/path --mubit
-```
-
-Options:
-
-- `--limit <n>` controls Mubit evidence size.
-- `--raw` prints raw Mubit response JSON.
-- `--no-agent` disables OpenAI synthesis and prints Mubit-native output.
-
-## Diagnostic Command
-
-```bash
-bun run cli doctor --cwd /absolute/project/path --mubit
-```
-
-Use this first when runtime behavior is unclear.
-It prints resolved project id, actor id, run scope, key detection, and enable state.
-
-## Mubit Flags
-
-- `--mubit` / `--no-mubit`
-- `--mubit-api-key <key>`
-- `--mubit-project-id <owner/repo>`
-- `--mubit-run-scope <project|session>`
-- `--mubit-actor-id <actor>`
+- `--cwd <path>`
+- `--json`
+- `--local-only` (compat alias to disable Mubit writes)
 - `--mubit-write-timeout-ms <ms>`
-- `--mubit-transport <auto|http|grpc>`
-- `--mubit-endpoint <url>`
-- `--mubit-http-endpoint <url>`
-- `--mubit-grpc-endpoint <host:port>`
-- `--mubit-agent-id <id>`
 
-## OpenAI Agent Flags
+## `codaph status`
 
-- `--agent` / `--no-agent`
-- `--openai-api-key <key>`
-- `--openai-model <model>`
+Use this command to understand sync and automation state.
 
-## Environment Variables
+```bash
+codaph status
+```
+
+It shows:
+
+- repo id
+- auto-sync settings
+- local push timestamps/counters
+- remote pull timestamps/counters
+- snapshot fingerprint and cap diagnostics
+
+Useful flags:
+
+- `--cwd <path>`
+- `--json`
+
+## `codaph tui`
+
+Launch the terminal UI.
+
+```bash
+codaph tui
+```
+
+Useful flags:
+
+- `--cwd <path>`
+- `--mubit` / `--no-mubit`
+
+The TUI is primarily a viewer. Use `codaph sync` or `s`/`r` in the TUI to refresh data.
+
+## Common Environment Variables
+
+Most users only need:
 
 - `MUBIT_API_KEY`
-- `MUBIT_APIKEY` (fallback)
-- `OPENAI_API_KEY`
-- `OPENAI_APIKEY` (fallback)
+- `OPENAI_API_KEY` (optional)
+
+Codaph can also use:
+
 - `CODAPH_PROJECT_ID`
 - `CODAPH_ACTOR_ID`
 - `CODAPH_MUBIT_RUN_SCOPE`
-- `MUBIT_PROJECT_ID`
+- `MUBIT_APIKEY` (fallback)
+- `OPENAI_APIKEY` (fallback)
 
-## Exit Behavior
+## Advanced Commands
 
-- `0` on successful command completion.
-- Non-zero on failures such as missing required flags, missing Mubit auth, or query/sync runtime errors.
+These commands are useful for debugging, inspection, and power users.
+
+### Diagnostics
+
+```bash
+codaph doctor --mubit
+```
+
+### Session inspection
+
+```bash
+codaph sessions list
+codaph inspect --session <session-id>
+codaph timeline --session <session-id>
+codaph diff --session <session-id>
+```
+
+### Mubit queries
+
+```bash
+codaph mubit query "what changed in auth?" --session <session-id>
+```
+
+Useful query flags:
+
+- `--limit <n>`
+- `--raw`
+- `--agent` / `--no-agent`
+
+### Direct capture (advanced)
+
+```bash
+codaph run "Summarize this repo"
+codaph exec "Refactor auth flow"
+```
+
+## Exit Codes
+
+- `0` on success
+- non-zero on command or runtime error

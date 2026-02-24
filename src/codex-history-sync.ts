@@ -748,6 +748,7 @@ export async function syncCodexHistory(options: SyncCodexHistoryOptions): Promis
           ts: event.ts ?? lineTs,
         });
         importedForFile += 1;
+        summary.importedEvents += 1;
         if (importedForFile % 50 === 0) {
           emitProgress({
             currentFile: filePath,
@@ -760,7 +761,6 @@ export async function syncCodexHistory(options: SyncCodexHistoryOptions): Promis
 
     if (importedForFile > 0) {
       importedSessions.add(sessionId);
-      summary.importedEvents += importedForFile;
     }
 
     state.files[filePath] = {

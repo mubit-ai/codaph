@@ -17,17 +17,20 @@ docs/                   # user and architecture docs
 
 ## Documentation
 
-Deep docs live in `docs/`.
+Start here:
 
-- [docs/README.md](docs/README.md)
-- [docs/one-page-cli-tui.md](docs/one-page-cli-tui.md)
-- [docs/quickstart.md](docs/quickstart.md)
+- [docs/README.md](docs/README.md) (docs index)
+- [docs/quickstart.md](docs/quickstart.md) (wizard-first setup)
+- [docs/one-page-cli-tui.md](docs/one-page-cli-tui.md) (publish-facing overview)
+- [docs/troubleshooting.md](docs/troubleshooting.md) (common issues and fixes)
+
+Reference docs:
+
 - [docs/cli-reference.md](docs/cli-reference.md)
 - [docs/tui-guide.md](docs/tui-guide.md)
 - [docs/collaboration-mubit.md](docs/collaboration-mubit.md)
 - [docs/architecture.md](docs/architecture.md)
 - [docs/data-model.md](docs/data-model.md)
-- [docs/troubleshooting.md](docs/troubleshooting.md)
 - [docs/roadmap.md](docs/roadmap.md)
 
 ## Requirements
@@ -76,96 +79,39 @@ Workflow requirements:
 - `NPM_TOKEN` must be from an npm account that can publish the package name.
 - If publish fails with `E403`, use an npm Automation/Publish token with write access (not read-only), and ensure token scope includes `@codaph`.
 
-## Run TUI (Primary)
+## Quick Start (User Flow)
+
+Codaph is Mubit-first and wizard-first.
+
+From a target project repo:
 
 ```bash
-# required for collaborative Mubit writes/queries
-export MUBIT_API_KEY=...
-export OPENAI_API_KEY=...
-# optional overrides (defaults auto-detected from git/GitHub)
-export CODAPH_PROJECT_ID=your-org/repo
-export CODAPH_ACTOR_ID=your-github-login
-
-bun run tui
-bun run cli doctor
+codaph init
+codaph sync
+codaph tui
 ```
 
-TUI flow:
-1. Add or select a project folder.
-2. Codaph auto-detects GitHub `owner/repo` from `origin` and uses it as shared Mubit project id (if not explicitly set).
-3. Sync Codex history from `~/.codex/sessions` into Codaph mirror + Mubit.
-4. Codaph can auto-install sync automation on first `sync`; use `r` in TUI as a manual cloud pull fallback.
-5. Inspect prompts, thoughts, assistant output, and file changes by session.
-6. Query Mubit semantic memory for the active session.
+Optional historical backfill from local Codex sessions:
 
-TUI keyboard map:
-- `q`: quit
-- `?`: help overlay
-- `o`: settings overlay (set project name/id, actor id, API keys, run scope)
-- `p`: switch project
-- `a`: add/switch project path
-- Browse view: `up/down` navigate sessions, `enter` inspect, `s` sync now (local+cloud), `r` pull cloud Mubit (manual/fallback)
-- Inspect view: `up/down` prompt navigation, `tab` cycle pane focus, `d` full diff overlay, `m` Mubit chat, `f` actor filter, `c` contributors overlay, `left` or `esc` back
-- Chat panel: type message, `enter` send, `esc` close chat
+```bash
+codaph import
+```
 
-## CLI Commands (Primary)
+Use `codaph status` to inspect automation, last push/pull timestamps, and Mubit snapshot diagnostics.
+
+See [docs/quickstart.md](docs/quickstart.md) for the full walkthrough.
+
+## Developer Commands (Source Checkout)
+
+When running from this source repo, use `bun run cli` instead of the published `codaph` binary:
 
 ```bash
 bun run cli --help
-bun run cli doctor
-
-# import normal Codex app/CLI usage into .codaph and Mubit
+bun run cli init --cwd /absolute/project/path
 bun run cli sync --cwd /absolute/project/path
-# explicit phases (fallback/manual)
-bun run cli sync push --cwd /absolute/project/path
-bun run cli sync pull --cwd /absolute/project/path
-# compatibility alias (same as sync pull)
-bun run cli sync remote --cwd /absolute/project/path
-# optional push-only mode (compat alias)
-bun run cli sync --cwd /absolute/project/path --local-only
-# inspect sync automation + remote snapshot diagnostics
-bun run cli sync status --cwd /absolute/project/path
-
-# direct capture through Codaph
-bun run cli run "Summarize this repo" --cwd /absolute/project/path
-bun run cli exec "Refactor src/config.ts" --cwd /absolute/project/path
-
-# inspect
-bun run cli sessions list --cwd /absolute/project/path
-bun run cli inspect --session <session-id> --cwd /absolute/project/path
-bun run cli timeline --session <session-id> --cwd /absolute/project/path
-bun run cli diff --session <session-id> --cwd /absolute/project/path
-
-# Mubit semantic query
-bun run cli mubit query "what changed in auth?" --session <session-id> --cwd /absolute/project/path
-bun run cli mubit query "what changed in auth?" --session <session-id> --cwd /absolute/project/path --raw
-# disable OpenAI synthesis and show Mubit-only summary
-bun run cli mubit query "what changed in auth?" --session <session-id> --cwd /absolute/project/path --no-agent
+bun run cli tui --cwd /absolute/project/path
+bun run cli import --cwd /absolute/project/path
+bun run cli status --cwd /absolute/project/path
 ```
 
-Mubit flags:
-- `--mubit` / `--no-mubit`
-- `--mubit-api-key <key>` (or `MUBIT_API_KEY`)
-- `--mubit-project-id <shared-id>` (or `CODAPH_PROJECT_ID`)
-- `--mubit-run-scope <session|project>` (defaults to `project` when a project id is resolved, else `session`)
-- `--mubit-actor-id <id>` (or `CODAPH_ACTOR_ID`)
-- `--raw` (for `mubit query`, print full response JSON)
-- `--agent` / `--no-agent` (for `mubit query`, OpenAI synthesis on top of Mubit)
-- `--openai-api-key <key>` (or `OPENAI_API_KEY`)
-- `--openai-model <model>`
-- `--mubit-transport <auto|http|grpc>`
-- `--mubit-endpoint`, `--mubit-http-endpoint`, `--mubit-grpc-endpoint`
-- `--mubit-write-timeout-ms <ms>` (default `15000`, set `0` to disable timeout)
-
-Team-shared Mubit setup:
-1. Everyone uses the same `MUBIT_API_KEY`.
-2. Everyone uses the same `CODAPH_PROJECT_ID` (or `--mubit-project-id`) for that repo.
-   If unset, Codaph auto-detects from git remote `origin` as `owner/repo`.
-3. Use `--mubit-run-scope project` to share one project-level memory space across contributors/sessions.
-   Run id format in this mode is `codaph:<owner/repo>`.
-   In session mode it is `codaph:<owner/repo>:<sessionId>`.
-4. Set per-user `CODAPH_ACTOR_ID` (or `--mubit-actor-id`) so contributor identity is preserved in metadata.
-   If unset, Codaph auto-detects via `gh api user`, then git config, then shell user.
-5. Run `bun run cli sync --cwd <project>` to push local history and pull shared activity. Use `bun run cli sync pull` (or `r` in TUI) as a manual cloud pull fallback.
-
-Codaph is now CLI/TUI-only. All captured events are written under `<project>/.codaph`.
+Codaph is CLI/TUI-only. Captured local state is stored under `<project>/.codaph`.

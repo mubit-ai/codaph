@@ -151,4 +151,63 @@ describe("memory-mubit", () => {
     expect(metadata.project_id).toBe("team-repo");
     expect(metadata.actor_id).toBe("anil");
   });
+
+  it("batches ingest writes and preserves activity streams", async () => {
+    const coreIngestCalls: Array<Record<string, unknown>> = [];
+    const activities: Array<Record<string, unknown>> = [];
+    const engine = new MubitMemoryEngine({
+      client: {
+        core: {
+          ingest: async (payload?: Record<string, unknown>) => {
+            coreIngestCalls.push(payload ?? {});
+            return { accepted: true };
+          },
+        },
+        control: {
+          ingest: async () => ({ accepted: true }),
+          setVariable: async () => ({ success: true }),
+          query: async () => ({ final_answer: "ok" }),
+          appendActivity: async (payload?: Record<string, unknown>) => {
+            activities.push(payload ?? {});
+            return { success: true };
+          },
+        },
+      },
+    });
+
+    await engine.writeEventsBatch?.([
+      {
+        eventId: "evt-1",
+        source: "codex_exec",
+        repoId: "repo-abc",
+        actorId: "anil",
+        sessionId: "session-1",
+        threadId: "thread-1",
+        ts: "2026-02-24T10:00:00.000Z",
+        eventType: "prompt.submitted",
+        payload: { prompt: "hello" },
+        reasoningAvailability: "unavailable",
+      },
+      {
+        eventId: "evt-2",
+        source: "codex_exec",
+        repoId: "repo-abc",
+        actorId: "anil",
+        sessionId: "session-1",
+        threadId: "thread-1",
+        ts: "2026-02-24T10:00:01.000Z",
+        eventType: "item.completed",
+        payload: { item: { type: "message", text: "done" } },
+        reasoningAvailability: "unavailable",
+      },
+    ]);
+
+    expect(coreIngestCalls).toHaveLength(1);
+    const payload = coreIngestCalls[0] ?? {};
+    expect(payload.run_id).toBe("codaph:repo-abc:session-1");
+    expect(Array.isArray(payload.items)).toBe(true);
+    expect((payload.items as Array<unknown>).length).toBe(2);
+    expect("idempotency_key" in payload).toBe(false);
+    expect(activities).toHaveLength(3);
+  });
 });

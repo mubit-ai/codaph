@@ -403,13 +403,22 @@ function createPipeline(
   const memory = createMubitMemory(flags, cwd, loaded);
   const memoryWriteTimeoutMs = resolveMubitWriteTimeoutMs(flags);
   const defaultActorId = resolveMubitActorId(flags, cwd, loaded);
+  let lastMemoryErrorMessage: string | null = null;
+  let lastMemoryErrorAt = 0;
   const pipeline = new IngestPipeline(mirror, {
     memoryEngine: memory ?? undefined,
     memoryWriteTimeoutMs,
-    memoryWriteConcurrency: options.bulkSync ? 8 : 1,
+    memoryWriteConcurrency: options.bulkSync ? 2 : 1,
+    memoryBatchSize: options.bulkSync ? 24 : 1,
     defaultActorId,
     onMemoryError: (error) => {
       const message = error instanceof Error ? error.message : String(error);
+      const now = Date.now();
+      if (message === lastMemoryErrorMessage && now - lastMemoryErrorAt < 2000) {
+        return;
+      }
+      lastMemoryErrorMessage = message;
+      lastMemoryErrorAt = now;
       console.warn(`Mubit write failed: ${message}`);
     },
   });
@@ -428,6 +437,24 @@ function shortenPath(path: string, maxChars = 58): string {
     return path.slice(0, maxChars);
   }
   return `...${path.slice(-(maxChars - 3))}`;
+}
+
+function fitTtyLine(text: string): string {
+  if (!output.isTTY) {
+    return text;
+  }
+  const columns = typeof output.columns === "number" ? output.columns : 0;
+  if (!Number.isFinite(columns) || columns <= 8 || text.length < columns) {
+    return text;
+  }
+  const max = Math.max(8, columns - 1);
+  if (text.length <= max) {
+    return text;
+  }
+  if (max <= 3) {
+    return text.slice(0, max);
+  }
+  return `${text.slice(0, max - 3)}...`;
 }
 
 function renderInlineProgressBar(current: number, total: number, width = 14): string {
@@ -480,9 +507,10 @@ function createSyncProgressReporter(prefix: string): {
       : `${spinner} ${prefix} [${"-".repeat(14)}] ${elapsed} | starting...`;
 
     if (output.isTTY) {
-      const padding = " ".repeat(Math.max(0, lastInlineLength - line.length));
-      output.write(`\r${line}${padding}`);
-      lastInlineLength = line.length;
+      const ttyLine = fitTtyLine(line);
+      const padding = " ".repeat(Math.max(0, lastInlineLength - ttyLine.length));
+      output.write(`\r${ttyLine}${padding}`);
+      lastInlineLength = ttyLine.length;
       announced = true;
       return;
     }

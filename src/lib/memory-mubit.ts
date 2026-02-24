@@ -31,14 +31,21 @@ export interface MubitMemoryOptions {
   actorId?: string;
   runScope?: MubitRunScope;
   enabled?: boolean;
-  client?: {
-    control: {
-      ingest(payload?: Record<string, unknown>): Promise<unknown>;
-      setVariable(payload?: Record<string, unknown>): Promise<unknown>;
-      query(payload?: Record<string, unknown>): Promise<unknown>;
-      appendActivity?(payload?: Record<string, unknown>): Promise<unknown>;
-      contextSnapshot?(payload?: Record<string, unknown>): Promise<unknown>;
-    };
+  client?: MubitClientLike;
+}
+
+type MubitIngestMethod = (payload?: Record<string, unknown>) => Promise<unknown>;
+
+interface MubitClientLike {
+  core?: {
+    ingest?(payload?: Record<string, unknown>): Promise<unknown>;
+  };
+  control: {
+    ingest(payload?: Record<string, unknown>): Promise<unknown>;
+    setVariable(payload?: Record<string, unknown>): Promise<unknown>;
+    query(payload?: Record<string, unknown>): Promise<unknown>;
+    appendActivity?(payload?: Record<string, unknown>): Promise<unknown>;
+    contextSnapshot?(payload?: Record<string, unknown>): Promise<unknown>;
   };
 }
 
@@ -304,15 +311,7 @@ export function mubitPromptRunIdForProject(
 }
 
 export class MubitMemoryEngine implements MemoryEngine {
-  private readonly client: {
-    control: {
-      ingest(payload?: Record<string, unknown>): Promise<unknown>;
-      setVariable(payload?: Record<string, unknown>): Promise<unknown>;
-      query(payload?: Record<string, unknown>): Promise<unknown>;
-      appendActivity?(payload?: Record<string, unknown>): Promise<unknown>;
-      contextSnapshot?(payload?: Record<string, unknown>): Promise<unknown>;
-    };
-  };
+  private readonly client: MubitClientLike;
 
   private readonly configured: boolean;
   private readonly enabled: boolean;
@@ -347,15 +346,7 @@ export class MubitMemoryEngine implements MemoryEngine {
       grpc_endpoint: options.grpcEndpoint,
     };
 
-    this.client = new Client(config) as unknown as {
-      control: {
-        ingest(payload?: Record<string, unknown>): Promise<unknown>;
-        setVariable(payload?: Record<string, unknown>): Promise<unknown>;
-        query(payload?: Record<string, unknown>): Promise<unknown>;
-        appendActivity?(payload?: Record<string, unknown>): Promise<unknown>;
-        contextSnapshot?(payload?: Record<string, unknown>): Promise<unknown>;
-      };
-    };
+    this.client = new Client(config) as unknown as MubitClientLike;
   }
 
   isEnabled(): boolean {
@@ -375,108 +366,191 @@ export class MubitMemoryEngine implements MemoryEngine {
     return mubitPromptRunIdForProject(sharedRepoId, `${this.runIdPrefix}-prompts`);
   }
 
+  private getIngestMethod(): MubitIngestMethod {
+    if (this.client.core?.ingest) {
+      return this.client.core.ingest.bind(this.client.core);
+    }
+    return this.client.control.ingest.bind(this.client.control);
+  }
+
+  private buildIngestItem(event: CapturedEventEnvelope): Record<string, unknown> {
+    return {
+      item_id: event.eventId,
+      content_type: "text",
+      text: eventToText(event),
+      payload_json: toJson(event.payload),
+      hints_json: toJson({
+        source: event.source,
+        event_type: event.eventType,
+        reasoning_availability: event.reasoningAvailability,
+      }),
+      metadata_json: toJson({
+        repo_id: event.repoId,
+        project_id: this.projectId ?? event.repoId,
+        actor_id: event.actorId ?? this.actorId ?? null,
+        session_id: event.sessionId,
+        thread_id: event.threadId,
+        ts: event.ts,
+      }),
+    };
+  }
+
+  private buildIngestPayload(runId: string, events: CapturedEventEnvelope[]): Record<string, unknown> {
+    const items = events.map((event) => this.buildIngestItem(event));
+    const payload: Record<string, unknown> = {
+      run_id: runId,
+      agent_id: this.agentId,
+      parallel: false,
+      items,
+    };
+    if (events.length === 1) {
+      payload.idempotency_key = events[0]?.eventId;
+    }
+    return payload;
+  }
+
+  private async ingestEvents(runId: string, events: CapturedEventEnvelope[]): Promise<unknown> {
+    const ingest = this.getIngestMethod();
+    return await ingest(this.buildIngestPayload(runId, events));
+  }
+
+  private async appendMainActivity(runId: string, event: CapturedEventEnvelope): Promise<void> {
+    if (!this.client.control.appendActivity) {
+      return;
+    }
+
+    const appendPayload = {
+      run_id: runId,
+      agent_id: this.agentId,
+      activity: {
+        type: "codaph_event",
+        payload: toJson(compactActivityEnvelope(event)),
+        ts: event.ts,
+        agent_id: this.agentId,
+        input_ref: event.sessionId,
+        output_ref: event.eventId,
+      },
+    };
+
+    try {
+      await this.client.control.appendActivity(appendPayload);
+    } catch (firstError) {
+      try {
+        await this.client.control.appendActivity({
+          run_id: runId,
+          agent_id: this.agentId,
+          activity: {
+            type: "codaph_event",
+            payload: toJson(minimalActivityEnvelope(event)),
+            ts: event.ts,
+            agent_id: this.agentId,
+            input_ref: event.sessionId,
+            output_ref: event.eventId,
+          },
+        });
+      } catch {
+        if (process.env.CODAPH_DEBUG === "1") {
+          const message = firstError instanceof Error ? firstError.message : "unknown appendActivity error";
+          console.warn(`[codaph] appendActivity failed for ${event.eventId}: ${message}`);
+        }
+      }
+    }
+  }
+
+  private async appendPromptActivity(event: CapturedEventEnvelope): Promise<void> {
+    if (!this.client.control.appendActivity || !isPromptSubmittedEvent(event)) {
+      return;
+    }
+
+    try {
+      await this.client.control.appendActivity({
+        run_id: this.promptRunIdForRepo(event.repoId),
+        agent_id: this.agentId,
+        activity: {
+          type: "codaph_prompt",
+          payload: toJson(compactPromptActivityEnvelope(event)),
+          ts: event.ts,
+          agent_id: this.agentId,
+          input_ref: event.sessionId,
+          output_ref: event.eventId,
+        },
+      });
+    } catch (promptError) {
+      if (process.env.CODAPH_DEBUG === "1") {
+        const message = promptError instanceof Error ? promptError.message : "unknown prompt appendActivity error";
+        console.warn(`[codaph] prompt appendActivity failed for ${event.eventId}: ${message}`);
+      }
+    }
+  }
+
+  private async appendActivitiesForEvent(event: CapturedEventEnvelope, runId: string): Promise<void> {
+    if (!this.client.control.appendActivity) {
+      return;
+    }
+    await this.appendMainActivity(runId, event);
+    await this.appendPromptActivity(event);
+  }
+
+  private async appendActivitiesForBatch(events: CapturedEventEnvelope[], concurrency = 4): Promise<void> {
+    if (!this.client.control.appendActivity || events.length === 0) {
+      return;
+    }
+
+    const limit = Number.isFinite(concurrency) ? Math.max(1, Math.trunc(concurrency)) : 1;
+    let nextIndex = 0;
+    const workers = Array.from({ length: Math.min(limit, events.length) }, async () => {
+      while (nextIndex < events.length) {
+        const currentIndex = nextIndex;
+        nextIndex += 1;
+        const event = events[currentIndex];
+        if (!event) {
+          continue;
+        }
+        const runId = this.runIdForSession(event.repoId, event.sessionId);
+        await this.appendActivitiesForEvent(event, runId);
+      }
+    });
+    await Promise.allSettled(workers);
+  }
+
   async writeEvent(event: CapturedEventEnvelope): Promise<MemoryWriteResult> {
     if (!this.isEnabled()) {
       return { accepted: false, raw: { disabled: true } };
     }
 
     const runId = this.runIdForSession(event.repoId, event.sessionId);
-    const ingestPayload: Record<string, unknown> = {
-      run_id: runId,
-      agent_id: this.agentId,
-      idempotency_key: event.eventId,
-      parallel: false,
-      items: [
-        {
-          item_id: event.eventId,
-          content_type: "text",
-          text: eventToText(event),
-          payload_json: toJson(event.payload),
-          hints_json: toJson({
-            source: event.source,
-            event_type: event.eventType,
-            reasoning_availability: event.reasoningAvailability,
-          }),
-          metadata_json: toJson({
-            repo_id: event.repoId,
-            project_id: this.projectId ?? event.repoId,
-            actor_id: event.actorId ?? this.actorId ?? null,
-            session_id: event.sessionId,
-            thread_id: event.threadId,
-            ts: event.ts,
-          }),
-        },
-      ],
-    };
-
-    const result = await this.client.control.ingest(ingestPayload);
+    const result = await this.ingestEvents(runId, [event]);
     const record = asRecord(result);
-    if (this.client.control.appendActivity) {
-      const appendPayload = {
-        run_id: runId,
-        agent_id: this.agentId,
-        activity: {
-          type: "codaph_event",
-          payload: toJson(compactActivityEnvelope(event)),
-          ts: event.ts,
-          agent_id: this.agentId,
-          input_ref: event.sessionId,
-          output_ref: event.eventId,
-        },
-      };
-
-      try {
-        await this.client.control.appendActivity(appendPayload);
-      } catch (firstError) {
-        try {
-          await this.client.control.appendActivity({
-            run_id: runId,
-            agent_id: this.agentId,
-            activity: {
-              type: "codaph_event",
-              payload: toJson(minimalActivityEnvelope(event)),
-              ts: event.ts,
-              agent_id: this.agentId,
-              input_ref: event.sessionId,
-              output_ref: event.eventId,
-            },
-          });
-        } catch {
-          if (process.env.CODAPH_DEBUG === "1") {
-            const message = firstError instanceof Error ? firstError.message : "unknown appendActivity error";
-            console.warn(`[codaph] appendActivity failed for ${event.eventId}: ${message}`);
-          }
-        }
-      }
-
-      if (isPromptSubmittedEvent(event)) {
-        try {
-          await this.client.control.appendActivity({
-            run_id: this.promptRunIdForRepo(event.repoId),
-            agent_id: this.agentId,
-            activity: {
-              type: "codaph_prompt",
-              payload: toJson(compactPromptActivityEnvelope(event)),
-              ts: event.ts,
-              agent_id: this.agentId,
-              input_ref: event.sessionId,
-              output_ref: event.eventId,
-            },
-          });
-        } catch (promptError) {
-          if (process.env.CODAPH_DEBUG === "1") {
-            const message = promptError instanceof Error ? promptError.message : "unknown prompt appendActivity error";
-            console.warn(`[codaph] prompt appendActivity failed for ${event.eventId}: ${message}`);
-          }
-        }
-      }
-    }
+    await this.appendActivitiesForEvent(event, runId);
     return {
       accepted: asBoolean(record?.accepted) ?? true,
       deduplicated: asBoolean(record?.deduplicated),
       jobId: asString(record?.job_id),
       raw: result,
     };
+  }
+
+  async writeEventsBatch(events: CapturedEventEnvelope[]): Promise<void> {
+    if (!this.isEnabled() || events.length === 0) {
+      return;
+    }
+
+    const byRun = new Map<string, CapturedEventEnvelope[]>();
+    for (const event of events) {
+      const runId = this.runIdForSession(event.repoId, event.sessionId);
+      const group = byRun.get(runId);
+      if (group) {
+        group.push(event);
+      } else {
+        byRun.set(runId, [event]);
+      }
+    }
+
+    for (const [runId, group] of byRun.entries()) {
+      await this.ingestEvents(runId, group);
+    }
+
+    await this.appendActivitiesForBatch(events, 4);
   }
 
   async writeRunState(runId: string, statePatch: Record<string, unknown>): Promise<void> {
