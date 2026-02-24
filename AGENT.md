@@ -582,3 +582,13 @@ Do not rewrite history; append a new snapshot each run.
 - unstaged: 0
 - untracked: 0
 - files: README.md, docs/one-page-cli-tui.md, docs/troubleshooting.md, src/codex-history-sync.ts, src/index.ts, src/lib/ingest-pipeline.ts, src/lib/mirror-jsonl.ts, src/mubit-remote-sync-state.ts, src/mubit-remote-sync.ts, src/settings-store.ts, src/sync-automation.ts, test/lib-mirror-jsonl.test.ts, test/lib-mubit-remote-sync.test.ts
+
+## Status Snapshot — 2026-02-24T09:40:47.876Z
+- source: pre-commit
+- repo: /Users/anilp/Code/codaph
+- branch: main
+- head: 484ee1c
+- staged: 2
+- unstaged: 0
+- untracked: 0
+- files: src/codex-local-push-state.ts, src/index.ts

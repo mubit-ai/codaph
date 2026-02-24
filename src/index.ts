@@ -16,6 +16,13 @@ import {
   type CodexHistorySyncProgress,
   type CodexHistorySyncSummary,
 } from "./codex-history-sync";
+import {
+  defaultCodexLocalPushState,
+  getCodexLocalPushStatePath,
+  readCodexLocalPushState,
+  writeCodexLocalPushState,
+  type CodexLocalPushState,
+} from "./codex-local-push-state";
 import { syncMubitRemoteActivity, type MubitRemoteSyncSummary } from "./mubit-remote-sync";
 import { getMubitRemoteSyncStatePath, readMubitRemoteSyncState } from "./mubit-remote-sync-state";
 import {
@@ -596,6 +603,60 @@ function resolveRemoteSyncStatePath(cwd: string, repoId: string): string {
   return getMubitRemoteSyncStatePath(resolveMirrorRoot(cwd), repoId);
 }
 
+function resolveLocalPushStatePath(cwd: string, repoId: string): string {
+  return getCodexLocalPushStatePath(resolveMirrorRoot(cwd), repoId);
+}
+
+async function maybeReadLocalPushStateForProject(cwd: string, repoId: string) {
+  return readCodexLocalPushState(resolveLocalPushStatePath(cwd, repoId));
+}
+
+async function persistLocalPushState(
+  cwd: string,
+  repoId: string,
+  updater: (current: CodexLocalPushState) => CodexLocalPushState,
+): Promise<void> {
+  const path = resolveLocalPushStatePath(cwd, repoId);
+  const current = await readCodexLocalPushState(path).catch(() => defaultCodexLocalPushState());
+  await writeCodexLocalPushState(path, updater(current));
+}
+
+async function persistLocalPushSuccessState(
+  cwd: string,
+  result: SyncPushPhaseResult,
+  triggerSource: SyncTriggerSource,
+): Promise<void> {
+  const now = new Date().toISOString();
+  await persistLocalPushState(cwd, result.repoId, (current) => ({
+    ...current,
+    lastRunAt: now,
+    lastSuccessAt: now,
+    lastTriggerSource: triggerSource,
+    lastScannedFiles: result.summary.scannedFiles,
+    lastMatchedFiles: result.summary.matchedFiles,
+    lastImportedEvents: result.summary.importedEvents,
+    lastImportedSessions: result.summary.importedSessions,
+    mubitRequested: result.mubitRequested,
+    mubitEnabled: result.mubitEnabled,
+    lastError: null,
+  }));
+}
+
+async function persistLocalPushErrorState(
+  cwd: string,
+  repoId: string,
+  triggerSource: SyncTriggerSource,
+  errorMessage: string,
+): Promise<void> {
+  const now = new Date().toISOString();
+  await persistLocalPushState(cwd, repoId, (current) => ({
+    ...current,
+    lastRunAt: now,
+    lastTriggerSource: triggerSource,
+    lastError: errorMessage,
+  }));
+}
+
 function resolveSyncAutomationConfig(settings: CodaphSettings, cwd: string) {
   const project = getProjectSettings(settings, cwd);
   return normalizeSyncAutomationSettings(project.syncAutomation ?? null);
@@ -1062,10 +1123,20 @@ async function runSyncWorkflow(options: {
   }
 
   try {
-    const pushOutcome: SyncWorkflowSummary["push"] =
-      mode === "pull"
-        ? { skipped: true, reason: "Push phase not requested." }
-        : ({ ...(await runSyncPushPhase({ cwd, flags, settings, onProgress: options.onPushProgress })) } as SyncPushPhaseResult);
+    let pushOutcome: SyncWorkflowSummary["push"];
+    if (mode === "pull") {
+      pushOutcome = { skipped: true, reason: "Push phase not requested." };
+    } else {
+      try {
+        const push = await runSyncPushPhase({ cwd, flags, settings, onProgress: options.onPushProgress });
+        await persistLocalPushSuccessState(cwd, push, triggerSource).catch(() => {});
+        pushOutcome = { ...push } as SyncPushPhaseResult;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        await persistLocalPushErrorState(cwd, repoId, triggerSource, message).catch(() => {});
+        throw error;
+      }
+    }
 
     let pullOutcome: SyncWorkflowSummary["pull"];
     if (mode === "push") {
@@ -1169,16 +1240,25 @@ async function syncPushCommand(rest: string[]): Promise<void> {
   if (flags.json !== true) {
     reporter.start();
   }
-  const result = await runSyncPushPhase({
-    cwd,
-    flags,
-    settings,
-    onProgress: flags.json === true ? undefined : reporter.onProgress,
-  }).finally(() => {
+  let result: SyncPushPhaseResult;
+  try {
+    result = await runSyncPushPhase({
+      cwd,
+      flags,
+      settings,
+      onProgress: flags.json === true ? undefined : reporter.onProgress,
+    });
+    await persistLocalPushSuccessState(cwd, result, "sync-manual").catch(() => {});
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const repoId = resolveRepoIdForProject(flags, cwd, settings);
+    await persistLocalPushErrorState(cwd, repoId, "sync-manual", message).catch(() => {});
+    throw error;
+  } finally {
     if (flags.json !== true) {
       reporter.finish();
     }
-  });
+  }
 
   if (flags.json === true) {
     console.log(JSON.stringify(result.summary, null, 2));
@@ -1242,11 +1322,13 @@ async function syncStatus(rest: string[]): Promise<void> {
   const settings = loadCodaphSettings();
   const repoId = resolveRepoIdForProject(flags, cwd, settings);
   const automation = resolveSyncAutomationConfig(settings, cwd);
+  const localPushState = await maybeReadLocalPushStateForProject(cwd, repoId).catch(() => null);
   const remoteState = await maybeReadRemoteSyncStateForProject(cwd, repoId).catch(() => null);
   const payload = {
     cwd,
     repoId,
     automation,
+    localPush: localPushState,
     remote: remoteState,
   };
 
@@ -1265,6 +1347,16 @@ async function syncStatus(rest: string[]): Promise<void> {
   console.log(
     `Auto pull on sync: ${automation.autoPullOnSync ? "on" : "off"} | TUI warm: ${automation.autoWarmTuiOnOpen ? "on" : "off"} | cooldown=${automation.remotePullCooldownSec}s`,
   );
+  if (!localPushState) {
+    console.log("Local push state: none");
+  } else {
+    console.log(
+      `Local push: last=${localPushState.lastSuccessAt ?? "(never)"}${formatTimeAgo(localPushState.lastSuccessAt) ? ` (${formatTimeAgo(localPushState.lastSuccessAt)})` : ""} | files=${localPushState.lastMatchedFiles ?? 0}/${localPushState.lastScannedFiles ?? 0} | events=${localPushState.lastImportedEvents ?? 0} | sessions=${localPushState.lastImportedSessions ?? 0}`,
+    );
+    if (localPushState.lastError) {
+      console.log(`Local push last error: ${localPushState.lastError}`);
+    }
+  }
   if (!remoteState) {
     console.log("Remote sync state: none");
     return;
@@ -3990,6 +4082,8 @@ async function tui(rest: string[]): Promise<void> {
     const auto = resolveSyncAutomationConfig(settings, state.projectPath);
     state.autoSyncEnabled = auto.enabled;
     const currentRepoId = resolveRepoIdForProject(flags, state.projectPath, settings);
+    const localPush = await maybeReadLocalPushStateForProject(state.projectPath, currentRepoId).catch(() => null);
+    state.lastLocalSyncAt = localPush?.lastSuccessAt ?? null;
     const remote = await maybeReadRemoteSyncStateForProject(state.projectPath, currentRepoId).catch(() => null);
     if (!remote) {
       state.autoSyncLastPullAgo = null;
