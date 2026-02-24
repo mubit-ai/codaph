@@ -12,16 +12,19 @@ describe("memory-mubit", () => {
     expect(mubitPromptRunIdForProject("repo123")).toBe("codaph-prompts:repo123");
   });
 
-  it("writes control ingest payloads with idempotency key", async () => {
+  it("writes core ingest payloads with idempotency key", async () => {
     const captures: Array<Record<string, unknown>> = [];
     const activities: Array<Record<string, unknown>> = [];
     const engine = new MubitMemoryEngine({
       client: {
-        control: {
+        core: {
           ingest: async (payload?: Record<string, unknown>) => {
             captures.push(payload ?? {});
             return { accepted: true, job_id: "job-1", deduplicated: true };
           },
+        },
+        control: {
+          ingest: async () => ({ accepted: true }),
           setVariable: async () => ({ success: true }),
           query: async () => ({ final_answer: "ok" }),
           appendActivity: async (payload?: Record<string, unknown>) => {
@@ -77,6 +80,9 @@ describe("memory-mubit", () => {
     const activities: Array<Record<string, unknown>> = [];
     const engine = new MubitMemoryEngine({
       client: {
+        core: {
+          ingest: async () => ({ accepted: true }),
+        },
         control: {
           ingest: async () => ({ accepted: true }),
           setVariable: async () => ({ success: true }),
@@ -118,11 +124,14 @@ describe("memory-mubit", () => {
       actorId: "anil",
       runScope: "project",
       client: {
-        control: {
+        core: {
           ingest: async (payload?: Record<string, unknown>) => {
             captures.push(payload ?? {});
             return { accepted: true };
           },
+        },
+        control: {
+          ingest: async () => ({ accepted: true }),
           setVariable: async () => ({ success: true }),
           query: async () => ({ final_answer: "ok" }),
           appendActivity: async () => ({ success: true }),
@@ -211,7 +220,7 @@ describe("memory-mubit", () => {
     expect(activities).toHaveLength(3);
   });
 
-  it("uses hdql_query lane by default for semantic context retrieval", async () => {
+  it("uses strict hdql_query direct-bypass lane for semantic context retrieval", async () => {
     const queryCalls: Array<Record<string, unknown>> = [];
     const engine = new MubitMemoryEngine({
       client: {
@@ -236,9 +245,10 @@ describe("memory-mubit", () => {
     expect(queryCalls[0].mode).toBe("direct_bypass");
     expect(queryCalls[0].direct_lane).toBe("hdql_query");
     expect(result.codaph_query_lane).toBe("hdql_query");
+    expect(result.codaph_query_mode).toBe("direct_bypass");
   });
 
-  it("falls back to semantic_search when hdql lane is unsupported", async () => {
+  it("does not fall back from hdql_query lane", async () => {
     const queryCalls: Array<Record<string, unknown>> = [];
     const engine = new MubitMemoryEngine({
       client: {
@@ -248,24 +258,20 @@ describe("memory-mubit", () => {
           query: async (payload?: Record<string, unknown>) => {
             const p = payload ?? {};
             queryCalls.push(p);
-            if (p.direct_lane === "hdql_query") {
-              throw new Error("invalid argument: direct_lane hdql_query unsupported");
-            }
-            return { evidence: [{ source: "mubit", content: "fallback match" }] };
+            throw new Error("invalid argument: direct_lane hdql_query unsupported");
           },
         },
       },
     });
 
-    const result = await engine.querySemanticContext({
-      runId: "codaph:repo:session",
-      query: "why did this fail?",
-    });
+    await expect(
+      engine.querySemanticContext({
+        runId: "codaph:repo:session",
+        query: "why did this fail?",
+      }),
+    ).rejects.toThrow(/hdql_query unsupported/i);
 
-    expect(queryCalls).toHaveLength(2);
+    expect(queryCalls).toHaveLength(1);
     expect(queryCalls[0].direct_lane).toBe("hdql_query");
-    expect(queryCalls[1].direct_lane).toBe("semantic_search");
-    expect(result.codaph_query_lane).toBe("semantic_search");
-    expect(result.codaph_query_lane_fallback).toBe("hdql_query");
   });
 });

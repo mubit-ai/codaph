@@ -34,8 +34,6 @@ export interface MubitMemoryOptions {
   client?: MubitClientLike;
 }
 
-type MubitIngestMethod = (payload?: Record<string, unknown>) => Promise<unknown>;
-
 interface MubitClientLike {
   core?: {
     ingest?(payload?: Record<string, unknown>): Promise<unknown>;
@@ -71,25 +69,6 @@ function asString(value: unknown): string | undefined {
   }
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : undefined;
-}
-
-function errorMessage(error: unknown): string {
-  if (error instanceof Error && typeof error.message === "string") {
-    return error.message;
-  }
-  return String(error);
-}
-
-function looksLikeUnsupportedHdqlLaneError(error: unknown): boolean {
-  const message = errorMessage(error).toLowerCase();
-  return (
-    message.includes("hdql") ||
-    message.includes("hdc") ||
-    message.includes("direct_lane") ||
-    message.includes("direct lane") ||
-    message.includes("invalid argument") ||
-    message.includes("unsupported")
-  );
 }
 
 function toJson(value: unknown): string {
@@ -389,13 +368,6 @@ export class MubitMemoryEngine implements MemoryEngine {
     return mubitPromptRunIdForProject(sharedRepoId, `${this.runIdPrefix}-prompts`);
   }
 
-  private getIngestMethod(): MubitIngestMethod {
-    if (this.client.core?.ingest) {
-      return this.client.core.ingest.bind(this.client.core);
-    }
-    return this.client.control.ingest.bind(this.client.control);
-  }
-
   private buildIngestItem(event: CapturedEventEnvelope): Record<string, unknown> {
     return {
       item_id: event.eventId,
@@ -433,8 +405,10 @@ export class MubitMemoryEngine implements MemoryEngine {
   }
 
   private async ingestEvents(runId: string, events: CapturedEventEnvelope[]): Promise<unknown> {
-    const ingest = this.getIngestMethod();
-    return await ingest(this.buildIngestPayload(runId, events));
+    if (!this.client.core?.ingest) {
+      throw new Error("Mubit core.ingest is required; control.ingest fallback is disabled in Codaph.");
+    }
+    return await this.client.core.ingest(this.buildIngestPayload(runId, events));
   }
 
   private async appendMainActivity(runId: string, event: CapturedEventEnvelope): Promise<void> {
@@ -601,34 +575,19 @@ export class MubitMemoryEngine implements MemoryEngine {
     const payload: Record<string, unknown> = {
       run_id: options.runId,
       query: options.query,
-      mode: options.mode ?? "direct_bypass",
-      direct_lane: options.directLane ?? "hdql_query",
+      mode: "direct_bypass",
+      direct_lane: "hdql_query",
       include_linked_runs: options.includeLinkedRuns ?? false,
       limit,
       embedding: [],
     };
-    const requestedLane =
-      payload.direct_lane === "hdql_query" || payload.direct_lane === "semantic_search"
-        ? (payload.direct_lane as "hdql_query" | "semantic_search")
-        : "hdql_query";
-
-    try {
-      const result = await this.client.control.query(payload);
-      const record = asRecord(result);
-      return record ? { ...record, codaph_query_lane: requestedLane } : { raw: result, codaph_query_lane: requestedLane };
-    } catch (firstError) {
-      if (requestedLane !== "hdql_query" || !looksLikeUnsupportedHdqlLaneError(firstError)) {
-        throw firstError;
-      }
-      const fallbackPayload = { ...payload, direct_lane: "semantic_search" };
-      const result = await this.client.control.query(fallbackPayload);
-      const record = asRecord(result);
-      const fallbackMeta = {
-        codaph_query_lane: "semantic_search" as const,
-        codaph_query_lane_fallback: "hdql_query" as const,
-      };
-      return record ? { ...record, ...fallbackMeta } : { raw: result, ...fallbackMeta };
-    }
+    const result = await this.client.control.query(payload);
+    const record = asRecord(result);
+    const meta = {
+      codaph_query_lane: "hdql_query" as const,
+      codaph_query_mode: "direct_bypass" as const,
+    };
+    return record ? { ...record, ...meta } : { raw: result, ...meta };
   }
 
   async fetchContextSnapshot(options: MubitContextSnapshotOptions): Promise<Record<string, unknown>> {
