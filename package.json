@@ -13,12 +13,12 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/anilperi/codaph.git"
+    "url": "git+https://github.com/mubit-ai/codaph.git"
   },
   "bugs": {
-    "url": "https://github.com/anilperi/codaph/issues"
+    "url": "https://github.com/mubit-ai/codaph/issues"
   },
-  "homepage": "https://github.com/anilperi/codaph#readme",
+  "homepage": "https://github.com/mubit-ai/codaph#readme",
   "engines": {
     "node": ">=18"
   },
