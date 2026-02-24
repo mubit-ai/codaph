@@ -194,6 +194,8 @@ function help(): string {
     "  codaph push [--cwd <path>] [--json] [--local-only]",
     "    Local Codex history -> Codaph + Mubit (incremental; historical backfill path).",
     "  codaph import [--cwd <path>] [--json] [--local-only]   (compat alias for `codaph push`)",
+    "  codaph repair cloud [--cwd <path>] [--session <id>] [--json]",
+    "    Repair missing cloud sync by replaying local `.codaph` mirror to Mubit, then republishing shared session/diff artifacts.",
     "",
     "Advanced / Compatibility (still supported):",
     "  codaph sync all|pull|status|setup ...",
@@ -2576,13 +2578,26 @@ async function mubitQuery(rest: string[]): Promise<void> {
   printMubitResponse(response, cwd, sessionId, rawMode);
 }
 
-async function mubitBackfill(rest: string[]): Promise<void> {
-  const { flags } = parseArgs(rest);
-  const cwd = resolve(getStringFlag(flags, "cwd") ?? process.cwd());
-  const settings = loadCodaphSettings();
-  const sessionId = getStringFlag(flags, "session");
-  const verbose = getBooleanFlag(flags, "verbose", false);
+interface MubitBackfillSummary {
+  cwd: string;
+  repoId: string;
+  sessionFilter: string | null;
+  scannedSessions: number;
+  attempted: number;
+  accepted: number;
+  deduplicated: number;
+  failed: number;
+}
 
+async function runMubitBackfill(options: {
+  cwd: string;
+  flags: Flags;
+  settings: CodaphSettings;
+  sessionId: string | null | undefined;
+  verbose: boolean;
+  json: boolean;
+}): Promise<MubitBackfillSummary> {
+  const { cwd, flags, settings, sessionId, verbose, json } = options;
   const engine = createMubitMemory(flags, cwd, settings);
   if (!engine || !engine.isEnabled()) {
     throw new Error("Mubit is disabled. Set MUBIT_API_KEY (or MUBIT_APIKEY) and use --mubit.");
@@ -2593,11 +2608,6 @@ async function mubitBackfill(rest: string[]): Promise<void> {
   const sessions = sessionId
     ? [{ sessionId, from: "", to: "", eventCount: 0, threadCount: 0 }]
     : await query.listSessions(repoId);
-
-  if (sessions.length === 0) {
-    console.log("No sessions found to backfill.");
-    return;
-  }
 
   let attempted = 0;
   let accepted = 0;
@@ -2612,7 +2622,9 @@ async function mubitBackfill(rest: string[]): Promise<void> {
     }
 
     scannedSessions += 1;
-    console.log(`Backfilling session ${session.sessionId} (${events.length} events)...`);
+    if (!json) {
+      console.log(`Backfilling session ${session.sessionId} (${events.length} events)...`);
+    }
     let sessionAttempted = 0;
     for (const event of events) {
       attempted += 1;
@@ -2633,13 +2645,110 @@ async function mubitBackfill(rest: string[]): Promise<void> {
         }
       }
 
-      if (sessionAttempted % 100 === 0 || sessionAttempted === events.length) {
+      if (!json && (sessionAttempted % 100 === 0 || sessionAttempted === events.length)) {
         console.log(`  progress ${sessionAttempted}/${events.length} events`);
       }
     }
   }
 
-  console.log(`Backfill complete. sessions=${scannedSessions} attempted=${attempted} accepted=${accepted} deduplicated=${deduplicated} failed=${failed}`);
+  return {
+    cwd,
+    repoId,
+    sessionFilter: sessionId ?? null,
+    scannedSessions,
+    attempted,
+    accepted,
+    deduplicated,
+    failed,
+  };
+}
+
+async function mubitBackfill(rest: string[]): Promise<void> {
+  const { flags } = parseArgs(rest);
+  const summary = await runMubitBackfill({
+    cwd: resolve(getStringFlag(flags, "cwd") ?? process.cwd()),
+    flags,
+    settings: loadCodaphSettings(),
+    sessionId: getStringFlag(flags, "session"),
+    verbose: getBooleanFlag(flags, "verbose", false),
+    json: getBooleanFlag(flags, "json", false),
+  });
+
+  if (flags.json === true) {
+    console.log(JSON.stringify(summary, null, 2));
+    return;
+  }
+
+  if (summary.scannedSessions === 0) {
+    console.log("No sessions found to backfill.");
+    return;
+  }
+  console.log(
+    `Backfill complete. sessions=${summary.scannedSessions} attempted=${summary.attempted} accepted=${summary.accepted} deduplicated=${summary.deduplicated} failed=${summary.failed}`,
+  );
+}
+
+interface RepairCloudSummary {
+  schema: "codaph.repair-cloud.v1";
+  cwd: string;
+  repoId: string;
+  sessionFilter: string | null;
+  backfill: MubitBackfillSummary;
+  artifacts: {
+    sessionsPublished: number;
+    artifactEvents: number;
+  };
+}
+
+async function repairCloud(rest: string[]): Promise<void> {
+  const { positionals, flags } = parseArgs(rest);
+  const target = positionals[0];
+  if (target && target !== "cloud") {
+    throw new Error("Usage: codaph repair cloud [--cwd <path>] [--session <id>] [--json] [--verbose]");
+  }
+  const cwd = resolve(getStringFlag(flags, "cwd") ?? process.cwd());
+  const settings = loadCodaphSettings();
+  const sessionId = getStringFlag(flags, "session");
+  const verbose = getBooleanFlag(flags, "verbose", false);
+  const json = getBooleanFlag(flags, "json", false);
+
+  const backfill = await runMubitBackfill({
+    cwd,
+    flags,
+    settings,
+    sessionId,
+    verbose,
+    json,
+  });
+
+  const memory = createMubitMemory(flags, cwd, settings);
+  if (!memory || !memory.isEnabled()) {
+    throw new Error("Mubit is disabled. Set MUBIT_API_KEY (or MUBIT_APIKEY) and use --mubit.");
+  }
+  const repoId = resolveRepoIdForProject(flags, cwd, settings);
+  const actorId = resolveMubitActorId(flags, cwd, settings);
+  const artifacts = await publishSharedSessionArtifacts(cwd, repoId, actorId, memory, { sessionId });
+
+  const summary: RepairCloudSummary = {
+    schema: "codaph.repair-cloud.v1",
+    cwd,
+    repoId,
+    sessionFilter: sessionId ?? null,
+    backfill,
+    artifacts,
+  };
+
+  if (json) {
+    console.log(JSON.stringify(summary, null, 2));
+    return;
+  }
+
+  console.log(
+    `Repair (cloud): backfill sessions=${backfill.scannedSessions} attempted=${backfill.attempted} accepted=${backfill.accepted} dedup=${backfill.deduplicated} failed=${backfill.failed}`,
+  );
+  console.log(
+    `Repair (cloud): artifacts republished sessions=${artifacts.sessionsPublished} events=${artifacts.artifactEvents}`,
+  );
 }
 
 async function projects(rest: string[]): Promise<void> {
@@ -3817,23 +3926,28 @@ async function publishSharedSessionArtifacts(
   repoId: string,
   actorId: string | null,
   memory: MubitMemoryEngine | null,
-): Promise<void> {
+  options: { sessionId?: string | null } = {},
+): Promise<{ sessionsPublished: number; artifactEvents: number }> {
   if (!memory || !memory.isEnabled()) {
-    return;
+    return { sessionsPublished: 0, artifactEvents: 0 };
   }
 
   const query = new QueryService(resolve(cwd, ".codaph"));
-  const sessions = await query.listSessions(repoId);
+  const sessions = options.sessionId
+    ? [{ sessionId: options.sessionId, from: "", to: new Date().toISOString(), eventCount: 0, threadCount: 0 }]
+    : await query.listSessions(repoId);
   if (sessions.length === 0) {
-    return;
+    return { sessionsPublished: 0, artifactEvents: 0 };
   }
 
   const artifactEvents: CapturedEventEnvelope[] = [];
+  let sessionsPublished = 0;
   for (const session of sessions) {
     const events = await query.getTimeline({ repoId, sessionId: session.sessionId });
     if (events.length === 0) {
       continue;
     }
+    sessionsPublished += 1;
     const analysis = buildSessionAnalysis(session.sessionId, events);
     artifactEvents.push(buildSyntheticSessionSummaryEvent(repoId, actorId, session, analysis));
     for (const prompt of analysis.prompts) {
@@ -3842,9 +3956,10 @@ async function publishSharedSessionArtifacts(
   }
 
   if (artifactEvents.length === 0) {
-    return;
+    return { sessionsPublished: 0, artifactEvents: 0 };
   }
   await memory.writeEventsBatch(artifactEvents);
+  return { sessionsPublished, artifactEvents: artifactEvents.length };
 }
 
 function selectedPromptFromAnalysis(
@@ -6114,6 +6229,11 @@ async function main(): Promise<void> {
 
   if (cmd === "doctor") {
     await doctor([sub, ...rest].filter(Boolean) as string[]);
+    return;
+  }
+
+  if (cmd === "repair") {
+    await repairCloud([sub, ...rest].filter(Boolean) as string[]);
     return;
   }
 
