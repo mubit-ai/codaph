@@ -230,10 +230,14 @@ function commandBinaryFromLine(commandLine: string): string | null {
   return first && !first.startsWith("$") ? first : null;
 }
 
-function buildManagedHookBlock(commandLine: string | string[]): string {
+function buildManagedHookBlock(
+  commandLine: string | string[],
+  options?: { background?: boolean },
+): string {
   const commandLines = (Array.isArray(commandLine) ? commandLine : [commandLine])
     .map((line) => line.trim())
     .filter((line) => line.length > 0);
+  const background = options?.background === true;
 
   if (commandLines.length === 0) {
     return `${CODAPH_HOOK_BEGIN}
@@ -250,7 +254,11 @@ ${CODAPH_HOOK_END}`;
     } else {
       body.push(`${keyword} true; then`);
     }
-    body.push(`  ${line}`);
+    if (background) {
+      body.push(`  (${line}) >/dev/null 2>&1 &`);
+    } else {
+      body.push(`  ${line}`);
+    }
   }
   body.push("fi");
 
@@ -262,10 +270,11 @@ ${CODAPH_HOOK_END}`;
 export async function upsertManagedShellHook(
   hookPath: string,
   commandLine: string | string[],
+  options?: { background?: boolean },
 ): Promise<{ updated: boolean; created: boolean; reason?: string }> {
   await mkdir(dirname(hookPath), { recursive: true });
   const existing = await readTextFile(hookPath);
-  const block = buildManagedHookBlock(commandLine);
+  const block = buildManagedHookBlock(commandLine, options);
 
   let nextContent: string;
   let created = false;
@@ -304,7 +313,7 @@ export async function installGitPostCommitHook(
   commandLine: string | string[] = "codaph hooks run post-commit --quiet",
 ): Promise<{ ok: boolean; warning?: string }> {
   const hookPath = join(repoRoot, ".git", "hooks", "post-commit");
-  const result = await upsertManagedShellHook(hookPath, commandLine);
+  const result = await upsertManagedShellHook(hookPath, commandLine, { background: true });
   if (!result.updated) {
     return { ok: false, warning: result.reason ?? "unable to update post-commit hook" };
   }
@@ -316,7 +325,7 @@ export async function installGitPostPushHook(
   commandLine: string | string[] = "codaph hooks run post-push --quiet",
 ): Promise<{ ok: boolean; warning?: string }> {
   const hookPath = join(repoRoot, ".git", "hooks", "post-push");
-  const result = await upsertManagedShellHook(hookPath, commandLine);
+  const result = await upsertManagedShellHook(hookPath, commandLine, { background: true });
   if (!result.updated) {
     return { ok: false, warning: result.reason ?? "unable to update post-push hook" };
   }
