@@ -2614,6 +2614,55 @@ async function runMubitBackfill(options: {
   let deduplicated = 0;
   let failed = 0;
   let scannedSessions = 0;
+  const batchSize = 32;
+  let firstFailureReported = false;
+
+  const writeBackfillBatch = async (batch: CapturedEventEnvelope[]): Promise<void> => {
+    if (batch.length === 0) {
+      return;
+    }
+
+    try {
+      if (engine.writeEventsBatch) {
+        await engine.writeEventsBatch(batch);
+        accepted += batch.length;
+        return;
+      }
+
+      for (const event of batch) {
+        const result = await engine.writeEvent(event);
+        if (result.accepted) {
+          accepted += 1;
+        }
+        if (result.deduplicated) {
+          deduplicated += 1;
+        }
+      }
+      return;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const firstEventId = batch[0]?.eventId ?? "(unknown)";
+      const lastEventId = batch[batch.length - 1]?.eventId ?? firstEventId;
+
+      if (verbose) {
+        console.error(`batch write failed (${batch.length} events, ${firstEventId}..${lastEventId}): ${message}`);
+      } else if (!firstFailureReported && !json) {
+        firstFailureReported = true;
+        console.error(
+          `Backfill batch write failed (${batch.length} events): ${message} (showing first error only; rerun with --verbose for all failures)`,
+        );
+      }
+
+      if (batch.length === 1) {
+        failed += 1;
+        return;
+      }
+
+      const mid = Math.ceil(batch.length / 2);
+      await writeBackfillBatch(batch.slice(0, mid));
+      await writeBackfillBatch(batch.slice(mid));
+    }
+  };
 
   for (const session of sessions) {
     const events = await query.getTimeline({ repoId, sessionId: session.sessionId });
@@ -2626,24 +2675,11 @@ async function runMubitBackfill(options: {
       console.log(`Backfilling session ${session.sessionId} (${events.length} events)...`);
     }
     let sessionAttempted = 0;
-    for (const event of events) {
-      attempted += 1;
-      sessionAttempted += 1;
-      try {
-        const result = await engine.writeEvent(event);
-        if (result.accepted) {
-          accepted += 1;
-        }
-        if (result.deduplicated) {
-          deduplicated += 1;
-        }
-      } catch (error) {
-        failed += 1;
-        if (verbose) {
-          const message = error instanceof Error ? error.message : String(error);
-          console.error(`write failed for ${event.eventId}: ${message}`);
-        }
-      }
+    for (let i = 0; i < events.length; i += batchSize) {
+      const batch = events.slice(i, i + batchSize);
+      attempted += batch.length;
+      sessionAttempted += batch.length;
+      await writeBackfillBatch(batch);
 
       if (!json && (sessionAttempted % 100 === 0 || sessionAttempted === events.length)) {
         console.log(`  progress ${sessionAttempted}/${events.length} events`);

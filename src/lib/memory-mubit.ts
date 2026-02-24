@@ -600,7 +600,7 @@ export class MubitMemoryEngine implements MemoryEngine {
   }
 
   private async ingestEvents(runId: string, events: CapturedEventEnvelope[]): Promise<unknown> {
-    if (events.length > 1 && this.client.control.batchInsert) {
+    if (events.length > 0 && this.client.control.batchInsert) {
       return await this.client.control.batchInsert(this.buildControlBatchInsertPayload(runId, events));
     }
     if (this.client.core?.ingest) {
