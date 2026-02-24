@@ -21,6 +21,8 @@ export interface MubitRemoteSyncOptions {
   memory: MubitMemoryEngine;
   runId: string;
   promptRunId?: string;
+  sessionSummaryRunId?: string;
+  diffRunId?: string;
   repoId: string;
   fallbackActorId?: string | null;
   timelineLimit?: number;
@@ -34,6 +36,8 @@ export interface MubitRemoteSyncSummary {
   runId: string;
   timelineEvents: number;
   promptTimelineEvents?: number;
+  sessionSummaryTimelineEvents?: number;
+  diffTimelineEvents?: number;
   requestedTimelineLimit: number;
   refresh: boolean;
   imported: number;
@@ -282,6 +286,8 @@ export async function syncMubitRemoteActivity(options: MubitRemoteSyncOptions): 
 
   let timeline: unknown[] = [];
   let promptTimeline: unknown[] = [];
+  let sessionSummaryTimeline: unknown[] = [];
+  let diffTimeline: unknown[] = [];
   let snapshotFingerprint: string | null = null;
   let consecutiveSameSnapshotCount = 0;
   let suspectedServerCap = false;
@@ -332,10 +338,44 @@ export async function syncMubitRemoteActivity(options: MubitRemoteSyncOptions): 
     }
   }
 
+  let sessionSummarySnapshotFingerprint: string | null = null;
+  if (options.sessionSummaryRunId && options.sessionSummaryRunId !== options.runId) {
+    try {
+      const summarySnapshot = await options.memory.fetchContextSnapshot({
+        runId: options.sessionSummaryRunId,
+        timelineLimit: requestedTimelineLimit,
+        refresh,
+      });
+      sessionSummaryTimeline = Array.isArray(summarySnapshot.timeline) ? summarySnapshot.timeline : [];
+      sessionSummarySnapshotFingerprint = summarizeTimelineFingerprint(sessionSummaryTimeline);
+    } catch {
+      sessionSummaryTimeline = [];
+      sessionSummarySnapshotFingerprint = null;
+    }
+  }
+
+  let diffSnapshotFingerprint: string | null = null;
+  if (options.diffRunId && options.diffRunId !== options.runId) {
+    try {
+      const diffSnapshot = await options.memory.fetchContextSnapshot({
+        runId: options.diffRunId,
+        timelineLimit: requestedTimelineLimit,
+        refresh,
+      });
+      diffTimeline = Array.isArray(diffSnapshot.timeline) ? diffSnapshot.timeline : [];
+      diffSnapshotFingerprint = summarizeTimelineFingerprint(diffTimeline);
+    } catch {
+      diffTimeline = [];
+      diffSnapshotFingerprint = null;
+    }
+  }
+
   const mainFingerprint = summarizeTimelineFingerprint(timeline);
-  if (promptTimeline.length > 0) {
+  if (promptTimeline.length > 0 || sessionSummaryTimeline.length > 0 || diffTimeline.length > 0) {
     snapshotFingerprint = createHash("sha256")
-      .update(`main:${mainFingerprint ?? "none"}|prompt:${promptSnapshotFingerprint ?? "none"}`)
+      .update(
+        `main:${mainFingerprint ?? "none"}|prompt:${promptSnapshotFingerprint ?? "none"}|session:${sessionSummarySnapshotFingerprint ?? "none"}|diff:${diffSnapshotFingerprint ?? "none"}`,
+      )
       .digest("hex")
       .slice(0, 24);
   } else {
@@ -351,7 +391,9 @@ export async function syncMubitRemoteActivity(options: MubitRemoteSyncOptions): 
     consecutiveSameSnapshotCount >= 3 &&
     (
       (requestedTimelineLimit > timeline.length && timeline.length > 0) ||
-      (requestedTimelineLimit > promptTimeline.length && promptTimeline.length > 0)
+      (requestedTimelineLimit > promptTimeline.length && promptTimeline.length > 0) ||
+      (requestedTimelineLimit > sessionSummaryTimeline.length && sessionSummaryTimeline.length > 0) ||
+      (requestedTimelineLimit > diffTimeline.length && diffTimeline.length > 0)
     )
   ) {
     suspectedServerCap = true;
@@ -361,6 +403,12 @@ export async function syncMubitRemoteActivity(options: MubitRemoteSyncOptions): 
     }
     if (requestedTimelineLimit > promptTimeline.length && promptTimeline.length > 0) {
       streams.push(`prompts=${promptTimeline.length}`);
+    }
+    if (requestedTimelineLimit > sessionSummaryTimeline.length && sessionSummaryTimeline.length > 0) {
+      streams.push(`sessions=${sessionSummaryTimeline.length}`);
+    }
+    if (requestedTimelineLimit > diffTimeline.length && diffTimeline.length > 0) {
+      streams.push(`diffs=${diffTimeline.length}`);
     }
     diagnosticNote =
       `Mubit snapshot appears capped (${streams.join(", ")} despite requested ${requestedTimelineLimit}); Codaph is deduping locally. This is a snapshot API limitation, not a local sync error.`;
@@ -375,7 +423,12 @@ export async function syncMubitRemoteActivity(options: MubitRemoteSyncOptions): 
   const contributors = new Set<string>();
   const fallbackActorId = options.fallbackActorId ?? null;
 
-  const combinedTimeline = promptTimeline.length > 0 ? [...promptTimeline, ...timeline] : timeline;
+  const combinedTimeline = [
+    ...sessionSummaryTimeline,
+    ...diffTimeline,
+    ...promptTimeline,
+    ...timeline,
+  ];
   for (let i = 0; i < combinedTimeline.length; i += 1) {
     const rawTimelineEntry = combinedTimeline[i];
     if (isRecord(rawTimelineEntry)) {
@@ -455,6 +508,8 @@ export async function syncMubitRemoteActivity(options: MubitRemoteSyncOptions): 
     runId: options.runId,
     timelineEvents: combinedTimeline.length,
     promptTimelineEvents: promptTimeline.length,
+    sessionSummaryTimelineEvents: sessionSummaryTimeline.length,
+    diffTimelineEvents: diffTimeline.length,
     requestedTimelineLimit,
     refresh,
     imported,

@@ -4,6 +4,7 @@ import { stdin as input, stdout as output } from "node:process";
 import { mkdir, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import type { CapturedEventEnvelope } from "./lib/core-types";
 import { repoIdFromPath } from "./lib/core-types";
@@ -12,7 +13,14 @@ import { IngestPipeline } from "./lib/ingest-pipeline";
 import { CodexSdkAdapter } from "./lib/adapter-codex-sdk";
 import { CodexExecAdapter } from "./lib/adapter-codex-exec";
 import { QueryService } from "./lib/query-service";
-import { MubitMemoryEngine, mubitPromptRunIdForProject, mubitRunIdForProject, mubitRunIdForSession } from "./lib/memory-mubit";
+import {
+  MubitMemoryEngine,
+  mubitDiffRunIdForProject,
+  mubitPromptRunIdForProject,
+  mubitRunIdForProject,
+  mubitRunIdForSession,
+  mubitSessionSummaryRunIdForProject,
+} from "./lib/memory-mubit";
 import {
   syncCodexHistory,
   type CodexHistorySyncProgress,
@@ -953,6 +961,15 @@ async function runSyncPushPhase(options: {
     await pipeline.flush();
   }
 
+  if (memory?.isEnabled() && summary.matchedFiles > 0) {
+    try {
+      await publishSharedSessionArtifacts(cwd, repoId, actorId, memory);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(`Mubit artifact sync failed: ${message}`);
+    }
+  }
+
   return {
     repoId,
     actorId,
@@ -993,6 +1010,8 @@ async function runSyncPullPhase(options: {
       memory: engine,
       runId: mubitRunIdForProject(projectId),
       promptRunId: mubitPromptRunIdForProject(projectId),
+      sessionSummaryRunId: mubitSessionSummaryRunIdForProject(projectId),
+      diffRunId: mubitDiffRunIdForProject(projectId),
       repoId,
       fallbackActorId: actorId,
       timelineLimit: resolveTimelineLimit(flags),
@@ -1039,7 +1058,9 @@ function formatPullPhaseLine(result: SyncPullPhaseOutcome): string {
   const cap = s.suspectedServerCap ? ", capped?" : "";
   const noChange = s.noRemoteChangesDetected ? ", no remote changes" : "";
   const promptStream = (s.promptTimelineEvents ?? 0) > 0 ? `, prompt-stream=${s.promptTimelineEvents}` : "";
-  return `Pull (cloud->local): snapshot received=${s.timelineEvents} (requested=${s.requestedTimelineLimit}${cap}${promptStream}), imported=${s.imported}, dedup=${s.deduplicated}, skipped=${s.skipped}${noChange}`;
+  const sessionStream = (s.sessionSummaryTimelineEvents ?? 0) > 0 ? `, session-stream=${s.sessionSummaryTimelineEvents}` : "";
+  const diffStream = (s.diffTimelineEvents ?? 0) > 0 ? `, diff-stream=${s.diffTimelineEvents}` : "";
+  return `Pull (cloud->local): snapshot received=${s.timelineEvents} (requested=${s.requestedTimelineLimit}${cap}${promptStream}${sessionStream}${diffStream}), imported=${s.imported}, dedup=${s.deduplicated}, skipped=${s.skipped}${noChange}`;
 }
 
 async function maybeReadRemoteSyncStateForProject(cwd: string, repoId: string) {
@@ -2682,6 +2703,7 @@ interface PromptSlice {
   id: number;
   ts: string;
   actorId: string | null;
+  promptEventId: string | null;
   prompt: string;
   thoughts: string[];
   thoughtSlices: ThoughtSlice[];
@@ -2713,6 +2735,8 @@ interface SessionAnalysis {
   files: FileStatRow[];
   contributors: ContributorSlice[];
   tokenEstimate: number;
+  canonicalPromptCount?: number;
+  canonicalFileCount?: number;
 }
 
 interface SessionBrowseRow {
@@ -3240,10 +3264,122 @@ function extractToolResultDiffLines(event: CapturedEventEnvelope): string[] {
   return extractUnifiedDiffLines(rawOutput, 1200);
 }
 
+interface SyntheticSessionSummarySnapshot {
+  ts: string;
+  promptCount: number;
+  fileCount: number;
+  tokenEstimate: number;
+  files: FileStatRow[];
+}
+
+interface SyntheticPromptDiffSnapshotPart {
+  ts: string;
+  promptId: number | null;
+  promptEventId: string | null;
+  snapshotId: string;
+  partIndex: number;
+  partCount: number;
+  lines: string[];
+  files: FileStatRow[];
+}
+
+function numberFromUnknown(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === "string" && value.trim().length > 0) {
+    const parsed = Number.parseInt(value, 10);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function parseSyntheticFileRows(value: unknown, limit = 240): FileStatRow[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const out: FileStatRow[] = [];
+  for (const entry of value) {
+    if (!isRecord(entry) || typeof entry.path !== "string") {
+      continue;
+    }
+    out.push({
+      path: entry.path,
+      plus: Math.max(0, numberFromUnknown(entry.plus) ?? 0),
+      minus: Math.max(0, numberFromUnknown(entry.minus) ?? 0),
+    });
+    if (out.length >= limit) {
+      break;
+    }
+  }
+  return out;
+}
+
+function getSyntheticSessionSummary(event: CapturedEventEnvelope): SyntheticSessionSummarySnapshot | null {
+  const item = getItem(event);
+  if (!item || item.type !== "codaph_session_summary") {
+    return null;
+  }
+  return {
+    ts: event.ts,
+    promptCount: Math.max(0, numberFromUnknown(item.prompt_count) ?? 0),
+    fileCount: Math.max(0, numberFromUnknown(item.file_count) ?? 0),
+    tokenEstimate: Math.max(0, numberFromUnknown(item.token_estimate) ?? 0),
+    files: parseSyntheticFileRows(item.files, 300),
+  };
+}
+
+function getSyntheticPromptDiffPart(event: CapturedEventEnvelope): SyntheticPromptDiffSnapshotPart | null {
+  const item = getItem(event);
+  if (!item || item.type !== "codaph_prompt_diff_part") {
+    return null;
+  }
+  const promptId = numberFromUnknown(item.prompt_id);
+  const partIndexRaw = numberFromUnknown(item.part_index);
+  const partCountRaw = numberFromUnknown(item.part_count);
+  const snapshotId = stringFromUnknown(item.snapshot_id) ?? event.eventId;
+  const lineValues = Array.isArray(item.lines) ? item.lines : [];
+  const lines = lineValues
+    .map((line) => (typeof line === "string" ? line : null))
+    .filter((line): line is string => !!line)
+    .slice(0, 220);
+
+  return {
+    ts: event.ts,
+    promptId: promptId !== null && promptId > 0 ? promptId : null,
+    promptEventId: stringFromUnknown(item.prompt_event_id),
+    snapshotId,
+    partIndex: Math.max(0, partIndexRaw ?? 0),
+    partCount: Math.max(1, partCountRaw ?? 1),
+    lines,
+    files: parseSyntheticFileRows(item.files, 120),
+  };
+}
+
+function fileStatsMapFromRows(rows: FileStatRow[]): Map<string, FileStatRow> {
+  const map = new Map<string, FileStatRow>();
+  for (const row of rows) {
+    map.set(row.path, { ...row });
+  }
+  return map;
+}
+
 function buildSessionAnalysis(sessionId: string, events: CapturedEventEnvelope[]): SessionAnalysis {
   const prompts: PromptSlice[] = [];
   const sessionFiles = new Map<string, FileStatRow>();
   const pendingDiffByPrompt = new WeakMap<PromptSlice, string[]>();
+  let canonicalSessionSummary: SyntheticSessionSummarySnapshot | null = null;
+  const promptDiffSnapshots = new Map<
+    string,
+    {
+      promptKey: string;
+      snapshotId: string;
+      ts: string;
+      partCount: number;
+      files: FileStatRow[];
+      parts: Map<number, string[]>;
+    }
+  >();
   let nextPromptId = 1;
   let tokenChars = 0;
 
@@ -3253,6 +3389,7 @@ function buildSessionAnalysis(sessionId: string, events: CapturedEventEnvelope[]
         id: nextPromptId,
         ts: events[0]?.ts ?? new Date().toISOString(),
         actorId: null,
+        promptEventId: null,
         prompt: "(No prompt captured)",
         thoughts: [],
         thoughtSlices: [],
@@ -3268,6 +3405,47 @@ function buildSessionAnalysis(sessionId: string, events: CapturedEventEnvelope[]
   };
 
   for (const event of events) {
+    const syntheticSessionSummary = getSyntheticSessionSummary(event);
+    if (syntheticSessionSummary) {
+      if (!canonicalSessionSummary || syntheticSessionSummary.ts >= canonicalSessionSummary.ts) {
+        canonicalSessionSummary = syntheticSessionSummary;
+      }
+      continue;
+    }
+
+    const syntheticPromptDiffPart = getSyntheticPromptDiffPart(event);
+    if (syntheticPromptDiffPart) {
+      const promptKey = syntheticPromptDiffPart.promptEventId
+        ? `event:${syntheticPromptDiffPart.promptEventId}`
+        : syntheticPromptDiffPart.promptId
+          ? `id:${syntheticPromptDiffPart.promptId}`
+          : null;
+      if (promptKey) {
+        const mapKey = `${promptKey}|${syntheticPromptDiffPart.snapshotId}`;
+        let bucket = promptDiffSnapshots.get(mapKey);
+        if (!bucket) {
+          bucket = {
+            promptKey,
+            snapshotId: syntheticPromptDiffPart.snapshotId,
+            ts: syntheticPromptDiffPart.ts,
+            partCount: syntheticPromptDiffPart.partCount,
+            files: syntheticPromptDiffPart.files,
+            parts: new Map<number, string[]>(),
+          };
+          promptDiffSnapshots.set(mapKey, bucket);
+        }
+        if (syntheticPromptDiffPart.ts >= bucket.ts) {
+          bucket.ts = syntheticPromptDiffPart.ts;
+          bucket.partCount = syntheticPromptDiffPart.partCount;
+          if (syntheticPromptDiffPart.files.length > 0) {
+            bucket.files = syntheticPromptDiffPart.files;
+          }
+        }
+        bucket.parts.set(syntheticPromptDiffPart.partIndex, syntheticPromptDiffPart.lines);
+      }
+      continue;
+    }
+
     const eventActor = normalizeActorId(event.actorId);
     const promptText = getPromptText(event);
     if (promptText) {
@@ -3275,6 +3453,7 @@ function buildSessionAnalysis(sessionId: string, events: CapturedEventEnvelope[]
         id: nextPromptId,
         ts: event.ts,
         actorId: eventActor,
+        promptEventId: event.eventId,
         prompt: promptText,
         thoughts: [],
         thoughtSlices: [],
@@ -3347,6 +3526,7 @@ function buildSessionAnalysis(sessionId: string, events: CapturedEventEnvelope[]
       id: 1,
       ts: events[0]?.ts ?? new Date().toISOString(),
       actorId: null,
+      promptEventId: null,
       prompt: "(No prompt captured)",
       thoughts: [],
       thoughtSlices: [],
@@ -3378,6 +3558,58 @@ function buildSessionAnalysis(sessionId: string, events: CapturedEventEnvelope[]
 
     for (const thoughtSlice of prompt.thoughtSlices) {
       thoughtSlice.diffLines = thoughtSlice.diffLines.slice(0, 220);
+    }
+  }
+
+  if (promptDiffSnapshots.size > 0) {
+    const latestByPromptKey = new Map<string, {
+      ts: string;
+      partCount: number;
+      files: FileStatRow[];
+      parts: Map<number, string[]>;
+    }>();
+    for (const snapshot of promptDiffSnapshots.values()) {
+      const existing = latestByPromptKey.get(snapshot.promptKey);
+      if (!existing || snapshot.ts >= existing.ts) {
+        latestByPromptKey.set(snapshot.promptKey, {
+          ts: snapshot.ts,
+          partCount: snapshot.partCount,
+          files: snapshot.files,
+          parts: snapshot.parts,
+        });
+      }
+    }
+
+    const promptByEventId = new Map<string, PromptSlice>();
+    const promptById = new Map<number, PromptSlice>();
+    for (const prompt of prompts) {
+      promptById.set(prompt.id, prompt);
+      if (prompt.promptEventId) {
+        promptByEventId.set(prompt.promptEventId, prompt);
+      }
+    }
+
+    for (const [promptKey, snapshot] of latestByPromptKey.entries()) {
+      const target =
+        promptKey.startsWith("event:")
+          ? promptByEventId.get(promptKey.slice("event:".length))
+          : promptById.get(Number.parseInt(promptKey.slice("id:".length), 10));
+      if (!target) {
+        continue;
+      }
+      const assembled: string[] = [];
+      for (let i = 0; i < snapshot.partCount; i += 1) {
+        const chunk = snapshot.parts.get(i);
+        if (chunk) {
+          assembled.push(...chunk);
+        }
+      }
+      if (assembled.length > 0) {
+        target.diffLines = assembled.slice(0, 2200);
+      }
+      if (snapshot.files.length > 0) {
+        target.files = fileStatsMapFromRows(snapshot.files);
+      }
     }
   }
 
@@ -3426,13 +3658,171 @@ function buildSessionAnalysis(sessionId: string, events: CapturedEventEnvelope[]
     return b.lastTs.localeCompare(a.lastTs);
   });
 
+  const sessionFileRows = canonicalSessionSummary?.files.length ? canonicalSessionSummary.files : toSortedFileStats(sessionFiles);
+  const tokenEstimate = canonicalSessionSummary?.tokenEstimate ?? Math.max(0, Math.round(tokenChars / 4));
+
   return {
     sessionId,
     prompts,
-    files: toSortedFileStats(sessionFiles),
+    files: sessionFileRows,
     contributors,
-    tokenEstimate: Math.max(0, Math.round(tokenChars / 4)),
+    tokenEstimate,
+    canonicalPromptCount: canonicalSessionSummary?.promptCount,
+    canonicalFileCount: canonicalSessionSummary?.fileCount,
   };
+}
+
+function hashObjectShort(value: unknown): string {
+  return createHash("sha256").update(JSON.stringify(value)).digest("hex").slice(0, 16);
+}
+
+function chunkLines(lines: string[], chunkSize: number): string[][] {
+  if (chunkSize <= 0 || lines.length === 0) {
+    return lines.length === 0 ? [] : [lines];
+  }
+  const out: string[][] = [];
+  for (let i = 0; i < lines.length; i += chunkSize) {
+    out.push(lines.slice(i, i + chunkSize));
+  }
+  return out;
+}
+
+function fileRowsForSnapshot(files: FileStatRow[], limit = 240): Array<{ path: string; plus: number; minus: number }> {
+  return files.slice(0, limit).map((file) => ({
+    path: file.path,
+    plus: file.plus,
+    minus: file.minus,
+  }));
+}
+
+function buildSyntheticSessionSummaryEvent(
+  repoId: string,
+  actorId: string | null,
+  session: QuerySessionSummary,
+  analysis: SessionAnalysis,
+): CapturedEventEnvelope {
+  const promptCount =
+    analysis.canonicalPromptCount ??
+    analysis.prompts.filter((entry) => entry.prompt !== "(No prompt captured)").length;
+  const fileCount = analysis.canonicalFileCount ?? analysis.files.length;
+  const files = fileRowsForSnapshot(analysis.files, 300);
+  const snapshotCore = {
+    session_id: session.sessionId,
+    prompt_count: promptCount,
+    file_count: fileCount,
+    token_estimate: analysis.tokenEstimate,
+    files,
+  };
+  const snapshotId = hashObjectShort(snapshotCore);
+  return {
+    eventId: `codaph-session-summary-${session.sessionId}-${snapshotId}`,
+    source: "codex_exec",
+    repoId,
+    actorId,
+    sessionId: session.sessionId,
+    threadId: null,
+    ts: session.to,
+    eventType: "codaph.session.summary",
+    reasoningAvailability: "unavailable",
+    payload: {
+      item: {
+        type: "codaph_session_summary",
+        snapshot_id: snapshotId,
+        ...snapshotCore,
+      },
+      source: "codaph_session_stream",
+    },
+  };
+}
+
+function buildSyntheticPromptDiffPartEvents(
+  repoId: string,
+  actorId: string | null,
+  sessionId: string,
+  prompt: PromptSlice,
+): CapturedEventEnvelope[] {
+  const files = fileRowsForSnapshot(toSortedFileStats(prompt.files), 120);
+  const rawLines = prompt.diffLines.slice(0, 2000);
+  if (rawLines.length === 0 && files.length === 0) {
+    return [];
+  }
+  const truncated = prompt.diffLines.length > rawLines.length;
+  const snapshotId = hashObjectShort({
+    sessionId,
+    promptId: prompt.id,
+    promptEventId: prompt.promptEventId,
+    files,
+    lines: rawLines,
+    truncated,
+  });
+  const parts = chunkLines(rawLines, 160);
+  const totalParts = Math.max(1, parts.length);
+  const eventTs = prompt.ts;
+
+  if (parts.length === 0) {
+    parts.push([]);
+  }
+
+  return parts.map((lines, index) => ({
+    eventId: `codaph-prompt-diff-${sessionId}-${prompt.promptEventId ?? prompt.id}-${snapshotId}-${index}`,
+    source: "codex_exec",
+    repoId,
+    actorId,
+    sessionId,
+    threadId: null,
+    ts: eventTs,
+    eventType: "codaph.prompt.diff.part",
+    reasoningAvailability: "unavailable",
+    payload: {
+      item: {
+        type: "codaph_prompt_diff_part",
+        snapshot_id: snapshotId,
+        prompt_id: prompt.id,
+        prompt_event_id: prompt.promptEventId,
+        part_index: index,
+        part_count: totalParts,
+        truncated,
+        ...(index === 0 ? { files } : {}),
+        lines,
+      },
+      source: "codaph_diff_stream",
+    },
+  }));
+}
+
+async function publishSharedSessionArtifacts(
+  cwd: string,
+  repoId: string,
+  actorId: string | null,
+  memory: MubitMemoryEngine | null,
+): Promise<void> {
+  if (!memory || !memory.isEnabled()) {
+    return;
+  }
+
+  const query = new QueryService(resolve(cwd, ".codaph"));
+  const sessions = await query.listSessions(repoId);
+  if (sessions.length === 0) {
+    return;
+  }
+
+  const artifactEvents: CapturedEventEnvelope[] = [];
+  for (const session of sessions) {
+    const events = await query.getTimeline({ repoId, sessionId: session.sessionId });
+    if (events.length === 0) {
+      continue;
+    }
+    const analysis = buildSessionAnalysis(session.sessionId, events);
+    artifactEvents.push(buildSyntheticSessionSummaryEvent(repoId, actorId, session, analysis));
+    for (const prompt of analysis.prompts) {
+      artifactEvents.push(...buildSyntheticPromptDiffPartEvents(repoId, actorId, session.sessionId, prompt));
+    }
+  }
+
+  if (artifactEvents.length === 0) {
+    return;
+  }
+  await memory.writeEventsBatch(artifactEvents);
 }
 
 function selectedPromptFromAnalysis(
@@ -4654,7 +5044,10 @@ async function tui(rest: string[]): Promise<void> {
       }
 
       const analysis = await ensureAnalysis(session);
-      const promptCount = analysis.prompts.filter((entry) => entry.prompt !== "(No prompt captured)").length;
+      const promptCount =
+        analysis.canonicalPromptCount ??
+        analysis.prompts.filter((entry) => entry.prompt !== "(No prompt captured)").length;
+      const fileCount = analysis.canonicalFileCount ?? analysis.files.length;
       rows.push({
         sessionId: session.sessionId,
         from: session.from,
@@ -4662,9 +5055,9 @@ async function tui(rest: string[]): Promise<void> {
         eventCount: session.eventCount,
         threadCount: session.threadCount,
         promptCount,
-        fileCount: analysis.files.length,
+        fileCount,
         tokenEstimate: analysis.tokenEstimate,
-        status: analysis.files.length > 0 ? "synced" : "no_files",
+        status: fileCount > 0 ? "synced" : "no_files",
       });
     }
 

@@ -324,6 +324,20 @@ export function mubitPromptRunIdForProject(
   return `${runIdPrefix}:${repoId}`;
 }
 
+export function mubitSessionSummaryRunIdForProject(
+  repoId: string,
+  runIdPrefix = "codaph-sessions",
+): string {
+  return `${runIdPrefix}:${repoId}`;
+}
+
+export function mubitDiffRunIdForProject(
+  repoId: string,
+  runIdPrefix = "codaph-diffs",
+): string {
+  return `${runIdPrefix}:${repoId}`;
+}
+
 export class MubitMemoryEngine implements MemoryEngine {
   private readonly client: MubitClientLike;
 
@@ -378,6 +392,26 @@ export class MubitMemoryEngine implements MemoryEngine {
   promptRunIdForRepo(repoId: string): string {
     const sharedRepoId = this.projectId ?? repoId;
     return mubitPromptRunIdForProject(sharedRepoId, `${this.runIdPrefix}-prompts`);
+  }
+
+  private sessionSummaryRunIdForRepo(repoId: string): string {
+    const sharedRepoId = this.projectId ?? repoId;
+    return mubitSessionSummaryRunIdForProject(sharedRepoId, `${this.runIdPrefix}-sessions`);
+  }
+
+  private diffRunIdForRepo(repoId: string): string {
+    const sharedRepoId = this.projectId ?? repoId;
+    return mubitDiffRunIdForProject(sharedRepoId, `${this.runIdPrefix}-diffs`);
+  }
+
+  private runIdForEvent(event: CapturedEventEnvelope): string {
+    if (event.eventType === "codaph.session.summary") {
+      return this.sessionSummaryRunIdForRepo(event.repoId);
+    }
+    if (event.eventType === "codaph.prompt.diff.part") {
+      return this.diffRunIdForRepo(event.repoId);
+    }
+    return this.runIdForSession(event.repoId, event.sessionId);
   }
 
   private buildIngestItem(event: CapturedEventEnvelope): Record<string, unknown> {
@@ -581,7 +615,7 @@ export class MubitMemoryEngine implements MemoryEngine {
         if (!event) {
           continue;
         }
-        const runId = this.runIdForSession(event.repoId, event.sessionId);
+        const runId = this.runIdForEvent(event);
         await this.appendActivitiesForEvent(event, runId);
       }
     });
@@ -593,7 +627,7 @@ export class MubitMemoryEngine implements MemoryEngine {
       return { accepted: false, raw: { disabled: true } };
     }
 
-    const runId = this.runIdForSession(event.repoId, event.sessionId);
+    const runId = this.runIdForEvent(event);
     const result = await this.ingestEvents(runId, [event]);
     const record = asRecord(result);
     await this.appendActivitiesForEvent(event, runId);
@@ -612,7 +646,7 @@ export class MubitMemoryEngine implements MemoryEngine {
 
     const byRun = new Map<string, CapturedEventEnvelope[]>();
     for (const event of events) {
-      const runId = this.runIdForSession(event.repoId, event.sessionId);
+      const runId = this.runIdForEvent(event);
       const group = byRun.get(runId);
       if (group) {
         group.push(event);
