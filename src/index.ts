@@ -11,7 +11,7 @@ import { IngestPipeline } from "./lib/ingest-pipeline";
 import { CodexSdkAdapter } from "./lib/adapter-codex-sdk";
 import { CodexExecAdapter } from "./lib/adapter-codex-exec";
 import { QueryService } from "./lib/query-service";
-import { MubitMemoryEngine, mubitRunIdForProject, mubitRunIdForSession } from "./lib/memory-mubit";
+import { MubitMemoryEngine, mubitPromptRunIdForProject, mubitRunIdForProject, mubitRunIdForSession } from "./lib/memory-mubit";
 import {
   syncCodexHistory,
   type CodexHistorySyncProgress,
@@ -904,6 +904,7 @@ async function runSyncPullPhase(options: {
       mirror,
       memory: engine,
       runId: mubitRunIdForProject(projectId),
+      promptRunId: mubitPromptRunIdForProject(projectId),
       repoId,
       fallbackActorId: actorId,
       timelineLimit: resolveTimelineLimit(flags),
@@ -949,7 +950,8 @@ function formatPullPhaseLine(result: SyncPullPhaseOutcome): string {
   const s = result.summary;
   const cap = s.suspectedServerCap ? ", capped?" : "";
   const noChange = s.noRemoteChangesDetected ? ", no remote changes" : "";
-  return `Pull (cloud->local): snapshot received=${s.timelineEvents} (requested=${s.requestedTimelineLimit}${cap}), imported=${s.imported}, dedup=${s.deduplicated}, skipped=${s.skipped}${noChange}`;
+  const promptStream = (s.promptTimelineEvents ?? 0) > 0 ? `, prompt-stream=${s.promptTimelineEvents}` : "";
+  return `Pull (cloud->local): snapshot received=${s.timelineEvents} (requested=${s.requestedTimelineLimit}${cap}${promptStream}), imported=${s.imported}, dedup=${s.deduplicated}, skipped=${s.skipped}${noChange}`;
 }
 
 async function maybeReadRemoteSyncStateForProject(cwd: string, repoId: string) {

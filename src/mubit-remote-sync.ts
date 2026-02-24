@@ -20,6 +20,7 @@ export interface MubitRemoteSyncOptions {
   mirror: MirrorAppender;
   memory: MubitMemoryEngine;
   runId: string;
+  promptRunId?: string;
   repoId: string;
   fallbackActorId?: string | null;
   timelineLimit?: number;
@@ -32,6 +33,7 @@ export interface MubitRemoteSyncOptions {
 export interface MubitRemoteSyncSummary {
   runId: string;
   timelineEvents: number;
+  promptTimelineEvents?: number;
   requestedTimelineLimit: number;
   refresh: boolean;
   imported: number;
@@ -136,17 +138,17 @@ function extractEnvelopeRecord(activityRecord: JsonRecord): JsonRecord | null {
 
 function isCodaphActivity(activityRecord: JsonRecord, envelopeRecord: JsonRecord): boolean {
   const activityType = asString(activityRecord.type);
-  if (activityType === "codaph_event") {
+  if (activityType === "codaph_event" || activityType === "codaph_prompt") {
     return true;
   }
 
   const schema = asString(envelopeRecord.schema);
-  if (schema && schema.startsWith("codaph_event")) {
+  if (schema && (schema.startsWith("codaph_event") || schema.startsWith("codaph_prompt"))) {
     return true;
   }
 
   const payloadType = asString(envelopeRecord.type);
-  return payloadType === "codaph_event";
+  return payloadType === "codaph_event" || payloadType === "codaph_prompt";
 }
 
 function looksLikeCapturedEvent(record: JsonRecord): boolean {
@@ -279,6 +281,7 @@ export async function syncMubitRemoteActivity(options: MubitRemoteSyncOptions): 
   const startedAt = new Date().toISOString();
 
   let timeline: unknown[] = [];
+  let promptTimeline: unknown[] = [];
   let snapshotFingerprint: string | null = null;
   let consecutiveSameSnapshotCount = 0;
   let suspectedServerCap = false;
@@ -312,7 +315,32 @@ export async function syncMubitRemoteActivity(options: MubitRemoteSyncOptions): 
   }
 
   timeline = Array.isArray(snapshot.timeline) ? snapshot.timeline : [];
-  snapshotFingerprint = summarizeTimelineFingerprint(timeline);
+
+  let promptSnapshotFingerprint: string | null = null;
+  if (options.promptRunId && options.promptRunId !== options.runId) {
+    try {
+      const promptSnapshot = await options.memory.fetchContextSnapshot({
+        runId: options.promptRunId,
+        timelineLimit: requestedTimelineLimit,
+        refresh,
+      });
+      promptTimeline = Array.isArray(promptSnapshot.timeline) ? promptSnapshot.timeline : [];
+      promptSnapshotFingerprint = summarizeTimelineFingerprint(promptTimeline);
+    } catch {
+      promptTimeline = [];
+      promptSnapshotFingerprint = null;
+    }
+  }
+
+  const mainFingerprint = summarizeTimelineFingerprint(timeline);
+  if (promptTimeline.length > 0) {
+    snapshotFingerprint = createHash("sha256")
+      .update(`main:${mainFingerprint ?? "none"}|prompt:${promptSnapshotFingerprint ?? "none"}`)
+      .digest("hex")
+      .slice(0, 24);
+  } else {
+    snapshotFingerprint = mainFingerprint;
+  }
   if (snapshotFingerprint && priorState.lastSnapshotFingerprint && snapshotFingerprint === priorState.lastSnapshotFingerprint) {
     consecutiveSameSnapshotCount = (priorState.consecutiveSameSnapshotCount ?? 0) + 1;
   } else {
@@ -321,12 +349,21 @@ export async function syncMubitRemoteActivity(options: MubitRemoteSyncOptions): 
   if (
     snapshotFingerprint &&
     consecutiveSameSnapshotCount >= 3 &&
-    requestedTimelineLimit > timeline.length &&
-    timeline.length > 0
+    (
+      (requestedTimelineLimit > timeline.length && timeline.length > 0) ||
+      (requestedTimelineLimit > promptTimeline.length && promptTimeline.length > 0)
+    )
   ) {
     suspectedServerCap = true;
+    const streams: string[] = [];
+    if (requestedTimelineLimit > timeline.length && timeline.length > 0) {
+      streams.push(`events=${timeline.length}`);
+    }
+    if (requestedTimelineLimit > promptTimeline.length && promptTimeline.length > 0) {
+      streams.push(`prompts=${promptTimeline.length}`);
+    }
     diagnosticNote =
-      `Mubit snapshot appears capped (received ${timeline.length} despite requested ${requestedTimelineLimit}); Codaph is deduping locally. This is a snapshot API limitation, not a local sync error.`;
+      `Mubit snapshot appears capped (${streams.join(", ")} despite requested ${requestedTimelineLimit}); Codaph is deduping locally. This is a snapshot API limitation, not a local sync error.`;
   }
 
   let imported = 0;
@@ -338,8 +375,9 @@ export async function syncMubitRemoteActivity(options: MubitRemoteSyncOptions): 
   const contributors = new Set<string>();
   const fallbackActorId = options.fallbackActorId ?? null;
 
-  for (let i = 0; i < timeline.length; i += 1) {
-    const rawTimelineEntry = timeline[i];
+  const combinedTimeline = promptTimeline.length > 0 ? [...promptTimeline, ...timeline] : timeline;
+  for (let i = 0; i < combinedTimeline.length; i += 1) {
+    const rawTimelineEntry = combinedTimeline[i];
     if (isRecord(rawTimelineEntry)) {
       const createdAt = asString(rawTimelineEntry.created_at);
       if (createdAt && isIsoDate(createdAt)) {
@@ -351,7 +389,7 @@ export async function syncMubitRemoteActivity(options: MubitRemoteSyncOptions): 
       skipped += 1;
       options.onProgress?.({
         current: i + 1,
-        total: timeline.length,
+        total: combinedTimeline.length,
         imported,
         deduplicated,
         skipped,
@@ -376,7 +414,7 @@ export async function syncMubitRemoteActivity(options: MubitRemoteSyncOptions): 
 
     options.onProgress?.({
       current: i + 1,
-      total: timeline.length,
+      total: combinedTimeline.length,
       imported,
       deduplicated,
       skipped,
@@ -395,7 +433,7 @@ export async function syncMubitRemoteActivity(options: MubitRemoteSyncOptions): 
       lastSuccessAt: new Date().toISOString(),
       lastTriggerSource: options.triggerSource ?? priorState.lastTriggerSource ?? "manual",
       requestedTimelineLimit,
-      receivedTimelineCount: timeline.length,
+      receivedTimelineCount: combinedTimeline.length,
       lastImported: imported,
       lastDeduplicated: deduplicated,
       lastSkipped: skipped,
@@ -415,7 +453,8 @@ export async function syncMubitRemoteActivity(options: MubitRemoteSyncOptions): 
 
   return {
     runId: options.runId,
-    timelineEvents: timeline.length,
+    timelineEvents: combinedTimeline.length,
+    promptTimelineEvents: promptTimeline.length,
     requestedTimelineLimit,
     refresh,
     imported,

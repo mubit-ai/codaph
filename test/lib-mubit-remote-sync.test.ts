@@ -195,4 +195,97 @@ describe("mubit-remote-sync", () => {
 
     await rm(root, { recursive: true, force: true });
   });
+
+  it("replays prompt activities from the compact prompt stream", async () => {
+    const mainTimeline = [
+      {
+        id: "main-1",
+        created_at: "2026-02-23T10:00:00.000Z",
+        payload: JSON.stringify({
+          schema: "codaph_event.v2",
+          event: {
+            eventId: "evt-thought-1",
+            source: "codex_exec",
+            repoId: "repo-x",
+            actorId: "friend",
+            sessionId: "sess-1",
+            threadId: "thread-1",
+            ts: "2026-02-23T10:00:00.000Z",
+            eventType: "item.completed",
+            payload: { item: { type: "reasoning", text: "thinking" } },
+            reasoningAvailability: "full",
+          },
+        }),
+      },
+    ];
+    const promptTimeline = [
+      {
+        id: "prompt-1",
+        created_at: "2026-02-23T10:00:01.000Z",
+        payload: JSON.stringify({
+          type: "codaph_prompt",
+          input_ref: "sess-1",
+          output_ref: "evt-prompt-1",
+          payload: JSON.stringify({
+            schema: "codaph_prompt.v1",
+            event: {
+              eventId: "evt-prompt-1",
+              source: "codex_exec",
+              repoId: "repo-x",
+              actorId: "anil",
+              sessionId: "sess-1",
+              threadId: "thread-1",
+              ts: "2026-02-23T10:00:01.000Z",
+              eventType: "prompt.submitted",
+              payload: { prompt: "shared prompt via compact stream" },
+              reasoningAvailability: "unavailable",
+            },
+          }),
+        }),
+      },
+    ];
+
+    const appended: CapturedEventEnvelope[] = [];
+    const mirror = {
+      async appendEvent(event: CapturedEventEnvelope): Promise<MirrorAppendResult> {
+        appended.push(event);
+        return {
+          segment: "seg-1",
+          offset: appended.length,
+          checksum: `sum-${appended.length}`,
+          deduplicated: false,
+        };
+      },
+      async appendRawLine(): Promise<void> {},
+    };
+
+    const calls: string[] = [];
+    const memory = {
+      async fetchContextSnapshot(payload?: Record<string, unknown>): Promise<Record<string, unknown>> {
+        calls.push(String(payload?.runId ?? payload?.run_id ?? ""));
+        const runId = String(payload?.runId ?? payload?.run_id ?? "");
+        if (runId.includes("prompts")) {
+          return { timeline: promptTimeline };
+        }
+        return { timeline: mainTimeline };
+      },
+    } as unknown as MubitMemoryEngine;
+
+    const summary = await syncMubitRemoteActivity({
+      mirror,
+      memory,
+      runId: "codaph:repo-x",
+      promptRunId: "codaph-prompts:repo-x",
+      repoId: "repo-x",
+    });
+
+    expect(calls).toContain("codaph:repo-x");
+    expect(calls).toContain("codaph-prompts:repo-x");
+    expect(summary.promptTimelineEvents).toBe(1);
+    expect(summary.timelineEvents).toBe(2);
+    expect(appended.map((event) => event.eventType)).toContain("prompt.submitted");
+    expect(appended.find((event) => event.eventType === "prompt.submitted")?.payload.prompt).toBe(
+      "shared prompt via compact stream",
+    );
+  });
 });

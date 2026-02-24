@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { MubitMemoryEngine, mubitRunIdForProject, mubitRunIdForSession } from "../src/lib/memory-mubit";
+import { MubitMemoryEngine, mubitPromptRunIdForProject, mubitRunIdForProject, mubitRunIdForSession } from "../src/lib/memory-mubit";
 
 describe("memory-mubit", () => {
   it("builds stable run ids", () => {
@@ -9,6 +9,7 @@ describe("memory-mubit", () => {
     );
     expect(mubitRunIdForProject("repo123")).toBe("codaph:repo123");
     expect(mubitRunIdForProject("repo123", "custom")).toBe("custom:repo123");
+    expect(mubitPromptRunIdForProject("repo123")).toBe("codaph-prompts:repo123");
   });
 
   it("writes control ingest payloads with idempotency key", async () => {
@@ -50,9 +51,16 @@ describe("memory-mubit", () => {
     expect(captures).toHaveLength(1);
     expect(captures[0].idempotency_key).toBe("evt-123");
     expect(captures[0].run_id).toBe("codaph:repo-abc:session-def");
-    expect(activities).toHaveLength(1);
-    expect(activities[0].run_id).toBe("codaph:repo-abc:session-def");
-    const activity = activities[0].activity as Record<string, unknown>;
+    expect(activities).toHaveLength(2);
+    const eventActivityPayload = activities.find(
+      (entry) => ((entry.activity as Record<string, unknown> | undefined)?.type as string | undefined) === "codaph_event",
+    );
+    const promptActivityPayload = activities.find(
+      (entry) => ((entry.activity as Record<string, unknown> | undefined)?.type as string | undefined) === "codaph_prompt",
+    );
+    expect(eventActivityPayload?.run_id).toBe("codaph:repo-abc:session-def");
+    expect(promptActivityPayload?.run_id).toBe("codaph-prompts:repo-abc");
+    const activity = (eventActivityPayload?.activity ?? {}) as Record<string, unknown>;
     expect(activity.type).toBe("codaph_event");
     expect(typeof activity.payload).toBe("string");
     const envelope = JSON.parse(String(activity.payload)) as Record<string, unknown>;
@@ -61,6 +69,8 @@ describe("memory-mubit", () => {
     expect(event.eventType).toBe("prompt.submitted");
     const payload = event.payload as Record<string, unknown>;
     expect(payload.prompt).toBe("summarize current repo");
+    const promptEnvelope = JSON.parse(String((promptActivityPayload?.activity as Record<string, unknown>).payload)) as Record<string, unknown>;
+    expect(promptEnvelope.schema).toBe("codaph_prompt.v1");
   });
 
   it("truncates activity payloads so large prompts are still appendable", async () => {
@@ -92,8 +102,11 @@ describe("memory-mubit", () => {
       reasoningAvailability: "unavailable",
     });
 
-    expect(activities).toHaveLength(1);
-    const activity = activities[0].activity as Record<string, unknown>;
+    expect(activities).toHaveLength(2);
+    const eventActivity = activities.find(
+      (entry) => ((entry.activity as Record<string, unknown> | undefined)?.type as string | undefined) === "codaph_event",
+    );
+    const activity = (eventActivity?.activity ?? {}) as Record<string, unknown>;
     const payloadRaw = String(activity.payload);
     expect(payloadRaw.length).toBeLessThan(10000);
   });

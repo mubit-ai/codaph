@@ -252,6 +252,35 @@ function minimalActivityEnvelope(event: CapturedEventEnvelope): Record<string, u
   };
 }
 
+function compactPromptActivityEnvelope(event: CapturedEventEnvelope): Record<string, unknown> {
+  const prompt =
+    compactString(event.payload.prompt, 2000) ??
+    compactString(event.payload.input, 2000) ??
+    compactString(event.payload.item, 2000);
+  return {
+    schema: "codaph_prompt.v1",
+    event: {
+      eventId: event.eventId,
+      source: event.source,
+      repoId: event.repoId,
+      actorId: event.actorId,
+      sessionId: event.sessionId,
+      threadId: event.threadId,
+      ts: event.ts,
+      eventType: "prompt.submitted",
+      reasoningAvailability: event.reasoningAvailability,
+      payload: {
+        ...(prompt ? { prompt } : {}),
+        source: "mubit_prompt_stream",
+      },
+    },
+  };
+}
+
+function isPromptSubmittedEvent(event: CapturedEventEnvelope): boolean {
+  return event.eventType === "prompt.submitted";
+}
+
 export function mubitRunIdForSession(
   repoId: string,
   sessionId: string,
@@ -263,6 +292,13 @@ export function mubitRunIdForSession(
 export function mubitRunIdForProject(
   repoId: string,
   runIdPrefix = "codaph",
+): string {
+  return `${runIdPrefix}:${repoId}`;
+}
+
+export function mubitPromptRunIdForProject(
+  repoId: string,
+  runIdPrefix = "codaph-prompts",
 ): string {
   return `${runIdPrefix}:${repoId}`;
 }
@@ -332,6 +368,11 @@ export class MubitMemoryEngine implements MemoryEngine {
       return mubitRunIdForProject(sharedRepoId, this.runIdPrefix);
     }
     return mubitRunIdForSession(sharedRepoId, sessionId, this.runIdPrefix);
+  }
+
+  promptRunIdForRepo(repoId: string): string {
+    const sharedRepoId = this.projectId ?? repoId;
+    return mubitPromptRunIdForProject(sharedRepoId, `${this.runIdPrefix}-prompts`);
   }
 
   async writeEvent(event: CapturedEventEnvelope): Promise<MemoryWriteResult> {
@@ -404,6 +445,28 @@ export class MubitMemoryEngine implements MemoryEngine {
           if (process.env.CODAPH_DEBUG === "1") {
             const message = firstError instanceof Error ? firstError.message : "unknown appendActivity error";
             console.warn(`[codaph] appendActivity failed for ${event.eventId}: ${message}`);
+          }
+        }
+      }
+
+      if (isPromptSubmittedEvent(event)) {
+        try {
+          await this.client.control.appendActivity({
+            run_id: this.promptRunIdForRepo(event.repoId),
+            agent_id: this.agentId,
+            activity: {
+              type: "codaph_prompt",
+              payload: toJson(compactPromptActivityEnvelope(event)),
+              ts: event.ts,
+              agent_id: this.agentId,
+              input_ref: event.sessionId,
+              output_ref: event.eventId,
+            },
+          });
+        } catch (promptError) {
+          if (process.env.CODAPH_DEBUG === "1") {
+            const message = promptError instanceof Error ? promptError.message : "unknown prompt appendActivity error";
+            console.warn(`[codaph] prompt appendActivity failed for ${event.eventId}: ${message}`);
           }
         }
       }
