@@ -73,6 +73,25 @@ function asString(value: unknown): string | undefined {
   return trimmed.length > 0 ? trimmed : undefined;
 }
 
+function errorMessage(error: unknown): string {
+  if (error instanceof Error && typeof error.message === "string") {
+    return error.message;
+  }
+  return String(error);
+}
+
+function looksLikeUnsupportedHdqlLaneError(error: unknown): boolean {
+  const message = errorMessage(error).toLowerCase();
+  return (
+    message.includes("hdql") ||
+    message.includes("hdc") ||
+    message.includes("direct_lane") ||
+    message.includes("direct lane") ||
+    message.includes("invalid argument") ||
+    message.includes("unsupported")
+  );
+}
+
 function toJson(value: unknown): string {
   try {
     return JSON.stringify(value ?? {});
@@ -583,15 +602,33 @@ export class MubitMemoryEngine implements MemoryEngine {
       run_id: options.runId,
       query: options.query,
       mode: options.mode ?? "direct_bypass",
-      direct_lane: options.directLane ?? "semantic_search",
+      direct_lane: options.directLane ?? "hdql_query",
       include_linked_runs: options.includeLinkedRuns ?? false,
       limit,
       embedding: [],
     };
+    const requestedLane =
+      payload.direct_lane === "hdql_query" || payload.direct_lane === "semantic_search"
+        ? (payload.direct_lane as "hdql_query" | "semantic_search")
+        : "hdql_query";
 
-    const result = await this.client.control.query(payload);
-    const record = asRecord(result);
-    return record ?? { raw: result };
+    try {
+      const result = await this.client.control.query(payload);
+      const record = asRecord(result);
+      return record ? { ...record, codaph_query_lane: requestedLane } : { raw: result, codaph_query_lane: requestedLane };
+    } catch (firstError) {
+      if (requestedLane !== "hdql_query" || !looksLikeUnsupportedHdqlLaneError(firstError)) {
+        throw firstError;
+      }
+      const fallbackPayload = { ...payload, direct_lane: "semantic_search" };
+      const result = await this.client.control.query(fallbackPayload);
+      const record = asRecord(result);
+      const fallbackMeta = {
+        codaph_query_lane: "semantic_search" as const,
+        codaph_query_lane_fallback: "hdql_query" as const,
+      };
+      return record ? { ...record, ...fallbackMeta } : { raw: result, ...fallbackMeta };
+    }
   }
 
   async fetchContextSnapshot(options: MubitContextSnapshotOptions): Promise<Record<string, unknown>> {

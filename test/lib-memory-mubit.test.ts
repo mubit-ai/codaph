@@ -210,4 +210,62 @@ describe("memory-mubit", () => {
     expect("idempotency_key" in payload).toBe(false);
     expect(activities).toHaveLength(3);
   });
+
+  it("uses hdql_query lane by default for semantic context retrieval", async () => {
+    const queryCalls: Array<Record<string, unknown>> = [];
+    const engine = new MubitMemoryEngine({
+      client: {
+        control: {
+          ingest: async () => ({ accepted: true }),
+          setVariable: async () => ({ success: true }),
+          query: async (payload?: Record<string, unknown>) => {
+            queryCalls.push(payload ?? {});
+            return { evidence: [{ source: "mubit", content: "match" }] };
+          },
+        },
+      },
+    });
+
+    const result = await engine.querySemanticContext({
+      runId: "codaph:repo:session",
+      query: "what changed?",
+      limit: 5,
+    });
+
+    expect(queryCalls).toHaveLength(1);
+    expect(queryCalls[0].mode).toBe("direct_bypass");
+    expect(queryCalls[0].direct_lane).toBe("hdql_query");
+    expect(result.codaph_query_lane).toBe("hdql_query");
+  });
+
+  it("falls back to semantic_search when hdql lane is unsupported", async () => {
+    const queryCalls: Array<Record<string, unknown>> = [];
+    const engine = new MubitMemoryEngine({
+      client: {
+        control: {
+          ingest: async () => ({ accepted: true }),
+          setVariable: async () => ({ success: true }),
+          query: async (payload?: Record<string, unknown>) => {
+            const p = payload ?? {};
+            queryCalls.push(p);
+            if (p.direct_lane === "hdql_query") {
+              throw new Error("invalid argument: direct_lane hdql_query unsupported");
+            }
+            return { evidence: [{ source: "mubit", content: "fallback match" }] };
+          },
+        },
+      },
+    });
+
+    const result = await engine.querySemanticContext({
+      runId: "codaph:repo:session",
+      query: "why did this fail?",
+    });
+
+    expect(queryCalls).toHaveLength(2);
+    expect(queryCalls[0].direct_lane).toBe("hdql_query");
+    expect(queryCalls[1].direct_lane).toBe("semantic_search");
+    expect(result.codaph_query_lane).toBe("semantic_search");
+    expect(result.codaph_query_lane_fallback).toBe("hdql_query");
+  });
 });
