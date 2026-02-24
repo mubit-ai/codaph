@@ -2,6 +2,8 @@
 
 Codaph is a terminal-first CLI/TUI for inspecting coding-agent activity with shared Mubit-backed memory.
 
+Once a legend said, if Pentagon can vibe code secret ops with AI, we can surely engineer a CLI with it. That legend is Shankha
+
 ## Installation
 
 Use one of the following methods.
