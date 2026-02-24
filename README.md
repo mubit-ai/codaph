@@ -1,6 +1,6 @@
 # Codaph
 
-Codaph is a Codex-first capture layer for coding agent activity, with a CLI/TUI-first workflow and MuBit-backed collaborative memory.
+Codaph is a Codex-first capture layer for coding agent activity, with a CLI/TUI-first workflow and Mubit-backed collaborative memory.
 
 ## Repository Layout
 
@@ -79,7 +79,7 @@ Workflow requirements:
 ## Run TUI (Primary)
 
 ```bash
-# required for collaborative MuBit writes/queries
+# required for collaborative Mubit writes/queries
 export MUBIT_API_KEY=...
 export OPENAI_API_KEY=...
 # optional overrides (defaults auto-detected from git/GitHub)
@@ -92,11 +92,11 @@ bun run cli doctor
 
 TUI flow:
 1. Add or select a project folder.
-2. Codaph auto-detects GitHub `owner/repo` from `origin` and uses it as shared MuBit project id (if not explicitly set).
-3. Sync Codex history from `~/.codex/sessions` into Codaph mirror + MuBit.
+2. Codaph auto-detects GitHub `owner/repo` from `origin` and uses it as shared Mubit project id (if not explicitly set).
+3. Sync Codex history from `~/.codex/sessions` into Codaph mirror + Mubit.
 4. Codaph can auto-install sync automation on first `sync`; use `r` in TUI as a manual cloud pull fallback.
 5. Inspect prompts, thoughts, assistant output, and file changes by session.
-6. Query MuBit semantic memory for the active session.
+6. Query Mubit semantic memory for the active session.
 
 TUI keyboard map:
 - `q`: quit
@@ -104,8 +104,8 @@ TUI keyboard map:
 - `o`: settings overlay (set project name/id, actor id, API keys, run scope)
 - `p`: switch project
 - `a`: add/switch project path
-- Browse view: `up/down` navigate sessions, `enter` inspect, `s` sync now (local+cloud), `r` pull cloud MuBit (manual/fallback)
-- Inspect view: `up/down` prompt navigation, `tab` cycle pane focus, `d` full diff overlay, `m` MuBit chat, `f` actor filter, `c` contributors overlay, `left` or `esc` back
+- Browse view: `up/down` navigate sessions, `enter` inspect, `s` sync now (local+cloud), `r` pull cloud Mubit (manual/fallback)
+- Inspect view: `up/down` prompt navigation, `tab` cycle pane focus, `d` full diff overlay, `m` Mubit chat, `f` actor filter, `c` contributors overlay, `left` or `esc` back
 - Chat panel: type message, `enter` send, `esc` close chat
 
 ## CLI Commands (Primary)
@@ -114,7 +114,7 @@ TUI keyboard map:
 bun run cli --help
 bun run cli doctor
 
-# import normal Codex app/CLI usage into .codaph and MuBit
+# import normal Codex app/CLI usage into .codaph and Mubit
 bun run cli sync --cwd /absolute/project/path
 # explicit phases (fallback/manual)
 bun run cli sync push --cwd /absolute/project/path
@@ -136,28 +136,28 @@ bun run cli inspect --session <session-id> --cwd /absolute/project/path
 bun run cli timeline --session <session-id> --cwd /absolute/project/path
 bun run cli diff --session <session-id> --cwd /absolute/project/path
 
-# MuBit semantic query
+# Mubit semantic query
 bun run cli mubit query "what changed in auth?" --session <session-id> --cwd /absolute/project/path
 bun run cli mubit query "what changed in auth?" --session <session-id> --cwd /absolute/project/path --raw
-# disable OpenAI synthesis and show MuBit-only summary
+# disable OpenAI synthesis and show Mubit-only summary
 bun run cli mubit query "what changed in auth?" --session <session-id> --cwd /absolute/project/path --no-agent
 ```
 
-MuBit flags:
+Mubit flags:
 - `--mubit` / `--no-mubit`
 - `--mubit-api-key <key>` (or `MUBIT_API_KEY`)
 - `--mubit-project-id <shared-id>` (or `CODAPH_PROJECT_ID`)
 - `--mubit-run-scope <session|project>` (defaults to `project` when a project id is resolved, else `session`)
 - `--mubit-actor-id <id>` (or `CODAPH_ACTOR_ID`)
 - `--raw` (for `mubit query`, print full response JSON)
-- `--agent` / `--no-agent` (for `mubit query`, OpenAI synthesis on top of MuBit)
+- `--agent` / `--no-agent` (for `mubit query`, OpenAI synthesis on top of Mubit)
 - `--openai-api-key <key>` (or `OPENAI_API_KEY`)
 - `--openai-model <model>`
 - `--mubit-transport <auto|http|grpc>`
 - `--mubit-endpoint`, `--mubit-http-endpoint`, `--mubit-grpc-endpoint`
 - `--mubit-write-timeout-ms <ms>` (default `15000`, set `0` to disable timeout)
 
-Team-shared MuBit setup:
+Team-shared Mubit setup:
 1. Everyone uses the same `MUBIT_API_KEY`.
 2. Everyone uses the same `CODAPH_PROJECT_ID` (or `--mubit-project-id`) for that repo.
    If unset, Codaph auto-detects from git remote `origin` as `owner/repo`.

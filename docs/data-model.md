@@ -1,6 +1,6 @@
 # Data Model
 
-Codaph stores canonical events in both MuBit and local JSONL mirror.
+Codaph stores canonical events in both Mubit and local JSONL mirror.
 
 ## Canonical Event Envelope
 
@@ -65,9 +65,9 @@ interface CapturedEventEnvelope {
 
 - Exact mapping from `eventId` to segment/time/session/actor.
 
-## MuBit Mapping
+## Mubit Mapping
 
-Each event is written to MuBit with:
+Each event is written to Mubit with:
 
 - `run_id` based on configured run scope
 - `idempotency_key = eventId`

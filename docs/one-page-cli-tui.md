@@ -4,7 +4,7 @@ This is the single-page guide you can publish for Codaph users.
 
 ## What Codaph Does
 
-Codaph captures Codex sessions, stores collaborative memory in MuBit, and lets you inspect prompts, thoughts, and diffs in a terminal UI.
+Codaph captures Codex sessions, stores collaborative memory in Mubit, and lets you inspect prompts, thoughts, and diffs in a terminal UI.
 
 ## Install
 
@@ -46,7 +46,7 @@ codaph tui --cwd /absolute/project/path --mubit
 export MUBIT_API_KEY=your_mubit_key
 ```
 
-Optional for MuBit answer synthesis:
+Optional for Mubit answer synthesis:
 
 ```bash
 export OPENAI_API_KEY=your_openai_key
@@ -65,9 +65,9 @@ export CODAPH_MUBIT_RUN_SCOPE=project
 1. Start TUI:
    `codaph tui --cwd /absolute/project/path --mubit`
 2. Press `s` to sync local Codex history (`~/.codex/sessions`).
-3. Press `r` to sync shared MuBit remote timeline.
+3. Press `r` to sync shared Mubit remote timeline.
 4. Press `enter` on a session to inspect.
-5. Press `m` to ask a MuBit question in session context.
+5. Press `m` to ask a Mubit question in session context.
 
 ## TUI Keys
 
@@ -85,10 +85,10 @@ export CODAPH_MUBIT_RUN_SCOPE=project
 # health check
 codaph doctor --cwd /absolute/project/path --mubit
 
-# local codex history -> local mirror (+ MuBit if enabled)
+# local codex history -> local mirror (+ Mubit if enabled)
 codaph sync --cwd /absolute/project/path --mubit
 
-# shared MuBit timeline -> local mirror
+# shared Mubit timeline -> local mirror
 codaph sync remote --cwd /absolute/project/path --mubit
 
 # inspect
@@ -103,7 +103,7 @@ codaph mubit query "what changed in auth?" --session <session-id> --cwd /absolut
 ## Team / Collaboration Model
 
 - Everyone uses the same project id (`owner/repo`).
-- Everyone uses the same MuBit backend key for that workspace.
+- Everyone uses the same Mubit backend key for that workspace.
 - Each contributor has a unique actor id.
 - Use run scope `project` for shared memory.
 
@@ -117,15 +117,15 @@ Run ids:
 Press `o` and set:
 
 - project name
-- MuBit project id
+- Mubit project id
 - actor id
-- MuBit API key
+- Mubit API key
 - OpenAI API key
 - run scope (`project` or `session`)
 
 ## Common Issues
 
-- `MuBit:off`
+- `Mubit:off`
   Run `codaph doctor --mubit` and verify `MUBIT_API_KEY`.
 - No teammate activity
   Ensure same `CODAPH_PROJECT_ID`, then run `sync remote`.

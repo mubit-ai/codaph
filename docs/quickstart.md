@@ -1,13 +1,13 @@
 # Quickstart
 
-This guide gets Codaph running with collaborative MuBit memory in less than 10 minutes.
+This guide gets Codaph running with collaborative Mubit memory in less than 10 minutes.
 
 ## 1) Prerequisites
 
 - Bun `1.3.9+`
 - Codex CLI installed and authenticated
-- MuBit API key
-- Optional OpenAI API key for MuBit answer synthesis
+- Mubit API key
+- Optional OpenAI API key for Mubit answer synthesis
 
 ## 2) Install and Build
 
@@ -45,9 +45,9 @@ bun run cli doctor --cwd /Users/anilp/Code/codaph --mubit
 
 Expected signals:
 
-- `MuBit runtime: enabled`
-- `MuBit project id:` is set (auto-detected from git remote or explicit override)
-- `MuBit actor id:` is set
+- `Mubit runtime: enabled`
+- `Mubit project id:` is set (auto-detected from git remote or explicit override)
+- `Mubit actor id:` is set
 
 ## 5) Run TUI (Primary UX)
 
@@ -59,17 +59,17 @@ Inside TUI:
 
 1. Press `a` to add/select project folder.
 2. Press `s` to sync local Codex sessions from `~/.codex/sessions`.
-3. Press `r` to sync shared MuBit remote activity into local mirror.
+3. Press `r` to sync shared Mubit remote activity into local mirror.
 4. Press `enter` on a session to inspect prompts, thoughts, and diffs.
-5. Press `m` to ask MuBit questions in context.
+5. Press `m` to ask Mubit questions in context.
 
 ## 6) CLI-Only Workflow (Optional)
 
 ```bash
-# local codex history -> mirror (+ MuBit if enabled)
+# local codex history -> mirror (+ Mubit if enabled)
 bun run cli sync --cwd /absolute/project/path --mubit
 
-# remote MuBit timeline -> mirror
+# remote Mubit timeline -> mirror
 bun run cli sync remote --cwd /absolute/project/path --mubit
 
 # inspect and query

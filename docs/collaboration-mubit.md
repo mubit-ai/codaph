@@ -1,15 +1,15 @@
-# MuBit Collaboration
+# Mubit Collaboration
 
-This document explains how Codaph uses MuBit as a shared memory backend across contributors on the same project.
+This document explains how Codaph uses Mubit as a shared memory backend across contributors on the same project.
 
 ## Collaboration Model
 
 Codaph combines two stores:
 
-- MuBit stores shared cross-contributor memory.
+- Mubit stores shared cross-contributor memory.
 - Local `.codaph` mirror stores deterministic timeline and diff read models.
 
-Each contributor writes events with actor metadata to the same MuBit project scope.
+Each contributor writes events with actor metadata to the same Mubit project scope.
 Each contributor then syncs remote activity into their local mirror to inspect shared history.
 
 ## Identity Resolution
@@ -79,14 +79,14 @@ export CODAPH_MUBIT_RUN_SCOPE=project
 ## Operational Flow
 
 1. Contributor uses Codex normally.
-2. Codaph `sync` imports local sessions and writes canonical events to MuBit.
+2. Codaph `sync` imports local sessions and writes canonical events to Mubit.
 3. Codaph writes `codaph_event` activity entries for remote replay.
-4. Other contributors run `sync remote` to import remote MuBit activity into local mirror.
+4. Other contributors run `sync remote` to import remote Mubit activity into local mirror.
 5. TUI shows contributor-attributed prompts, thoughts, and file changes.
 
 ## Commands
 
-Local ingest + MuBit write:
+Local ingest + Mubit write:
 
 ```bash
 bun run cli sync --cwd /absolute/project/path --mubit
@@ -124,6 +124,6 @@ This metadata powers per-contributor views and actor filters.
 
 ## Current Limits
 
-- Remote replay currently imports events from MuBit activity entries with type `codaph_event`.
-- Query service does not yet merge semantic MuBit context directly into timeline rows.
+- Remote replay currently imports events from Mubit activity entries with type `codaph_event`.
+- Query service does not yet merge semantic Mubit context directly into timeline rows.
 - Local mirror encryption-at-rest is not yet implemented.

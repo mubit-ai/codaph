@@ -1,6 +1,6 @@
 # TUI Guide
 
-Codaph TUI is the fastest workflow for browsing sessions, investigating prompt-to-diff history, and querying MuBit in context.
+Codaph TUI is the fastest workflow for browsing sessions, investigating prompt-to-diff history, and querying Mubit in context.
 
 ## Start TUI
 
@@ -19,7 +19,7 @@ Browse view lists sessions with counts and status.
 Use it to:
 
 - sync local Codex history (`s`)
-- sync remote MuBit timeline (`r`)
+- sync remote Mubit timeline (`r`)
 - add/switch projects (`a` / `p`)
 - open settings (`o`)
 - inspect a session (`enter`)
@@ -32,7 +32,7 @@ Inspect view renders structured panes:
 - thoughts
 - files changed
 - diff
-- optional MuBit chat panel
+- optional Mubit chat panel
 
 Inspect supports actor filtering and contributor overlay for collaborative analysis.
 
@@ -48,9 +48,9 @@ Press `o` to open settings.
 You can set:
 
 - project name override
-- MuBit project id override
+- Mubit project id override
 - global actor id
-- global MuBit key
+- global Mubit key
 - global OpenAI key
 - auto-fill from git/GitHub
 - run scope toggle (`project`/`session`)
@@ -68,7 +68,7 @@ Browse:
 - `up/down` select session
 - `enter` inspect selected session
 - `s` sync local Codex history
-- `r` sync remote MuBit timeline
+- `r` sync remote Mubit timeline
 - `p` switch project
 - `a` add project
 
@@ -78,7 +78,7 @@ Inspect:
 - `tab` cycle focused pane
 - `enter` move prompt focus into thoughts navigation
 - `d` open full diff
-- `m` open/close MuBit chat
+- `m` open/close Mubit chat
 - `f` cycle actor filter
 - `c` open contributor overlay
 - `left` or `esc` go back to browse
@@ -98,7 +98,7 @@ Chat:
 
 1. Open TUI in project root.
 2. Run `s` to import latest local Codex sessions.
-3. Run `r` to pull shared MuBit activity from collaborators.
+3. Run `r` to pull shared Mubit activity from collaborators.
 4. Open active session with `enter`.
 5. Use `c` to inspect contributor list and choose one.
 6. Use `f` to cycle actor filter quickly.

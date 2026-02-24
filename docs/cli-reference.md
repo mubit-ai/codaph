@@ -13,7 +13,7 @@ Core command groups:
 - Capture: `run`, `exec`
 - Sync: `sync`, `sync remote`
 - Read: `sessions list`, `timeline`, `diff`, `inspect`
-- MuBit: `mubit query`, `mubit backfill`
+- Mubit: `mubit query`, `mubit backfill`
 - Project registry: `projects list|add|remove`
 - Diagnostics: `doctor`
 - TUI launcher: `tui`
@@ -45,7 +45,7 @@ bun run cli sync --cwd /absolute/project/path --mubit
 ```
 
 Imports local Codex history from `~/.codex/sessions`.
-Writes to local mirror and MuBit when enabled.
+Writes to local mirror and Mubit when enabled.
 
 `sync remote`
 
@@ -53,7 +53,7 @@ Writes to local mirror and MuBit when enabled.
 bun run cli sync remote --cwd /absolute/project/path --mubit --limit 1200
 ```
 
-Imports remote MuBit timeline activity into local mirror for collaborator visibility.
+Imports remote Mubit timeline activity into local mirror for collaborator visibility.
 
 ## Read Commands
 
@@ -81,7 +81,7 @@ bun run cli diff --session <session-id> --cwd /absolute/project/path
 bun run cli inspect --session <session-id> --cwd /absolute/project/path
 ```
 
-## MuBit Query Command
+## Mubit Query Command
 
 ```bash
 bun run cli mubit query "why did this file change?" --session <session-id> --cwd /absolute/project/path --mubit
@@ -89,9 +89,9 @@ bun run cli mubit query "why did this file change?" --session <session-id> --cwd
 
 Options:
 
-- `--limit <n>` controls MuBit evidence size.
-- `--raw` prints raw MuBit response JSON.
-- `--no-agent` disables OpenAI synthesis and prints MuBit-native output.
+- `--limit <n>` controls Mubit evidence size.
+- `--raw` prints raw Mubit response JSON.
+- `--no-agent` disables OpenAI synthesis and prints Mubit-native output.
 
 ## Diagnostic Command
 
@@ -102,7 +102,7 @@ bun run cli doctor --cwd /absolute/project/path --mubit
 Use this first when runtime behavior is unclear.
 It prints resolved project id, actor id, run scope, key detection, and enable state.
 
-## MuBit Flags
+## Mubit Flags
 
 - `--mubit` / `--no-mubit`
 - `--mubit-api-key <key>`
@@ -136,4 +136,4 @@ It prints resolved project id, actor id, run scope, key detection, and enable st
 ## Exit Behavior
 
 - `0` on successful command completion.
-- Non-zero on failures such as missing required flags, missing MuBit auth, or query/sync runtime errors.
+- Non-zero on failures such as missing required flags, missing Mubit auth, or query/sync runtime errors.

@@ -326,7 +326,7 @@ export async function syncMubitRemoteActivity(options: MubitRemoteSyncOptions): 
   ) {
     suspectedServerCap = true;
     diagnosticNote =
-      `MuBit snapshot appears capped (received ${timeline.length} despite requested ${requestedTimelineLimit}); Codaph is deduping locally. This is a snapshot API limitation, not a local sync error.`;
+      `Mubit snapshot appears capped (received ${timeline.length} despite requested ${requestedTimelineLimit}); Codaph is deduping locally. This is a snapshot API limitation, not a local sync error.`;
   }
 
   let imported = 0;

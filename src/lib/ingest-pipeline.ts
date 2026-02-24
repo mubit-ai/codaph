@@ -87,7 +87,7 @@ export class IngestPipeline {
 
     try {
       const timeoutMs = this.options.memoryWriteTimeoutMs ?? 15000;
-      await withTimeout(this.options.memoryEngine.writeEvent(event), timeoutMs, "MuBit write");
+      await withTimeout(this.options.memoryEngine.writeEvent(event), timeoutMs, "Mubit write");
       this.consecutiveMemoryErrors = 0;
     } catch (error) {
       this.consecutiveMemoryErrors += 1;
@@ -96,7 +96,7 @@ export class IngestPipeline {
         this.memoryCircuitOpen = true;
         if (this.options.onMemoryError) {
           this.options.onMemoryError(
-            new Error(`MuBit write circuit opened after ${this.consecutiveMemoryErrors} consecutive errors`),
+            new Error(`Mubit write circuit opened after ${this.consecutiveMemoryErrors} consecutive errors`),
             event,
           );
         }

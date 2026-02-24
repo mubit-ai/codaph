@@ -2,12 +2,12 @@
 
 This page covers common Codaph issues and fast recovery steps.
 
-## MuBit Shows Disabled
+## Mubit Shows Disabled
 
 Symptoms:
 
-- TUI header shows `MuBit:off`
-- MuBit commands return disabled message
+- TUI header shows `Mubit:off`
+- Mubit commands return disabled message
 
 Checks:
 
@@ -19,7 +19,7 @@ Fixes:
 
 - Ensure `MUBIT_API_KEY` is set in shell or root `.env`.
 - Run commands from repo root so Bun loads root `.env`.
-- Verify `--mubit` is present when forcing MuBit mode.
+- Verify `--mubit` is present when forcing Mubit mode.
 - Set key in TUI settings (`o`) if you prefer saved settings.
 
 ## `sync` Appears Stuck
@@ -33,7 +33,7 @@ Fixes:
 
 - Re-run with local-only to isolate network impact:
   `bun run cli sync --cwd /absolute/project/path --no-mubit`
-- Then enable MuBit and retry:
+- Then enable Mubit and retry:
   `bun run cli sync --cwd /absolute/project/path --mubit`
 - Check sync diagnostics (automation + remote snapshot state):
   `bun run cli sync status --cwd /absolute/project/path --json`
@@ -42,7 +42,7 @@ Fixes:
 
 Notes:
 
-- Codaph uses dedupe-first ingest and a MuBit write circuit-breaker to prevent repeated blocking failures.
+- Codaph uses dedupe-first ingest and a Mubit write circuit-breaker to prevent repeated blocking failures.
 
 ## No Collaborator Prompts or Diffs
 
@@ -59,7 +59,7 @@ Fixes:
 3. Run `s` (sync now) in TUI. Use `r` only as a manual cloud-pull fallback.
 4. Confirm run scope is `project` in settings overlay.
 
-## MuBit Query Returns No Useful Answer
+## Mubit Query Returns No Useful Answer
 
 Symptoms:
 
@@ -149,4 +149,4 @@ bun run cli sync --cwd /absolute/project/path --mubit
 bun run cli sync remote --cwd /absolute/project/path --mubit
 ```
 
-This does not delete MuBit remote memory.
+This does not delete Mubit remote memory.

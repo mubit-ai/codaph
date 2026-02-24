@@ -1,6 +1,6 @@
 # Codaph Documentation
 
-Codaph captures Codex activity, stores structured memory in MuBit, and renders inspectable timelines and diffs in a CLI/TUI-first workflow.
+Codaph captures Codex activity, stores structured memory in Mubit, and renders inspectable timelines and diffs in a CLI/TUI-first workflow.
 
 This folder gives you the operational and technical docs to run Codaph in solo and team modes.
 
@@ -9,7 +9,7 @@ This folder gives you the operational and technical docs to run Codaph in solo a
 1. Read [Quickstart](./quickstart.md).
 2. Run `bun run cli doctor`.
 3. Start `bun run tui`.
-4. Sync local Codex history with `s`, then sync shared MuBit activity with `r`.
+4. Sync local Codex history with `s`, then sync shared Mubit activity with `r`.
 
 ## Documentation Map
 
@@ -21,7 +21,7 @@ This folder gives you the operational and technical docs to run Codaph in solo a
   Commands, flags, and examples.
 - [TUI Guide](./tui-guide.md)
   Views, keyboard controls, and workflows.
-- [MuBit Collaboration](./collaboration-mubit.md)
+- [Mubit Collaboration](./collaboration-mubit.md)
   Shared project memory model and contributor attribution.
 - [Architecture](./architecture.md)
   Package-level design and data flow.
@@ -34,9 +34,9 @@ This folder gives you the operational and technical docs to run Codaph in solo a
 
 ## Current Product Status
 
-Codaph Phase 1A is operational for Codex-first ingestion and collaborative MuBit-backed memory.
+Codaph Phase 1A is operational for Codex-first ingestion and collaborative Mubit-backed memory.
 
 - Codex history ingestion is available through local session sync.
-- MuBit writes and semantic queries are available.
-- Remote MuBit timeline import is available.
+- Mubit writes and semantic queries are available.
+- Remote Mubit timeline import is available.
 - TUI supports actor filtering and contributor overlay.

@@ -592,3 +592,13 @@ Do not rewrite history; append a new snapshot each run.
 - unstaged: 0
 - untracked: 0
 - files: src/codex-local-push-state.ts, src/index.ts
+
+## Status Snapshot — 2026-02-24T10:09:14.172Z
+- source: pre-commit
+- repo: /Users/anilp/Code/codaph
+- branch: optimisation
+- head: 5b3f61a
+- staged: 17
+- unstaged: 0
+- untracked: 0
+- files: README.md, docs/README.md, docs/architecture.md, docs/cli-reference.md, docs/collaboration-mubit.md, docs/data-model.md, docs/mubit-integration-todo.md, docs/one-page-cli-tui.md, docs/quickstart.md, docs/roadmap.md, docs/troubleshooting.md, docs/tui-guide.md, src/index.ts, src/lib/ingest-pipeline.ts, src/lib/memory-mubit.ts, src/lib/query-service.ts, src/mubit-remote-sync.ts

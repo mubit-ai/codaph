@@ -111,7 +111,7 @@ export class QueryService {
     }
 
     const events = await readEventsFromSegments(this.rootDir, segments);
-    // TODO(MUBIT): merge semantic context from MuBit query results here.
+    // TODO(MUBIT): merge semantic context from Mubit query results here.
     return filterEvents(events, filter);
   }
 

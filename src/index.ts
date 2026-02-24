@@ -1,7 +1,8 @@
 #!/usr/bin/env bun
 import { createInterface, emitKeypressEvents } from "node:readline";
 import { stdin as input, stdout as output } from "node:process";
-import { basename, isAbsolute, relative, resolve } from "node:path";
+import { mkdir, writeFile } from "node:fs/promises";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import type { CapturedEventEnvelope } from "./lib/core-types";
 import { repoIdFromPath } from "./lib/core-types";
@@ -59,6 +60,22 @@ import {
 
 type Flags = Record<string, string | boolean>;
 type CaptureMode = "run" | "exec";
+
+interface CodaphProjectFile {
+  schema: "codaph.project.v1";
+  projectPath: string;
+  repoId: string;
+  projectLabel: string;
+  mubitProjectId: string | null;
+  mubitRunScope: MubitRunScope;
+  syncAutomation: {
+    enabled: boolean;
+    gitPostCommit: boolean;
+    agentComplete: boolean;
+  };
+  createdAt: string;
+  updatedAt: string;
+}
 
 function parseArgs(args: string[]): { positionals: string[]; flags: Flags } {
   const positionals: string[] = [];
@@ -119,58 +136,29 @@ function getBooleanFlag(flags: Flags, key: string, fallback: boolean): boolean {
 
 function help(): string {
   return [
-    "Codaph CLI/TUI (Codex-first, MuBit-enabled)",
+    "Codaph CLI/TUI (Mubit-first project memory)",
     "",
-    "Capture:",
-    "  codaph run \"<prompt>\" [--model <name>] [--cwd <path>] [--resume-thread <id>]",
-    "  codaph exec \"<prompt>\" [--model <name>] [--cwd <path>] [--resume-thread <id>]",
+    "Onboarding:",
+    "  codaph setup [--mubit-api-key <key>] [--mubit-actor-id <id>] [--json]",
+    "  codaph init [--cwd <path>] [--yes] [--force] [--no-auto-sync] [--json]",
     "",
-    "History Import (from ~/.codex/sessions):",
-    "  codaph sync [--cwd <path>] [--json] [--no-mubit|--local-only]",
-    "  codaph sync all [--cwd <path>] [--json]",
-    "  codaph sync push [--cwd <path>] [--json] [--local-only]",
-    "  codaph sync pull [--cwd <path>] [--timeline-limit <n>] [--refresh|--no-refresh] [--json]",
-    "  codaph sync remote [--cwd <path>] [--limit <n>] [--json]  (alias for sync pull)",
-    "  codaph sync status [--cwd <path>] [--json]",
-    "  codaph sync setup [--cwd <path>] [--yes] [--force]  (install auto-sync hooks/onboarding)",
+    "Daily Use:",
+    "  codaph sync [--cwd <path>] [--json]           (fast Mubit-first sync)",
+    "  codaph status [--cwd <path>] [--json]         (repo sync + automation status)",
+    "  codaph tui [--cwd <path>]",
     "",
-    "Read / Inspect:",
-    "  codaph sessions list [--cwd <path>]",
-    "  codaph timeline --session <id> [--cwd <path>] [--json]",
-    "  codaph diff --session <id> [--path <file>] [--cwd <path>]",
-    "  codaph inspect --session <id> [--cwd <path>]",
+    "Optional Backfill:",
+    "  codaph import [--cwd <path>] [--json] [--local-only]",
+    "    Replays historical Codex sessions from ~/.codex/sessions into Codaph + Mubit.",
     "",
-    "MuBit:",
-    "  codaph mubit query \"<question>\" --session <id> [--cwd <path>] [--limit <n>]",
-    "    --raw to print full JSON response, --no-agent to skip OpenAI synthesis",
-    "  codaph mubit backfill [--cwd <path>] [--session <id>] [--verbose]",
+    "Advanced / Compatibility (still supported):",
+    "  codaph sync pull|status|setup ...",
+    "  codaph sync push ...      (compat alias for `codaph import`)",
+    "  codaph run|exec ...       (Codex capture wrappers)",
+    "  codaph sessions|timeline|diff|inspect ...",
+    "  codaph doctor, codaph hooks run ..., codaph mubit query ...",
     "",
-    "Projects (global registry for TUI):",
-    "  codaph projects list",
-    "  codaph projects add --cwd <path>",
-    "  codaph projects remove --cwd <path>",
-    "",
-    "Interactive TUI:",
-    "  codaph tui [--cwd <path>] [--mubit|--no-mubit]",
-    "  codaph doctor [--mubit|--no-mubit]",
-    "",
-    "MuBit flags:",
-    "  --mubit / --no-mubit",
-    "  --mubit-api-key <key>      (preferred: set MUBIT_API_KEY env var)",
-    "  --mubit-transport <auto|http|grpc>",
-    "  --mubit-endpoint <url>",
-    "  --mubit-http-endpoint <url>",
-    "  --mubit-grpc-endpoint <host:port>",
-    "  --mubit-agent-id <id>",
-    "  --mubit-project-id <shared-project-id> (or CODAPH_PROJECT_ID; auto from git origin owner/repo)",
-    "  --mubit-run-scope <session|project>    (default: project when a project id is resolved, else session)",
-    "  --mubit-actor-id <contributor-id>      (or CODAPH_ACTOR_ID; auto from gh/git config)",
-    "  --mubit-write-timeout-ms <ms> (default 15000, set 0 to disable timeout)",
-    "",
-    "OpenAI agent flags:",
-    "  --agent / --no-agent",
-    "  --openai-api-key <key>     (preferred: set OPENAI_API_KEY env var)",
-    "  --openai-model <model>",
+    "Tip: run `codaph init`, then `codaph sync` and `codaph tui`.",
   ].join("\n");
 }
 
@@ -364,15 +352,15 @@ async function doctor(rest: string[]): Promise<void> {
 
   console.log(`cwd: ${cwd}`);
   console.log(`repoId(local): ${repoId}`);
-  console.log(`MuBit project id: ${projectId ?? "(not set, uses local repoId)"}`);
-  console.log(`MuBit run scope: ${runScope}`);
-  console.log(`MuBit actor id: ${actorId ?? "(not set)"}`);
+  console.log(`Mubit project id: ${projectId ?? "(not set, uses local repoId)"}`);
+  console.log(`Mubit run scope: ${runScope}`);
+  console.log(`Mubit actor id: ${actorId ?? "(not set)"}`);
   console.log(`env MUBIT_API_KEY present: ${envKeyPresent ? "yes" : "no"}`);
   console.log(`flag/env key resolved: ${keyPresent ? "yes" : "no"}`);
-  console.log(`MuBit requested: ${requested ? "yes" : "no"}`);
-  console.log(`MuBit runtime: ${memory?.isEnabled() ? "enabled" : "disabled"}`);
-  console.log(`MuBit run scope preview: ${mubitRunIdForContext(flags, repoId, "session-preview", cwd, settings)}`);
-  console.log(`MuBit write timeout: ${resolveMubitWriteTimeoutMs(flags)}ms`);
+  console.log(`Mubit requested: ${requested ? "yes" : "no"}`);
+  console.log(`Mubit runtime: ${memory?.isEnabled() ? "enabled" : "disabled"}`);
+  console.log(`Mubit run scope preview: ${mubitRunIdForContext(flags, repoId, "session-preview", cwd, settings)}`);
+  console.log(`Mubit write timeout: ${resolveMubitWriteTimeoutMs(flags)}ms`);
   console.log(
     `Sync automation: ${auto.enabled ? "enabled" : "disabled"} (post-commit:${auto.gitPostCommit ? "on" : "off"}, agent-complete:${auto.agentComplete ? "on" : "off"}, autoPull:${auto.autoPullOnSync ? "on" : "off"}, tuiWarm:${auto.autoWarmTuiOnOpen ? "on" : "off"}, cooldown=${auto.remotePullCooldownSec}s)`,
   );
@@ -390,11 +378,11 @@ async function doctor(rest: string[]): Promise<void> {
   console.log(`OpenAI agent: ${agentEnabled ? "enabled" : "disabled"}`);
 
   if (!requested) {
-    console.log("Reason: MuBit was not requested (use --mubit to force-enable).");
+    console.log("Reason: Mubit was not requested (use --mubit to force-enable).");
   } else if (!keyPresent) {
-    console.log("Reason: no MuBit key resolved.");
+    console.log("Reason: no Mubit key resolved.");
   } else {
-    console.log("MuBit setup looks valid from env/flags.");
+    console.log("Mubit setup looks valid from env/flags.");
   }
 }
 
@@ -422,7 +410,7 @@ function createPipeline(
     defaultActorId,
     onMemoryError: (error) => {
       const message = error instanceof Error ? error.message : String(error);
-      console.warn(`MuBit write failed: ${message}`);
+      console.warn(`Mubit write failed: ${message}`);
     },
   });
   return { pipeline, memory, mirror };
@@ -560,6 +548,8 @@ interface SyncPullPhaseSkipped {
   reason: string;
 }
 
+type SyncPushMode = "queue" | "history";
+
 type SyncPullPhaseOutcome = SyncPullPhaseResult | SyncPullPhaseSkipped;
 
 interface SyncWorkflowSummary {
@@ -595,12 +585,73 @@ function isSyncPushPhaseSkipped(
   return (value as { skipped?: boolean }).skipped === true;
 }
 
+async function runSyncQueuePushPhase(options: {
+  cwd: string;
+  flags: Flags;
+  settings: CodaphSettings;
+}): Promise<{ skipped: true; reason: string }> {
+  const repoId = resolveRepoIdForProject(options.flags, options.cwd, options.settings);
+  const localPush = await maybeReadLocalPushStateForProject(options.cwd, repoId).catch(() => null);
+  if (!localPush?.lastSuccessAt) {
+    return {
+      skipped: true,
+      reason: "No repo-local push queue. Use `codaph import` once to backfill Codex history into Mubit.",
+    };
+  }
+  return {
+    skipped: true,
+    reason: "No repo-local push queue pending (captures write to Mubit inline).",
+  };
+}
+
 function resolveMirrorRoot(cwd: string): string {
   return resolve(cwd, ".codaph");
 }
 
 function resolveRemoteSyncStatePath(cwd: string, repoId: string): string {
   return getMubitRemoteSyncStatePath(resolveMirrorRoot(cwd), repoId);
+}
+
+function resolveLocalProjectConfigPath(cwd: string): string {
+  return join(resolveMirrorRoot(cwd), "project.json");
+}
+
+function resolveGitRepoRootOrCwd(cwd: string): string {
+  try {
+    return execFileSync("git", ["rev-parse", "--show-toplevel"], {
+      cwd,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim() || cwd;
+  } catch {
+    return cwd;
+  }
+}
+
+async function writeLocalProjectConfigSnapshot(cwd: string, flags: Flags, settings: CodaphSettings): Promise<string> {
+  const projectPath = resolve(cwd);
+  const repoId = resolveRepoIdForProject(flags, projectPath, settings);
+  const automation = resolveSyncAutomationConfig(settings, projectPath);
+  const payload: CodaphProjectFile = {
+    schema: "codaph.project.v1",
+    projectPath,
+    repoId,
+    projectLabel: resolveProjectLabel(flags, projectPath, settings),
+    mubitProjectId: resolveMubitProjectId(flags, projectPath, settings),
+    mubitRunScope: resolveMubitRunScope(flags, projectPath, settings),
+    syncAutomation: {
+      enabled: automation.enabled,
+      gitPostCommit: automation.gitPostCommit,
+      agentComplete: automation.agentComplete,
+    },
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+
+  const path = resolveLocalProjectConfigPath(projectPath);
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+  return path;
 }
 
 function resolveLocalPushStatePath(cwd: string, repoId: string): string {
@@ -694,6 +745,15 @@ function isInteractiveTerminal(): boolean {
   return Boolean(input.isTTY && output.isTTY);
 }
 
+async function promptInput(question: string): Promise<string> {
+  const rl = createInterface({ input, output });
+  try {
+    return await new Promise<string>((resolve) => rl.question(`${question} `, resolve));
+  } finally {
+    rl.close();
+  }
+}
+
 async function promptYesNo(question: string): Promise<boolean> {
   const rl = createInterface({ input, output });
   try {
@@ -703,6 +763,60 @@ async function promptYesNo(question: string): Promise<boolean> {
   } finally {
     rl.close();
   }
+}
+
+async function maybePromptForMubitApiKeyDuringInit(
+  cwd: string,
+  flags: Flags,
+  settings: CodaphSettings,
+): Promise<CodaphSettings> {
+  if (resolveMubitApiKey(flags, settings)) {
+    return settings;
+  }
+
+  if (flags.json === true || getBooleanFlag(flags, "yes", false) || !isInteractiveTerminal()) {
+    return settings;
+  }
+
+  console.log("Mubit API key not found.");
+  console.log("Codaph is Mubit-first. Without a Mubit API key, cloud sync/shared memory are disabled.");
+  console.log("Get one from: https://console.mubit.ai");
+
+  let entered = "";
+  for (;;) {
+    entered = (await promptInput("Paste Mubit API key (or type 'skip' for local-only):")).trim();
+    const normalized = entered.toLowerCase();
+    if (entered.length > 0 && normalized !== "skip") {
+      break;
+    }
+    if (normalized === "skip") {
+      const confirmSkip = await promptYesNo(
+        "Continue without Mubit cloud sync? (`codaph sync` will stay local until you add a key)",
+      );
+      if (confirmSkip) {
+        console.log("Continuing local-only. Add a key later with `codaph setup --mubit-api-key <key>`.");
+        return settings;
+      }
+      continue;
+    }
+    console.log("Mubit API key is recommended for Codaph setup. Paste a key, or type `skip` to continue local-only.");
+  }
+
+  const next = updateGlobalSettings(settings, { mubitApiKey: entered });
+  saveCodaphSettings(next);
+  console.log("Saved Mubit API key to ~/.codaph/settings.json");
+
+  if (!next.mubitActorId) {
+    const actor = detectGitHubDefaults(cwd).actorId ?? resolveMubitActorId(flags, cwd, next);
+    if (actor) {
+      const withActor = updateGlobalSettings(next, { mubitActorId: actor });
+      saveCodaphSettings(withActor);
+      console.log(`Detected actor id: ${actor}`);
+      return withActor;
+    }
+  }
+
+  return next;
 }
 
 function resolveTimelineLimit(flags: Flags, fallback = 1200): number {
@@ -775,9 +889,9 @@ async function runSyncPullPhase(options: {
   const engine = createMubitMemory(flags, cwd, settings);
   if (!engine || !engine.isEnabled()) {
     if (requireMubit) {
-      throw new Error("MuBit is disabled. Set MUBIT_API_KEY (or MUBIT_APIKEY) and use --mubit.");
+      throw new Error("Mubit is disabled. Set MUBIT_API_KEY (or MUBIT_APIKEY) and use --mubit.");
     }
-    return { skipped: true, reason: "MuBit is disabled or not configured." };
+    return { skipped: true, reason: "Mubit is disabled or not configured." };
   }
 
   const mirror = new JsonlMirror(resolveMirrorRoot(cwd), {
@@ -813,6 +927,9 @@ async function runSyncPullPhase(options: {
 
 function formatPushPhaseLine(result: SyncPushPhaseResult | { skipped: true; reason: string }): string {
   if (isSyncPushPhaseSkipped(result)) {
+    if (result.reason.includes("No repo-local push queue")) {
+      return `Push (local->cloud): no queued local uploads (fast path). Use \`codaph import\` for Codex history backfill.`;
+    }
     return `Push (local->cloud): skipped (${result.reason})`;
   }
   const { summary } = result;
@@ -822,7 +939,7 @@ function formatPushPhaseLine(result: SyncPushPhaseResult | { skipped: true; reas
   if (summary.importedEvents === 0) {
     return `Push (local->cloud): no new local events for this repo (matched files=${summary.matchedFiles}/${summary.scannedFiles}, sessions=${summary.importedSessions}).`;
   }
-  return `Push (local->cloud): local events imported=${summary.importedEvents}, files=${summary.matchedFiles}/${summary.scannedFiles}, sessions=${summary.importedSessions}, MuBit=${result.mubitEnabled ? "on" : result.mubitRequested ? "requested-unavailable" : "off"}`;
+  return `Push (local->cloud): local events imported=${summary.importedEvents}, files=${summary.matchedFiles}/${summary.scannedFiles}, sessions=${summary.importedSessions}, Mubit=${result.mubitEnabled ? "on" : result.mubitRequested ? "requested-unavailable" : "off"}`;
 }
 
 function formatPullPhaseLine(result: SyncPullPhaseOutcome): string {
@@ -875,9 +992,9 @@ async function runCapture(command: CaptureMode, rest: string[]): Promise<void> {
   console.log(`sessionId: ${result.sessionId}`);
   console.log(`threadId: ${result.threadId ?? "(none)"}`);
   if (memory?.isEnabled()) {
-    console.log("MuBit: enabled");
+    console.log("Mubit: enabled");
   } else {
-    console.log("MuBit: disabled (set MUBIT_API_KEY or pass --mubit-api-key)");
+    console.log("Mubit: disabled (set MUBIT_API_KEY or pass --mubit-api-key)");
   }
   if (result.finalResponse) {
     console.log("\nfinalResponse:\n");
@@ -1074,6 +1191,7 @@ async function maybeOfferSyncAutomationSetup(
 
 async function runSyncWorkflow(options: {
   mode: "all" | "push" | "pull";
+  pushMode?: SyncPushMode;
   cwd: string;
   flags: Flags;
   settings: CodaphSettings;
@@ -1085,6 +1203,7 @@ async function runSyncWorkflow(options: {
 }): Promise<SyncWorkflowSummary> {
   const startedAt = new Date().toISOString();
   const { mode, cwd, flags, settings, triggerSource } = options;
+  const pushMode = options.pushMode ?? "queue";
   const hookMode = options.hookMode === true;
   const quiet = options.quiet === true;
   const repoId = resolveRepoIdForProject(flags, cwd, settings);
@@ -1128,9 +1247,13 @@ async function runSyncWorkflow(options: {
       pushOutcome = { skipped: true, reason: "Push phase not requested." };
     } else {
       try {
-        const push = await runSyncPushPhase({ cwd, flags, settings, onProgress: options.onPushProgress });
-        await persistLocalPushSuccessState(cwd, push, triggerSource).catch(() => {});
-        pushOutcome = { ...push } as SyncPushPhaseResult;
+        if (pushMode === "queue") {
+          pushOutcome = await runSyncQueuePushPhase({ cwd, flags, settings });
+        } else {
+          const push = await runSyncPushPhase({ cwd, flags, settings, onProgress: options.onPushProgress });
+          await persistLocalPushSuccessState(cwd, push, triggerSource).catch(() => {});
+          pushOutcome = { ...push } as SyncPushPhaseResult;
+        }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         await persistLocalPushErrorState(cwd, repoId, triggerSource, message).catch(() => {});
@@ -1143,7 +1266,8 @@ async function runSyncWorkflow(options: {
       pullOutcome = { skipped: true, reason: "Pull phase not requested." };
     } else {
       const remoteState = await maybeReadRemoteSyncStateForProject(cwd, repoId).catch(() => null);
-      const isCooldownSensitive = triggerSource === "hook-agent-complete" || triggerSource === "tui-startup";
+      const isCooldownSensitive =
+        triggerSource === "hook-agent-complete" || triggerSource === "hook-post-commit" || triggerSource === "tui-startup";
       const cooldownBlocks =
         mode === "all" &&
         isCooldownSensitive &&
@@ -1227,12 +1351,18 @@ function printSyncWorkflowSummary(summary: SyncWorkflowSummary): void {
   console.log(
     `Automation: ${summary.automation.enabled ? "enabled" : "off"} (post-commit:${summary.automation.gitPostCommit ? "on" : "off"}, agent-complete:${summary.automation.agentComplete ? "on" : "off"})`,
   );
+  const pushNoQueue =
+    isSyncPushPhaseSkipped(summary.push) && summary.push.reason.includes("No repo-local push queue");
+  if (summary.mode === "all" && pushNoQueue) {
+    console.log("Fast sync: Mubit-first remote pull + repo-local queue (no global Codex history replay).");
+    console.log("Backfill history: run `codaph import` (one-time/occasional).");
+  }
   if (!summary.automation.enabled) {
     console.log("Tip: run `codaph sync setup` to enable auto-sync hooks for this repo.");
   }
 }
 
-async function syncPushCommand(rest: string[]): Promise<void> {
+async function importCommand(rest: string[]): Promise<void> {
   const { flags } = parseArgs(rest);
   const cwd = resolve(getStringFlag(flags, "cwd") ?? process.cwd());
   const settings = loadCodaphSettings();
@@ -1265,13 +1395,22 @@ async function syncPushCommand(rest: string[]): Promise<void> {
     return;
   }
   console.log(formatPushPhaseLine(result));
+  console.log("Import complete. Daily `codaph sync` no longer replays Codex history by default.");
+}
+
+async function syncPushCommand(rest: string[]): Promise<void> {
+  const { flags } = parseArgs(rest);
+  if (flags.json !== true) {
+    console.log("Note: `codaph sync push` is a compatibility alias for `codaph import` (Codex history backfill).");
+  }
+  await importCommand(rest);
 }
 
 async function syncPullCommand(rest: string[]): Promise<void> {
   const { flags } = parseArgs(rest);
   const cwd = resolve(getStringFlag(flags, "cwd") ?? process.cwd());
   const settings = loadCodaphSettings();
-  const reporter = createSyncProgressReporter("Syncing MuBit remote");
+  const reporter = createSyncProgressReporter("Syncing Mubit remote");
   if (flags.json !== true) {
     reporter.start();
   }
@@ -1356,9 +1495,13 @@ async function syncStatus(rest: string[]): Promise<void> {
     if (localPushState.lastError) {
       console.log(`Local push last error: ${localPushState.lastError}`);
     }
+    if (!localPushState.lastSuccessAt) {
+      console.log("Backfill: run `codaph import` if you want historical Codex sessions in Mubit.");
+    }
   }
   if (!remoteState) {
     console.log("Remote sync state: none");
+    console.log("Fast sync note: `codaph sync` now skips Codex history replay; use `codaph import` for backfill.");
     return;
   }
   console.log(
@@ -1411,21 +1554,185 @@ async function syncSetupCommand(rest: string[]): Promise<void> {
   await maybeOfferSyncAutomationSetup(cwd, setupFlags, settings, "all");
 }
 
+async function setupCommand(rest: string[]): Promise<void> {
+  const { flags } = parseArgs(rest);
+  let settings = loadCodaphSettings();
+  const cwd = resolve(getStringFlag(flags, "cwd") ?? process.cwd());
+  let changed = false;
+
+  const mubitApiKey = getStringFlag(flags, "mubit-api-key");
+  const openAiApiKey = getStringFlag(flags, "openai-api-key");
+  let mubitActorId: string | undefined = getStringFlag(flags, "mubit-actor-id");
+  if (!mubitActorId && getBooleanFlag(flags, "yes", false) && !settings.mubitActorId) {
+    mubitActorId = detectGitHubDefaults(cwd).actorId ?? resolveMubitActorId(flags, cwd, settings) ?? undefined;
+  }
+
+  if (mubitApiKey !== undefined || openAiApiKey !== undefined || mubitActorId !== undefined) {
+    settings = updateGlobalSettings(settings, {
+      mubitApiKey: mubitApiKey ?? settings.mubitApiKey ?? null,
+      openAiApiKey: openAiApiKey ?? settings.openAiApiKey ?? null,
+      mubitActorId: mubitActorId ?? settings.mubitActorId ?? null,
+    });
+    saveCodaphSettings(settings);
+    changed = true;
+  }
+
+  const effectiveMubitKey = resolveMubitApiKey(flags, settings);
+  const effectiveActor = resolveMubitActorId(flags, cwd, settings);
+  const payload = {
+    changed,
+    globalConfigPath: "~/.codaph/settings.json",
+    mubit: {
+      configured: effectiveMubitKey !== null,
+      actorId: effectiveActor,
+    },
+    openai: {
+      configured: resolveOpenAiApiKey(flags, settings) !== null,
+    },
+    next: {
+      init: "codaph init",
+    },
+  };
+
+  if (flags.json === true) {
+    console.log(JSON.stringify(payload, null, 2));
+    return;
+  }
+
+  console.log("Codaph setup (global)");
+  console.log(`Config: ${payload.globalConfigPath}`);
+  console.log(`Mubit: ${payload.mubit.configured ? "configured" : "missing API key"} | actor=${payload.mubit.actorId ?? "(auto-detect on use)"}`);
+  console.log(`OpenAI agent: ${payload.openai.configured ? "configured" : "off"}`);
+  if (!payload.mubit.configured) {
+    console.log("Set Mubit globally: `codaph setup --mubit-api-key <key>`");
+  }
+  console.log("Next: run `codaph init` inside a repo to create `.codaph/` and enable repo automation.");
+}
+
+async function initCommand(rest: string[]): Promise<void> {
+  const { flags } = parseArgs(rest);
+  const requestedCwd = resolve(getStringFlag(flags, "cwd") ?? process.cwd());
+  const cwd = resolveGitRepoRootOrCwd(requestedCwd);
+  let settings = loadCodaphSettings();
+  settings = await maybePromptForMubitApiKeyDuringInit(cwd, flags, settings);
+  const detected = detectGitHubDefaults(cwd);
+  const currentProject = getProjectSettings(settings, cwd);
+  const explicitName = getStringFlag(flags, "name");
+  const explicitProjectId = getStringFlag(flags, "mubit-project-id");
+  const explicitRunScopeRaw = getStringFlag(flags, "mubit-run-scope");
+  const explicitRunScope = explicitRunScopeRaw === "project" || explicitRunScopeRaw === "session" ? explicitRunScopeRaw : null;
+
+  const inferredProjectId = explicitProjectId ?? currentProject.mubitProjectId ?? detected.projectId ?? null;
+  const inferredRunScope: MubitRunScope =
+    explicitRunScope ?? currentProject.mubitRunScope ?? (inferredProjectId ? "project" : "session");
+
+  settings = updateProjectSettings(settings, cwd, {
+    projectName: explicitName ?? currentProject.projectName ?? basename(cwd),
+    mubitProjectId: inferredProjectId,
+    mubitRunScope: inferredRunScope,
+    syncAutomation: currentProject.syncAutomation ?? null,
+  });
+  if (!settings.mubitActorId && detected.actorId) {
+    settings = updateGlobalSettings(settings, { mubitActorId: detected.actorId });
+  }
+  saveCodaphSettings(settings);
+
+  await addProjectToRegistry(cwd);
+
+  let automationInstalled:
+    | {
+      gitPostCommit: boolean;
+      agentComplete: boolean;
+      partial: boolean;
+      warnings: string[];
+      manualSteps: string[];
+    }
+    | null = null;
+  const noAutoSync = getBooleanFlag(flags, "no-auto-sync", false);
+  const force = getBooleanFlag(flags, "force", false);
+  const auto = resolveSyncAutomationConfig(settings, cwd);
+  if (!noAutoSync && (!auto.enabled || force)) {
+    const enabled = await enableSyncAutomationForProject(cwd, settings);
+    settings = enabled.settings;
+    automationInstalled = enabled.installed;
+  }
+
+  const projectConfigPath = await writeLocalProjectConfigSnapshot(cwd, flags, settings);
+  const repoId = resolveRepoIdForProject(flags, cwd, settings);
+  const payload = {
+    cwd,
+    repoId,
+    projectConfigPath,
+    mubitConfigured: resolveMubitApiKey(flags, settings) !== null,
+    mubitProjectId: resolveMubitProjectId(flags, cwd, settings),
+    mubitRunScope: resolveMubitRunScope(flags, cwd, settings),
+    automation: resolveSyncAutomationConfig(settings, cwd),
+    automationInstall: automationInstalled,
+    recommendedNext: [
+      "codaph sync",
+      "codaph import (optional one-time Codex history backfill)",
+      "codaph tui",
+    ],
+  };
+
+  if (flags.json === true) {
+    console.log(JSON.stringify(payload, null, 2));
+    return;
+  }
+
+  console.log(`Initialized Codaph for ${cwd}`);
+  console.log(`Repo id: ${repoId}`);
+  console.log(`Mubit API: ${payload.mubitConfigured ? "configured" : "not configured (set with \`codaph setup --mubit-api-key <key>\` or rerun \`codaph init\`)"}`
+  );
+  console.log(`Mubit project: ${payload.mubitProjectId ?? "(auto-detect unavailable)"} | run scope: ${payload.mubitRunScope}`);
+  console.log(`Local project config: ${projectConfigPath}`);
+  const autoAfter = resolveSyncAutomationConfig(settings, cwd);
+  console.log(
+    `Auto-sync: ${autoAfter.enabled ? "enabled" : "off"} (post-commit:${autoAfter.gitPostCommit ? "on" : "off"}, agent-complete:${autoAfter.agentComplete ? "on" : "off"})`,
+  );
+  if (automationInstalled) {
+    for (const warning of automationInstalled.warnings) {
+      console.log(`Warning: ${warning}`);
+    }
+    for (const step of automationInstalled.manualSteps) {
+      console.log(step);
+    }
+  } else if (noAutoSync) {
+    console.log("Auto-sync install skipped (`--no-auto-sync`).");
+  }
+  console.log("Next:");
+  console.log("  1. `codaph sync` (fast Mubit-first sync)");
+  console.log("  2. `codaph import` (optional one-time Codex history backfill)");
+  console.log("  3. `codaph tui`");
+}
+
+async function statusCommand(rest: string[]): Promise<void> {
+  await syncStatus(rest);
+}
+
 async function syncCommand(rest: string[]): Promise<void> {
   const { flags } = parseArgs(rest);
   const cwd = resolve(getStringFlag(flags, "cwd") ?? process.cwd());
   const settings = loadCodaphSettings();
   const forcePushOnly = getBooleanFlag(flags, "local-only", false);
   const mode: "all" | "push" = forcePushOnly ? "push" : "all";
+  const pushMode: SyncPushMode = forcePushOnly ? "history" : "queue";
 
   const pushReporter = createSyncProgressReporter("Scanning Codex history");
-  const pullReporter = createSyncProgressReporter("Syncing MuBit remote");
+  const pullReporter = createSyncProgressReporter("Syncing Mubit remote");
   let pullReporterStarted = false;
+  const usePushReporter = pushMode === "history";
   if (flags.json !== true) {
-    pushReporter.start();
+    if (usePushReporter) {
+      pushReporter.start();
+    } else if (mode === "all") {
+      pullReporter.start();
+      pullReporterStarted = true;
+    }
   }
   const summary = await runSyncWorkflow({
     mode,
+    pushMode,
     cwd,
     flags,
     settings,
@@ -1436,7 +1743,9 @@ async function syncCommand(rest: string[]): Promise<void> {
         ? undefined
         : (progress) => {
           if (!pullReporterStarted) {
-            pushReporter.finish();
+            if (usePushReporter) {
+              pushReporter.finish();
+            }
             pullReporter.start();
             pullReporterStarted = true;
           }
@@ -1452,7 +1761,9 @@ async function syncCommand(rest: string[]): Promise<void> {
         },
   }).finally(() => {
     if (flags.json !== true) {
-      pushReporter.finish();
+      if (usePushReporter) {
+        pushReporter.finish();
+      }
       pullReporter.finish();
     }
   });
@@ -1462,7 +1773,10 @@ async function syncCommand(rest: string[]): Promise<void> {
     console.log(
       JSON.stringify(
         {
-          ...legacyPush?.summary,
+          scannedFiles: legacyPush?.summary.scannedFiles ?? 0,
+          matchedFiles: legacyPush?.summary.matchedFiles ?? 0,
+          importedEvents: legacyPush?.summary.importedEvents ?? 0,
+          importedSessions: legacyPush?.summary.importedSessions ?? 0,
           ...summary,
         },
         null,
@@ -1471,7 +1785,7 @@ async function syncCommand(rest: string[]): Promise<void> {
     );
   } else {
     if (forcePushOnly) {
-      console.log("Note: `--local-only` is a compatibility alias and will be deprecated. Prefer `codaph sync push`.");
+      console.log("Note: `--local-only` is a compatibility alias and will be deprecated. Prefer `codaph import`.");
     }
     printSyncWorkflowSummary(summary);
   }
@@ -1482,7 +1796,7 @@ async function syncCommand(rest: string[]): Promise<void> {
 }
 
 async function syncHistory(rest: string[]): Promise<void> {
-  await syncPushCommand(rest);
+  await importCommand(rest);
 }
 
 async function syncRemote(rest: string[]): Promise<void> {
@@ -1542,7 +1856,7 @@ async function hooksRun(rest: string[]): Promise<void> {
   let mode: "all" | "push";
   let triggerSource: SyncTriggerSource;
   if (hookName === "post-commit") {
-    mode = "push";
+    mode = "all";
     triggerSource = "hook-post-commit";
   } else if (hookName === "agent-complete") {
     mode = "all";
@@ -1820,7 +2134,7 @@ function sanitizeMubitAnswer(answer: string): string {
     .filter((line) => line.length > 0)
     .filter(
       (line) =>
-        !/^(Codaph TUI|Project:|Sessions:|Active Session:|MuBit:|Prompts|Thoughts|Assistant Output|Diff Summary|Actions)/i.test(
+        !/^(Codaph TUI|Project:|Sessions:|Active Session:|Mubit:|Prompts|Thoughts|Assistant Output|Diff Summary|Actions)/i.test(
           line,
         ),
     );
@@ -1858,7 +2172,7 @@ function buildMubitQueryPrompt(question: string): string {
 }
 
 function printMubitNoDataHint(cwd: string, sessionId: string): void {
-  console.log(`MuBit returned no answer/evidence for session ${sessionId}.`);
+  console.log(`Mubit returned no answer/evidence for session ${sessionId}.`);
   console.log(`Try refining your query or checking run scope: ${cwd}`);
 }
 
@@ -1994,7 +2308,7 @@ async function runOpenAiAgentFromMubit(
               {
                 type: "input_text",
                 text:
-                  "You are Codaph Analyst. Answer the user question using MuBit evidence. Keep it concise and actionable. Do not dump raw logs. Return at most 6 bullets.",
+                  "You are Codaph Analyst. Answer the user question using Mubit evidence. Keep it concise and actionable. Do not dump raw logs. Return at most 6 bullets.",
               },
             ],
           },
@@ -2051,7 +2365,7 @@ function printMubitResponse(
   const confidence = getConfidence(response);
 
   if (finalAnswer) {
-    console.log("MuBit answer:");
+    console.log("Mubit answer:");
     console.log(sanitizeMubitAnswer(finalAnswer));
     const confidenceText =
       typeof confidence === "number" ? ` | confidence=${confidence.toFixed(2)}` : "";
@@ -2065,7 +2379,7 @@ function printMubitResponse(
   }
 
   const snippets = summarizeEvidence(response);
-  console.log(`MuBit returned ${evidenceCount} evidence items, but no final answer.`);
+  console.log(`Mubit returned ${evidenceCount} evidence items, but no final answer.`);
   for (const snippet of snippets) {
     console.log(snippet);
   }
@@ -2080,7 +2394,7 @@ async function mubitQuery(rest: string[]): Promise<void> {
 
   const sessionId = getStringFlag(flags, "session");
   if (!sessionId) {
-    throw new Error("--session is required to resolve MuBit run scope.");
+    throw new Error("--session is required to resolve Mubit run scope.");
   }
 
   const cwd = resolve(getStringFlag(flags, "cwd") ?? process.cwd());
@@ -2088,14 +2402,14 @@ async function mubitQuery(rest: string[]): Promise<void> {
   const repoId = resolveRepoIdForProject(flags, cwd, settings);
   const engine = createMubitMemory(flags, cwd, settings);
   if (!engine || !engine.isEnabled()) {
-    throw new Error("MuBit is disabled. Set MUBIT_API_KEY (or MUBIT_APIKEY) and use --mubit.");
+    throw new Error("Mubit is disabled. Set MUBIT_API_KEY (or MUBIT_APIKEY) and use --mubit.");
   }
 
   const limitRaw = getStringFlag(flags, "limit");
   const limit = limitRaw ? Number.parseInt(limitRaw, 10) : undefined;
   const rawMode = getBooleanFlag(flags, "raw", false);
   const runId = mubitRunIdForContext(flags, repoId, sessionId, cwd, settings);
-  console.log(`Querying MuBit run scope: ${runId}`);
+  console.log(`Querying Mubit run scope: ${runId}`);
 
   const response = await withTimeout(
     engine.querySemanticContext({
@@ -2106,14 +2420,14 @@ async function mubitQuery(rest: string[]): Promise<void> {
       directLane: "semantic_search",
     }),
     45000,
-    "MuBit query",
+    "Mubit query",
   );
 
   if (!rawMode) {
     const openAiKey = resolveOpenAiApiKey(flags, settings);
     const agentRequested = getBooleanFlag(flags, "agent", openAiKey !== null);
     if (agentRequested && !openAiKey) {
-      console.log("OpenAI agent requested but OPENAI_API_KEY is missing. Falling back to MuBit response.");
+      console.log("OpenAI agent requested but OPENAI_API_KEY is missing. Falling back to Mubit response.");
     }
     const agentResult = await runOpenAiAgentFromMubit(question, response, runId, flags);
     if (agentResult) {
@@ -2135,7 +2449,7 @@ async function mubitBackfill(rest: string[]): Promise<void> {
 
   const engine = createMubitMemory(flags, cwd, settings);
   if (!engine || !engine.isEnabled()) {
-    throw new Error("MuBit is disabled. Set MUBIT_API_KEY (or MUBIT_APIKEY) and use --mubit.");
+    throw new Error("Mubit is disabled. Set MUBIT_API_KEY (or MUBIT_APIKEY) and use --mubit.");
   }
 
   const repoId = resolveRepoIdForProject(flags, cwd, settings);
@@ -3304,7 +3618,7 @@ function composeMubitAnswer(
     return snippets.map((line) => line.replace(/^- /, "")).join("\n");
   }
 
-  return `MuBit returned no answer/evidence for session ${sessionId}. Try refining query for ${cwd}.`;
+  return `Mubit returned no answer/evidence for session ${sessionId}. Try refining query for ${cwd}.`;
 }
 
 function headerLine(left: string, right: string, width: number): string {
@@ -3379,8 +3693,8 @@ function renderBrowseView(
 ): string {
   const leftHeader = `${paint("codaph", TUI_COLORS.brand)}  >  ${projectLabel}`;
   const syncBits = `AutoSync:${state.autoSyncEnabled ? "on" : "off"}  Cloud:${state.autoSyncCloudStatus}${state.autoSyncPending ? "*" : ""}  Push:${formatTimeAgo(state.lastLocalSyncAt) ?? "never"}  Pull:${state.autoSyncLastPullAgo ?? "never"}`;
-  const rightHeader = `${paint(mubitEnabled ? "MuBit:on" : "MuBit:off", mubitEnabled ? TUI_COLORS.cyan : TUI_COLORS.yellow)}   ${paint(syncBits, TUI_COLORS.dim)}`;
-  const fallbackRightHeader = `${paint(mubitEnabled ? "MuBit:on" : "MuBit:off", mubitEnabled ? TUI_COLORS.cyan : TUI_COLORS.yellow)}   ${paint("[o] settings  [?] help", TUI_COLORS.dim)}`;
+  const rightHeader = `${paint(mubitEnabled ? "Mubit:on" : "Mubit:off", mubitEnabled ? TUI_COLORS.cyan : TUI_COLORS.yellow)}   ${paint(syncBits, TUI_COLORS.dim)}`;
+  const fallbackRightHeader = `${paint(mubitEnabled ? "Mubit:on" : "Mubit:off", mubitEnabled ? TUI_COLORS.cyan : TUI_COLORS.yellow)}   ${paint("[o] settings  [?] help", TUI_COLORS.dim)}`;
   const header = headerLine(leftHeader, visibleLength(rightHeader) < Math.floor(width * 0.7) ? rightHeader : fallbackRightHeader, width);
 
   const tableHeight = Math.max(10, height - 6);
@@ -3489,7 +3803,7 @@ function renderInspectView(
   );
   const topHeader = headerLine(
     `${paint("codaph", TUI_COLORS.brand)}  >  ${projectLabel}  >  Session ${selectedSession.sessionId.slice(0, 8)} - ${formatDateCell(selectedSession.to)}`,
-    `${paint(mubitEnabled ? "MuBit:on" : "MuBit:off", mubitEnabled ? TUI_COLORS.cyan : TUI_COLORS.yellow)}   ${paint(inspectRightText, TUI_COLORS.dim)}`,
+    `${paint(mubitEnabled ? "Mubit:on" : "Mubit:off", mubitEnabled ? TUI_COLORS.cyan : TUI_COLORS.yellow)}   ${paint(inspectRightText, TUI_COLORS.dim)}`,
     width,
   );
 
@@ -3730,14 +4044,14 @@ function renderInspectView(
       { text: "[enter] send   [esc] close chat", color: TUI_COLORS.muted },
     ];
     composed.push("");
-    composed.push(...boxLines("MuBit", width, chatHeight, chatLines, state.inspectPane === "chat"));
+    composed.push(...boxLines("Mubit", width, chatHeight, chatLines, state.inspectPane === "chat"));
   }
 
   const footer = state.chatOpen
     ? "[tab] focus pane   [esc] close chat   [up/down] navigate/scroll   [left] back"
     : threePaneMode
-      ? "[enter] prompt -> thoughts   [up/down] select/scroll   [tab] focus pane   [d] full diff   [m] MuBit chat   [f] actor filter   [c] contributors   [o] settings   [left] back"
-      : "[up/down] prompts/scroll pane   [tab] focus pane   [d] full diff   [m] MuBit chat   [f] actor filter   [c] contributors   [o] settings   [left] back";
+      ? "[enter] prompt -> thoughts   [up/down] select/scroll   [tab] focus pane   [d] full diff   [m] Mubit chat   [f] actor filter   [c] contributors   [o] settings   [left] back"
+      : "[up/down] prompts/scroll pane   [tab] focus pane   [d] full diff   [m] Mubit chat   [f] actor filter   [c] contributors   [o] settings   [left] back";
 
   composed.push("");
   composed.push(paint(clipPlain(footer, width), TUI_COLORS.dim));
@@ -3757,14 +4071,14 @@ function renderHelpOverlay(width: number, height: number): string {
     { text: "up/down navigate sessions" },
     { text: "enter   open session inspect view" },
     { text: "s       sync now (local->cloud, then cloud->local when available)" },
-    { text: "r       pull cloud (MuBit remote activity fallback/manual)" },
+    { text: "r       pull cloud (Mubit remote activity fallback/manual)" },
     { text: "" },
     { text: "Inspect", color: TUI_COLORS.muted },
     { text: "enter   from prompts -> focus thoughts" },
     { text: "up/down navigate prompts/thoughts or scroll pane" },
     { text: "tab     cycle pane focus" },
     { text: "d       toggle full diff overlay" },
-    { text: "m       toggle MuBit chat" },
+    { text: "m       toggle Mubit chat" },
     { text: "f       cycle actor filter" },
     { text: "c       contributors overlay (enter to apply filter)" },
     { text: "left/esc back to browse" },
@@ -3928,13 +4242,13 @@ function renderSettingsOverlay(
 
   const lines: PaneLine[] = [
     { text: `Project: ${state.projectPath}`, color: TUI_COLORS.muted },
-    { text: `MuBit runtime: ${memoryEnabled ? "enabled" : "disabled"}` },
+    { text: `Mubit runtime: ${memoryEnabled ? "enabled" : "disabled"}` },
     { text: "" },
     { text: `Current project name: ${projectName}` },
     { text: `Current project id: ${projectId ?? "(auto detection failed)"}` },
     { text: `Current actor id: ${actorId ?? "(auto detection failed)"}` },
     { text: `Current run scope: ${runScope}` },
-    { text: `MuBit API key: ${maskSecret(mubitKey)}` },
+    { text: `Mubit API key: ${maskSecret(mubitKey)}` },
     { text: `OpenAI API key: ${maskSecret(openAiKey)}` },
     { text: "" },
     { text: `Detected GitHub project: ${detected.projectId ?? "(none)"}`, color: TUI_COLORS.muted },
@@ -3946,13 +4260,13 @@ function renderSettingsOverlay(
     { text: "" },
     { text: "Actions", color: TUI_COLORS.muted },
     { text: "1  set project name (this folder)" },
-    { text: "2  set MuBit project id (this folder)" },
+    { text: "2  set Mubit project id (this folder)" },
     { text: "3  set actor id (global)" },
-    { text: "4  set MuBit API key (global)" },
+    { text: "4  set Mubit API key (global)" },
     { text: "5  set OpenAI API key (global)" },
     { text: "6  auto-fill project+actor from git/GitHub" },
-    { text: "7  toggle MuBit run scope (session/project) for this folder" },
-    { text: "8  clear MuBit API key" },
+    { text: "7  toggle Mubit run scope (session/project) for this folder" },
+    { text: "8  clear Mubit API key" },
     { text: "9  clear OpenAI API key" },
     { text: "" },
     { text: "esc/o close settings", color: TUI_COLORS.muted },
@@ -4370,10 +4684,10 @@ async function tui(rest: string[]): Promise<void> {
     if (!memory || !memory.isEnabled()) {
       chat.push({
         role: "mubit",
-        text: "MuBit is disabled. Set MUBIT_API_KEY and restart with --mubit.",
+        text: "Mubit is disabled. Set MUBIT_API_KEY and restart with --mubit.",
         ts: new Date().toISOString(),
       });
-      state.statusLine = "MuBit is disabled.";
+      state.statusLine = "Mubit is disabled.";
       return;
     }
 
@@ -4392,7 +4706,7 @@ async function tui(rest: string[]): Promise<void> {
         directLane: "semantic_search",
       }),
       45000,
-      "MuBit query",
+      "Mubit query",
     );
 
     const openAiKey = resolveOpenAiApiKey(flags, settings);
@@ -4400,7 +4714,7 @@ async function tui(rest: string[]): Promise<void> {
     if (agentRequested && !openAiKey) {
       chat.push({
         role: "mubit",
-        text: "OpenAI agent requested but OPENAI_API_KEY is missing. Falling back to MuBit answer.",
+        text: "OpenAI agent requested but OPENAI_API_KEY is missing. Falling back to Mubit answer.",
         ts: new Date().toISOString(),
       });
     }
@@ -4415,7 +4729,7 @@ async function tui(rest: string[]): Promise<void> {
     state.chatScroll = 0;
     state.statusLine = agentResult
       ? `OpenAI agent (${agentResult.model}) responded`
-      : "MuBit responded";
+      : "Mubit responded";
   };
 
   const cycleActorFilter = (): void => {
@@ -4524,13 +4838,13 @@ async function tui(rest: string[]): Promise<void> {
       return "Set project name for this folder: ";
     }
     if (mode === "set_mubit_project_id") {
-      return "Set MuBit project id for this folder: ";
+      return "Set Mubit project id for this folder: ";
     }
     if (mode === "set_mubit_actor_id") {
-      return "Set MuBit actor id (global): ";
+      return "Set Mubit actor id (global): ";
     }
     if (mode === "set_mubit_api_key") {
-      return "Set MuBit API key (global): ";
+      return "Set Mubit API key (global): ";
     }
     return "Set OpenAI API key (global): ";
   };
@@ -4576,7 +4890,7 @@ async function tui(rest: string[]): Promise<void> {
       });
       saveCodaphSettings(settings);
       refreshSettingsAndMemory();
-      state.statusLine = `MuBit project id set to ${candidate}`;
+      state.statusLine = `Mubit project id set to ${candidate}`;
       return;
     }
 
@@ -4596,7 +4910,7 @@ async function tui(rest: string[]): Promise<void> {
       });
       saveCodaphSettings(settings);
       refreshSettingsAndMemory();
-      state.statusLine = `MuBit actor id set to ${candidate}`;
+      state.statusLine = `Mubit actor id set to ${candidate}`;
       return;
     }
 
@@ -4606,7 +4920,7 @@ async function tui(rest: string[]): Promise<void> {
       });
       saveCodaphSettings(settings);
       refreshSettingsAndMemory();
-      state.statusLine = "MuBit API key saved.";
+      state.statusLine = "Mubit API key saved.";
       return;
     }
 
@@ -4658,7 +4972,7 @@ async function tui(rest: string[]): Promise<void> {
       saveCodaphSettings(settings);
       refreshSettingsAndMemory();
       state.settingsOpen = false;
-      state.statusLine = `MuBit run scope set to ${next} for this folder.`;
+      state.statusLine = `Mubit run scope set to ${next} for this folder.`;
       render();
       return;
     }
@@ -4667,7 +4981,7 @@ async function tui(rest: string[]): Promise<void> {
       saveCodaphSettings(settings);
       refreshSettingsAndMemory();
       state.settingsOpen = false;
-      state.statusLine = "Cleared MuBit API key from Codaph settings.";
+      state.statusLine = "Cleared Mubit API key from Codaph settings.";
       render();
       return;
     }
@@ -5075,7 +5389,7 @@ async function tui(rest: string[]): Promise<void> {
         return;
       }
       if (key.name === "return") {
-        runTask("Querying MuBit...", sendChatQuestion);
+        runTask("Querying Mubit...", sendChatQuestion);
         return;
       }
       if (!key.ctrl && !key.meta && str.length === 1 && str >= " ") {
@@ -5107,6 +5421,26 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (cmd === "setup") {
+    await setupCommand([sub, ...rest].filter(Boolean) as string[]);
+    return;
+  }
+
+  if (cmd === "init") {
+    await initCommand([sub, ...rest].filter(Boolean) as string[]);
+    return;
+  }
+
+  if (cmd === "import") {
+    await importCommand([sub, ...rest].filter(Boolean) as string[]);
+    return;
+  }
+
+  if (cmd === "status") {
+    await statusCommand([sub, ...rest].filter(Boolean) as string[]);
+    return;
+  }
+
   if (cmd === "sync") {
     if (!sub) {
       await syncCommand(rest);
@@ -5118,6 +5452,10 @@ async function main(): Promise<void> {
     }
     if (sub === "push") {
       await syncPushCommand(rest);
+      return;
+    }
+    if (sub === "import") {
+      await importCommand(rest);
       return;
     }
     if (sub === "pull" || sub === "remote") {

@@ -433,7 +433,7 @@ export class MubitMemoryEngine implements MemoryEngine {
     if (!this.isEnabled()) {
       return {
         disabled: true,
-        reason: "MuBit is not configured. Set MUBIT_API_KEY or pass --mubit-api-key.",
+        reason: "Mubit is not configured. Set MUBIT_API_KEY or pass --mubit-api-key.",
       };
     }
 
@@ -457,13 +457,13 @@ export class MubitMemoryEngine implements MemoryEngine {
     if (!this.isEnabled()) {
       return {
         disabled: true,
-        reason: "MuBit is not configured. Set MUBIT_API_KEY or pass --mubit-api-key.",
+        reason: "Mubit is not configured. Set MUBIT_API_KEY or pass --mubit-api-key.",
       };
     }
     if (!this.client.control.contextSnapshot) {
       return {
         unsupported: true,
-        reason: "MuBit SDK does not expose control.contextSnapshot in this runtime.",
+        reason: "Mubit SDK does not expose control.contextSnapshot in this runtime.",
       };
     }
 

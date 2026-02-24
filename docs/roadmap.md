@@ -9,15 +9,15 @@ This page answers two questions:
 
 - Codex-first ingestion through SDK and `exec --json`.
 - Local append-only mirror with deterministic timeline/diff reads.
-- MuBit write path with project/session run scope.
-- MuBit remote replay into local mirror (`sync remote`).
+- Mubit write path with project/session run scope.
+- Mubit remote replay into local mirror (`sync remote`).
 - Contributor attribution through `actorId` and TUI actor filter.
-- TUI settings for project id, actor id, MuBit key, OpenAI key, and run scope.
-- OpenAI-assisted synthesis layer over MuBit query responses.
+- TUI settings for project id, actor id, Mubit key, OpenAI key, and run scope.
+- OpenAI-assisted synthesis layer over Mubit query responses.
 
 ## Remaining (High Priority)
 
-- Merge semantic MuBit context directly into query-service timeline APIs.
+- Merge semantic Mubit context directly into query-service timeline APIs.
 - Improve remote replay coverage for non-`codaph_event` activity shapes.
 - Add encryption-at-rest for local `.codaph` mirror files.
 - Add richer full-diff per-thought mapping with stronger hunk context.
@@ -36,6 +36,6 @@ This page answers two questions:
 
 ## Phase 2 Direction
 
-- Deeper collaborative memory tooling in MuBit.
+- Deeper collaborative memory tooling in Mubit.
 - Dependency-aware optimization recommendations from repo history.
 - Stronger team-level audit trails across prompts, thoughts, and code changes.
