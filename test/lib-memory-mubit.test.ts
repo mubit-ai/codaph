@@ -220,6 +220,104 @@ describe("memory-mubit", () => {
     expect(activities).toHaveLength(3);
   });
 
+  it("prefers control.batchInsert for bulk writes", async () => {
+    const controlBatchCalls: Array<Record<string, unknown>> = [];
+    const coreIngestCalls: Array<Record<string, unknown>> = [];
+    const engine = new MubitMemoryEngine({
+      client: {
+        core: {
+          ingest: async (payload?: Record<string, unknown>) => {
+            coreIngestCalls.push(payload ?? {});
+            return { accepted: true };
+          },
+        },
+        control: {
+          batchInsert: async (payload?: Record<string, unknown>) => {
+            controlBatchCalls.push(payload ?? {});
+            return { success: true, count: 2 };
+          },
+          ingest: async () => ({ accepted: true }),
+          setVariable: async () => ({ success: true }),
+          query: async () => ({ final_answer: "ok" }),
+          appendActivity: async () => ({ success: true }),
+        },
+      },
+    });
+
+    await engine.writeEventsBatch([
+      {
+        eventId: "evt-b1",
+        source: "codex_exec",
+        repoId: "repo-bulk",
+        actorId: "anil",
+        sessionId: "session-1",
+        threadId: "thread-1",
+        ts: "2026-02-24T16:10:00.000Z",
+        eventType: "prompt.submitted",
+        payload: { prompt: "one" },
+        reasoningAvailability: "unavailable",
+      },
+      {
+        eventId: "evt-b2",
+        source: "codex_exec",
+        repoId: "repo-bulk",
+        actorId: "anil",
+        sessionId: "session-1",
+        threadId: "thread-1",
+        ts: "2026-02-24T16:10:05.000Z",
+        eventType: "message.assistant",
+        payload: { text: "two" },
+        reasoningAvailability: "partial",
+      },
+    ]);
+
+    expect(controlBatchCalls).toHaveLength(1);
+    expect(coreIngestCalls).toHaveLength(0);
+    expect(controlBatchCalls[0].run_id).toBe("codaph:repo-bulk:session-1");
+    expect(controlBatchCalls[0].deduplicate).toBe(true);
+    expect(Array.isArray(controlBatchCalls[0].items)).toBe(true);
+    expect((controlBatchCalls[0].items as unknown[]).length).toBe(2);
+  });
+
+  it("falls back to core.insert when core.ingest is unavailable", async () => {
+    const inserts: Array<Record<string, unknown>> = [];
+    const engine = new MubitMemoryEngine({
+      client: {
+        core: {
+          insert: async (payload?: Record<string, unknown>) => {
+            inserts.push(payload ?? {});
+            return { success: true, node_id: 123 };
+          },
+        },
+        control: {
+          ingest: async () => ({ accepted: true }),
+          setVariable: async () => ({ success: true }),
+          query: async () => ({ final_answer: "ok" }),
+          appendActivity: async () => ({ success: true }),
+        },
+      },
+    });
+
+    await engine.writeEvent({
+      eventId: "evt-core-insert",
+      source: "codex_exec",
+      repoId: "repo-core",
+      actorId: "anil",
+      sessionId: "session-1",
+      threadId: "thread-1",
+      ts: "2026-02-24T16:00:00.000Z",
+      eventType: "prompt.submitted",
+      payload: { prompt: "hello" },
+      reasoningAvailability: "unavailable",
+    });
+
+    expect(inserts).toHaveLength(1);
+    expect(inserts[0].run_id).toBe("codaph:repo-core:session-1");
+    expect(inserts[0].session_id).toBe("session-1");
+    expect(typeof inserts[0].text).toBe("string");
+    expect(Buffer.isBuffer(inserts[0].metadata)).toBe(true);
+  });
+
   it("uses strict hdql_query direct-bypass lane for semantic context retrieval", async () => {
     const queryCalls: Array<Record<string, unknown>> = [];
     const engine = new MubitMemoryEngine({

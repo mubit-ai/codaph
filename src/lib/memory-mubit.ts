@@ -37,11 +37,13 @@ export interface MubitMemoryOptions {
 interface MubitClientLike {
   core?: {
     ingest?(payload?: Record<string, unknown>): Promise<unknown>;
+    insert?(payload?: Record<string, unknown>): Promise<unknown>;
   };
   control: {
     ingest(payload?: Record<string, unknown>): Promise<unknown>;
     setVariable(payload?: Record<string, unknown>): Promise<unknown>;
     query(payload?: Record<string, unknown>): Promise<unknown>;
+    batchInsert?(payload?: Record<string, unknown>): Promise<unknown>;
     appendActivity?(payload?: Record<string, unknown>): Promise<unknown>;
     contextSnapshot?(payload?: Record<string, unknown>): Promise<unknown>;
   };
@@ -84,6 +86,16 @@ function truncate(text: string, max = 2000): string {
     return text;
   }
   return `${text.slice(0, max - 1)}...`;
+}
+
+function stableNodeIdFromEventId(eventId: string): number {
+  const hex = eventId.replace(/[^a-fA-F0-9]/g, "");
+  const slice = (hex.length >= 13 ? hex.slice(0, 13) : hex.padEnd(13, "0")).toLowerCase();
+  const parsed = Number.parseInt(slice, 16);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return 1;
+  }
+  return parsed;
 }
 
 function textFromUnknown(value: unknown): string | null {
@@ -404,11 +416,77 @@ export class MubitMemoryEngine implements MemoryEngine {
     return payload;
   }
 
-  private async ingestEvents(runId: string, events: CapturedEventEnvelope[]): Promise<unknown> {
-    if (!this.client.core?.ingest) {
-      throw new Error("Mubit core.ingest is required; control.ingest fallback is disabled in Codaph.");
+  private buildControlBatchInsertPayload(runId: string, events: CapturedEventEnvelope[]): Record<string, unknown> {
+    return {
+      run_id: runId,
+      deduplicate: true,
+      items: events.map((event) => ({
+        item_id: event.eventId,
+        text: eventToText(event),
+        metadata_json: toJson({
+          repo_id: event.repoId,
+          project_id: this.projectId ?? event.repoId,
+          actor_id: event.actorId ?? this.actorId ?? null,
+          session_id: event.sessionId,
+          thread_id: event.threadId,
+          ts: event.ts,
+          source: event.source,
+          event_type: event.eventType,
+          reasoning_availability: event.reasoningAvailability,
+          payload: event.payload,
+        }),
+        source: event.source,
+      })),
+    };
+  }
+
+  private buildCoreInsertPayload(runId: string, event: CapturedEventEnvelope): Record<string, unknown> {
+    const metadata = {
+      event_id: event.eventId,
+      repo_id: event.repoId,
+      project_id: this.projectId ?? event.repoId,
+      actor_id: event.actorId ?? this.actorId ?? null,
+      session_id: event.sessionId,
+      thread_id: event.threadId,
+      ts: event.ts,
+      source: event.source,
+      event_type: event.eventType,
+      reasoning_availability: event.reasoningAvailability,
+      payload: event.payload,
+    };
+
+    return {
+      id: stableNodeIdFromEventId(event.eventId),
+      text: eventToText(event),
+      metadata: Buffer.from(toJson(metadata), "utf8"),
+      run_id: runId,
+      session_id: event.sessionId,
+    };
+  }
+
+  private async insertEventsViaCore(runId: string, events: CapturedEventEnvelope[]): Promise<unknown> {
+    if (!this.client.core?.insert) {
+      throw new Error("Mubit core.ingest/core.insert is required; control.ingest fallback is disabled in Codaph.");
     }
-    return await this.client.core.ingest(this.buildIngestPayload(runId, events));
+
+    const results: unknown[] = [];
+    for (const event of events) {
+      results.push(await this.client.core.insert(this.buildCoreInsertPayload(runId, event)));
+    }
+    if (events.length === 1) {
+      return results[0] ?? { success: true };
+    }
+    return { success: true, count: results.length, results };
+  }
+
+  private async ingestEvents(runId: string, events: CapturedEventEnvelope[]): Promise<unknown> {
+    if (events.length > 1 && this.client.control.batchInsert) {
+      return await this.client.control.batchInsert(this.buildControlBatchInsertPayload(runId, events));
+    }
+    if (this.client.core?.ingest) {
+      return await this.client.core.ingest(this.buildIngestPayload(runId, events));
+    }
+    return await this.insertEventsViaCore(runId, events);
   }
 
   private async appendMainActivity(runId: string, event: CapturedEventEnvelope): Promise<void> {

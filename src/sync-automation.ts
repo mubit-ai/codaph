@@ -1,4 +1,5 @@
 import { open, readFile, writeFile, mkdir, appendFile, chmod, stat, rm } from "node:fs/promises";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import {
   readMubitRemoteSyncState,
@@ -331,8 +332,19 @@ async function pathExists(path: string): Promise<boolean> {
   }
 }
 
+function codexHomeDir(): string {
+  const raw = process.env.CODEX_HOME?.trim();
+  return raw && raw.length > 0 ? raw : join(homedir(), ".codex");
+}
+
 async function detectExistingCodexHookDir(repoRoot: string): Promise<string | null> {
-  const candidates = [join(repoRoot, ".codex", "hooks"), join(repoRoot, ".codex", "commands", "hooks")];
+  const codexHome = codexHomeDir();
+  const candidates = [
+    join(codexHome, "hooks"),
+    join(codexHome, "commands", "hooks"),
+    join(repoRoot, ".codex", "hooks"),
+    join(repoRoot, ".codex", "commands", "hooks"),
+  ];
   for (const candidate of candidates) {
     try {
       const info = await stat(candidate);
@@ -353,14 +365,14 @@ export async function installAgentCompleteHookBestEffort(
   let hookDir = await detectExistingCodexHookDir(repoRoot);
   const manualSnippet = Array.isArray(commandLine) ? (commandLine[0] ?? "codaph hooks run agent-complete --quiet") : commandLine;
   if (!hookDir) {
-    const createdHookDir = join(repoRoot, ".codex", "hooks");
+    const createdHookDir = join(codexHomeDir(), "hooks");
     try {
       await mkdir(createdHookDir, { recursive: true });
       hookDir = createdHookDir;
     } catch {
       return {
         ok: false,
-        warning: "No repo-local Codex hook directory detected; install the agent-complete hook manually.",
+        warning: "No Codex hook directory detected; install the agent-complete hook manually.",
         manualSnippet,
       };
     }
@@ -371,7 +383,7 @@ export async function installAgentCompleteHookBestEffort(
   if (!result.updated) {
     return {
       ok: false,
-      warning: result.reason ?? "unable to update repo-local Codex agent-complete hook",
+      warning: result.reason ?? "unable to update Codex agent-complete hook",
       manualSnippet,
     };
   }
