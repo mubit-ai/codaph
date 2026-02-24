@@ -29,6 +29,8 @@ bun run tui --cwd /absolute/project/path --mubit
 
 ```bash
 npx @codaph/codaph tui --cwd /absolute/project/path --mubit
+# fallback if npx does not auto-pick the bin:
+npx --yes --package @codaph/codaph codaph tui --cwd /absolute/project/path --mubit
 ```
 
 ### C) Homebrew (after formula publish)

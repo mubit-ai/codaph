@@ -35,8 +35,10 @@ Fixes:
   `bun run cli sync --cwd /absolute/project/path --no-mubit`
 - Then enable MuBit and retry:
   `bun run cli sync --cwd /absolute/project/path --mubit`
-- Use `sync remote` to pull shared state separately:
-  `bun run cli sync remote --cwd /absolute/project/path --mubit`
+- Check sync diagnostics (automation + remote snapshot state):
+  `bun run cli sync status --cwd /absolute/project/path --json`
+- Use `sync pull` (or `sync remote`) to pull shared state separately:
+  `bun run cli sync pull --cwd /absolute/project/path --mubit`
 
 Notes:
 
@@ -54,7 +56,7 @@ Fixes:
 1. Confirm team uses same `projectId`:
    `CODAPH_PROJECT_ID=owner/repo`
 2. Confirm each teammate has unique actor id.
-3. Run local sync (`s`) and then remote sync (`r`) in TUI.
+3. Run `s` (sync now) in TUI. Use `r` only as a manual cloud-pull fallback.
 4. Confirm run scope is `project` in settings overlay.
 
 ## MuBit Query Returns No Useful Answer
@@ -121,6 +123,21 @@ Fixes:
 Notes:
 
 - Workflow now runs an npm auth preflight (`npm whoami` and owner check) before publish to surface this earlier.
+
+## `npx @codaph/codaph` Says `codaph: command not found`
+
+Symptoms:
+
+- `npx @codaph/codaph` returns shell error `codaph: command not found`
+
+Fix:
+
+- Run with explicit package+bin form:
+  `npx --yes --package @codaph/codaph codaph --help`
+
+Notes:
+
+- This happens on some npm/npx combinations where automatic bin inference for scoped packages is inconsistent.
 
 ## Reset Local Codaph State (Safe)
 

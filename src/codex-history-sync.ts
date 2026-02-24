@@ -1,4 +1,4 @@
-import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import type { Dirent } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
 import { homedir } from "node:os";
@@ -25,6 +25,8 @@ interface CodexHistoryFileCursor {
   sessionId: string | null;
   cwd: string | null;
   updatedAt: string;
+  sizeBytes?: number;
+  mtimeMs?: number;
 }
 
 interface CodexHistorySyncState {
@@ -40,6 +42,7 @@ export interface CodexHistorySyncSummary {
 
 export interface CodexHistorySyncProgress {
   scannedFiles: number;
+  processedFiles: number;
   matchedFiles: number;
   importedEvents: number;
   currentFile: string;
@@ -563,9 +566,12 @@ export async function syncCodexHistory(options: SyncCodexHistoryOptions): Promis
     importedEvents: 0,
     importedSessions: 0,
   };
+  let processedFiles = 0;
   let lastProgressEmit = 0;
 
-  const emitProgress = (progress: Omit<CodexHistorySyncProgress, "scannedFiles" | "matchedFiles" | "importedEvents">): void => {
+  const emitProgress = (
+    progress: Omit<CodexHistorySyncProgress, "scannedFiles" | "processedFiles" | "matchedFiles" | "importedEvents">,
+  ): void => {
     if (!options.onProgress) {
       return;
     }
@@ -578,6 +584,7 @@ export async function syncCodexHistory(options: SyncCodexHistoryOptions): Promis
 
     options.onProgress({
       scannedFiles: summary.scannedFiles,
+      processedFiles,
       matchedFiles: summary.matchedFiles,
       importedEvents: summary.importedEvents,
       ...progress,
@@ -585,8 +592,33 @@ export async function syncCodexHistory(options: SyncCodexHistoryOptions): Promis
   };
 
   for (const filePath of files) {
+    processedFiles += 1;
+    let fileInfo: Awaited<ReturnType<typeof stat>>;
+    try {
+      fileInfo = await stat(filePath);
+    } catch {
+      continue;
+    }
+
     const existing = state.files[filePath];
     if (existing?.cwd && !projectOwnsPath(normalizedProject, existing.cwd)) {
+      continue;
+    }
+
+    if (
+      existing &&
+      existing.sessionId &&
+      existing.cwd &&
+      typeof existing.sizeBytes === "number" &&
+      typeof existing.mtimeMs === "number" &&
+      existing.sizeBytes === fileInfo.size &&
+      existing.mtimeMs === fileInfo.mtimeMs
+    ) {
+      emitProgress({
+        currentFile: filePath,
+        currentLine: existing.lineCount,
+        currentSessionId: existing.sessionId,
+      });
       continue;
     }
 
@@ -632,6 +664,8 @@ export async function syncCodexHistory(options: SyncCodexHistoryOptions): Promis
         sessionId: sessionId ?? null,
         cwd: sessionCwd ?? null,
         updatedAt: new Date().toISOString(),
+        sizeBytes: fileInfo.size,
+        mtimeMs: fileInfo.mtimeMs,
       };
       emitProgress({
         currentFile: filePath,
@@ -649,6 +683,8 @@ export async function syncCodexHistory(options: SyncCodexHistoryOptions): Promis
         cwd: normalizedSessionCwd,
         lineCount: lines.length,
         updatedAt: new Date().toISOString(),
+        sizeBytes: fileInfo.size,
+        mtimeMs: fileInfo.mtimeMs,
       };
       emitProgress({
         currentFile: filePath,
@@ -670,11 +706,21 @@ export async function syncCodexHistory(options: SyncCodexHistoryOptions): Promis
 
     let sequence = cursor.sequence;
     let importedForFile = 0;
+    let lastLineProgressLine = cursor.lineCount;
 
     for (let i = cursor.lineCount; i < lines.length; i += 1) {
       const rawLine = lines[i].trim();
       if (!rawLine) {
         continue;
+      }
+
+      if ((i + 1) - lastLineProgressLine >= 50) {
+        emitProgress({
+          currentFile: filePath,
+          currentLine: i + 1,
+          currentSessionId: sessionId,
+        });
+        lastLineProgressLine = i + 1;
       }
 
       await options.pipeline.ingestRawLine(sessionId, rawLine);
@@ -723,7 +769,11 @@ export async function syncCodexHistory(options: SyncCodexHistoryOptions): Promis
       sessionId,
       cwd: normalizedSessionCwd,
       updatedAt: new Date().toISOString(),
+      sizeBytes: fileInfo.size,
+      mtimeMs: fileInfo.mtimeMs,
     };
+
+    await options.pipeline.flush();
 
     emitProgress({
       currentFile: filePath,

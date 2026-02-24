@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { JsonlMirror, readEventIdIndex, readManifest, readSparseIndex } from "../src/lib/mirror-jsonl";
@@ -60,10 +60,16 @@ describe("jsonl mirror", () => {
     expect(first.deduplicated).toBe(false);
     expect(second.deduplicated).toBe(true);
 
+    const manifest = await readManifest(root, "repo-1");
     const sparse = await readSparseIndex(root, "repo-1");
     const eventIds = await readEventIdIndex(root, "repo-1");
     expect(sparse.sessions.s1?.eventCount).toBe(1);
     expect(Object.keys(eventIds.events)).toContain("same-event");
+
+    const segment = Object.values(manifest.segments)[0];
+    expect(segment).toBeDefined();
+    const raw = await readFile(join(root, segment!.relativePath), "utf8");
+    expect(raw.split("\n").filter(Boolean)).toHaveLength(1);
   });
 
   it("supports raw line append", async () => {

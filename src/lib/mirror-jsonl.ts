@@ -60,6 +60,22 @@ export interface EventIdIndex {
   events: Record<string, EventIdIndexEntry>;
 }
 
+type IndexWriteMode = "immediate" | "batch";
+
+interface RepoIndexCacheEntry {
+  manifest: RepoManifest;
+  sparse: SparseIndex;
+  eventIds: EventIdIndex;
+  paths: ReturnType<typeof getIndexPaths>;
+  dirty: boolean;
+  dirtyEventCount: number;
+}
+
+interface BufferedTextAppend {
+  chunks: string[];
+  bytes: number;
+}
+
 export function getIndexPaths(rootDir: string, repoId: string): {
   manifestPath: string;
   sparsePath: string;
@@ -137,7 +153,108 @@ export async function readEventsFromSegments(
 }
 
 export class JsonlMirror implements MirrorAppender {
-  constructor(private readonly rootDir: string = ".codaph") {}
+  private readonly indexWriteMode: IndexWriteMode;
+  private readonly autoFlushEveryEvents: number;
+  private readonly repoIndexCache = new Map<string, RepoIndexCacheEntry>();
+  private readonly ensuredDirs = new Set<string>();
+  private readonly segmentBuffers = new Map<string, BufferedTextAppend>();
+  private readonly rawLineBuffers = new Map<string, BufferedTextAppend>();
+  private readonly bufferFlushBytes = 256 * 1024;
+
+  constructor(
+    private readonly rootDir: string = ".codaph",
+    options: {
+      indexWriteMode?: IndexWriteMode;
+      autoFlushEveryEvents?: number;
+    } = {},
+  ) {
+    this.indexWriteMode = options.indexWriteMode ?? "immediate";
+    const rawEvery = options.autoFlushEveryEvents ?? 50;
+    this.autoFlushEveryEvents =
+      Number.isFinite(rawEvery) && Math.trunc(rawEvery) > 0 ? Math.trunc(rawEvery) : 0;
+  }
+
+  private async ensureDir(path: string): Promise<void> {
+    if (this.ensuredDirs.has(path)) {
+      return;
+    }
+    await mkdir(path, { recursive: true });
+    this.ensuredDirs.add(path);
+  }
+
+  private async appendBuffered(
+    bufferMap: Map<string, BufferedTextAppend>,
+    absPath: string,
+    text: string,
+  ): Promise<void> {
+    const entry = bufferMap.get(absPath) ?? { chunks: [], bytes: 0 };
+    entry.chunks.push(text);
+    entry.bytes += Buffer.byteLength(text, "utf8");
+    bufferMap.set(absPath, entry);
+
+    if (entry.bytes >= this.bufferFlushBytes) {
+      await appendFile(absPath, entry.chunks.join(""), "utf8");
+      entry.chunks = [];
+      entry.bytes = 0;
+    }
+  }
+
+  private async flushBufferedMap(bufferMap: Map<string, BufferedTextAppend>): Promise<void> {
+    for (const [absPath, entry] of bufferMap.entries()) {
+      if (entry.chunks.length === 0) {
+        continue;
+      }
+      await appendFile(absPath, entry.chunks.join(""), "utf8");
+      entry.chunks = [];
+      entry.bytes = 0;
+    }
+  }
+
+  private async loadRepoIndexCache(repoId: string): Promise<RepoIndexCacheEntry> {
+    const existing = this.repoIndexCache.get(repoId);
+    if (existing) {
+      return existing;
+    }
+
+    const [manifest, sparse, eventIds] = await Promise.all([
+      readManifest(this.rootDir, repoId),
+      readSparseIndex(this.rootDir, repoId),
+      readEventIdIndex(this.rootDir, repoId),
+    ]);
+    const entry: RepoIndexCacheEntry = {
+      manifest,
+      sparse,
+      eventIds,
+      paths: getIndexPaths(this.rootDir, repoId),
+      dirty: false,
+      dirtyEventCount: 0,
+    };
+    this.repoIndexCache.set(repoId, entry);
+    return entry;
+  }
+
+  private async flushRepoIndexCache(repoId: string): Promise<void> {
+    const entry = this.repoIndexCache.get(repoId);
+    if (!entry || !entry.dirty) {
+      return;
+    }
+
+    await Promise.all([
+      writeJson(entry.paths.manifestPath, entry.manifest),
+      writeJson(entry.paths.sparsePath, entry.sparse),
+      writeJson(entry.paths.eventIdsPath, entry.eventIds),
+    ]);
+    entry.dirty = false;
+    entry.dirtyEventCount = 0;
+  }
+
+  async flush(): Promise<void> {
+    await this.flushBufferedMap(this.segmentBuffers);
+    await this.flushBufferedMap(this.rawLineBuffers);
+    for (const repoId of this.repoIndexCache.keys()) {
+      await this.flushRepoIndexCache(repoId);
+    }
+  }
 
   async appendEvent(event: CapturedEventEnvelope): Promise<MirrorAppendResult> {
     const { yyyy, mm, dd, segmentId } = getDateParts(event.ts);
@@ -150,14 +267,12 @@ export class JsonlMirror implements MirrorAppender {
       `segment-${segmentId}.jsonl`,
     );
     const abs = join(this.rootDir, relativePath);
-    await mkdir(dirname(abs), { recursive: true });
+    await this.ensureDir(dirname(abs));
 
-    const line = JSON.stringify(event);
-    await appendFile(abs, `${line}\n`, "utf8");
-
-    const manifest = await readManifest(this.rootDir, event.repoId);
-    const sparse = await readSparseIndex(this.rootDir, event.repoId);
-    const eventIds = await readEventIdIndex(this.rootDir, event.repoId);
+    const cache = await this.loadRepoIndexCache(event.repoId);
+    const manifest = cache.manifest;
+    const sparse = cache.sparse;
+    const eventIds = cache.eventIds;
 
     const existing = eventIds.events[event.eventId];
     if (existing) {
@@ -167,6 +282,13 @@ export class JsonlMirror implements MirrorAppender {
         checksum: createHash("sha256").update(event.eventId).digest("hex").slice(0, 16),
         deduplicated: true,
       };
+    }
+
+    const line = JSON.stringify(event);
+    if (this.indexWriteMode === "batch") {
+      await this.appendBuffered(this.segmentBuffers, abs, `${line}\n`);
+    } else {
+      await appendFile(abs, `${line}\n`, "utf8");
     }
 
     const currentSegment = manifest.segments[segmentId] ?? {
@@ -268,10 +390,14 @@ export class JsonlMirror implements MirrorAppender {
       actorId: event.actorId ?? null,
     };
 
-    const { manifestPath, sparsePath, eventIdsPath } = getIndexPaths(this.rootDir, event.repoId);
-    await writeJson(manifestPath, manifest);
-    await writeJson(sparsePath, sparse);
-    await writeJson(eventIdsPath, eventIds);
+    cache.dirty = true;
+    cache.dirtyEventCount += 1;
+    if (
+      this.indexWriteMode === "immediate" ||
+      (this.autoFlushEveryEvents > 0 && cache.dirtyEventCount >= this.autoFlushEveryEvents)
+    ) {
+      await this.flushRepoIndexCache(event.repoId);
+    }
 
     return {
       segment: relativePath,
@@ -283,7 +409,11 @@ export class JsonlMirror implements MirrorAppender {
 
   async appendRawLine(sessionId: string, line: string): Promise<void> {
     const path = join(this.rootDir, "runs", sessionId, "raw-codex.ndjson");
-    await mkdir(dirname(path), { recursive: true });
+    await this.ensureDir(dirname(path));
+    if (this.indexWriteMode === "batch") {
+      await this.appendBuffered(this.rawLineBuffers, path, `${line}\n`);
+      return;
+    }
     await appendFile(path, `${line}\n`, "utf8");
   }
 }

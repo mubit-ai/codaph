@@ -5,10 +5,21 @@ import { execFileSync } from "node:child_process";
 
 export type MubitRunScope = "session" | "project";
 
+export interface SyncAutomationSettings {
+  enabled?: boolean | null;
+  gitPostCommit?: boolean | null;
+  agentComplete?: boolean | null;
+  remotePullCooldownSec?: number | null;
+  autoPullOnSync?: boolean | null;
+  autoWarmTuiOnOpen?: boolean | null;
+  lastSetupVersion?: number | null;
+}
+
 export interface ProjectSettings {
   projectName?: string | null;
   mubitProjectId?: string | null;
   mubitRunScope?: MubitRunScope | null;
+  syncAutomation?: SyncAutomationSettings | null;
 }
 
 export interface CodaphSettings {
@@ -38,6 +49,47 @@ function normalizeRunScope(value: unknown): MubitRunScope | null {
   return raw.toLowerCase() === "project" ? "project" : raw.toLowerCase() === "session" ? "session" : null;
 }
 
+function asBoolean(value: unknown): boolean | null {
+  return typeof value === "boolean" ? value : null;
+}
+
+function asInteger(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return null;
+  }
+  return Math.trunc(value);
+}
+
+function normalizeSyncAutomation(value: unknown): SyncAutomationSettings | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const normalized: SyncAutomationSettings = {
+    enabled: asBoolean(record.enabled),
+    gitPostCommit: asBoolean(record.gitPostCommit),
+    agentComplete: asBoolean(record.agentComplete),
+    remotePullCooldownSec: asInteger(record.remotePullCooldownSec),
+    autoPullOnSync: asBoolean(record.autoPullOnSync),
+    autoWarmTuiOnOpen: asBoolean(record.autoWarmTuiOnOpen),
+    lastSetupVersion: asInteger(record.lastSetupVersion),
+  };
+  return normalized;
+}
+
+function normalizeProjectSettings(value: unknown): ProjectSettings | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  return {
+    projectName: asString(record.projectName),
+    mubitProjectId: asString(record.mubitProjectId),
+    mubitRunScope: normalizeRunScope(record.mubitRunScope),
+    syncAutomation: normalizeSyncAutomation(record.syncAutomation),
+  };
+}
+
 function getSettingsPath(): string {
   return join(homedir(), ".codaph", "settings.json");
 }
@@ -53,15 +105,11 @@ export function loadCodaphSettings(): CodaphSettings {
 
     const projects: Record<string, ProjectSettings> = {};
     for (const [key, value] of Object.entries(projectsRaw)) {
-      if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      const normalized = normalizeProjectSettings(value);
+      if (!normalized) {
         continue;
       }
-      const record = value as Record<string, unknown>;
-      projects[resolve(key)] = {
-        projectName: asString(record.projectName),
-        mubitProjectId: asString(record.mubitProjectId),
-        mubitRunScope: normalizeRunScope(record.mubitRunScope),
-      };
+      projects[resolve(key)] = normalized;
     }
 
     return {
@@ -78,11 +126,19 @@ export function loadCodaphSettings(): CodaphSettings {
 export function saveCodaphSettings(settings: CodaphSettings): void {
   const path = getSettingsPath();
   mkdirSync(dirname(path), { recursive: true });
+  const normalizedProjects: Record<string, ProjectSettings> = {};
+  for (const [projectPath, projectSettings] of Object.entries(settings.projects ?? {})) {
+    const normalized = normalizeProjectSettings(projectSettings);
+    if (!normalized) {
+      continue;
+    }
+    normalizedProjects[resolve(projectPath)] = normalized;
+  }
   const payload: CodaphSettings = {
     mubitApiKey: asString(settings.mubitApiKey),
     openAiApiKey: asString(settings.openAiApiKey),
     mubitActorId: asString(settings.mubitActorId),
-    projects: settings.projects ?? {},
+    projects: normalizedProjects,
   };
   writeFileSync(path, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
 }

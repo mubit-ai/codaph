@@ -6,6 +6,11 @@ import type {
   ReasoningAvailability,
 } from "./lib/core-types";
 import type { MubitMemoryEngine } from "./lib/memory-mubit";
+import {
+  defaultMubitRemoteSyncState,
+  readMubitRemoteSyncState,
+  writeMubitRemoteSyncState,
+} from "./mubit-remote-sync-state";
 
 interface JsonRecord {
   [key: string]: unknown;
@@ -18,18 +23,28 @@ export interface MubitRemoteSyncOptions {
   repoId: string;
   fallbackActorId?: string | null;
   timelineLimit?: number;
+  refresh?: boolean;
+  statePath?: string;
+  triggerSource?: string;
   onProgress?: (progress: { current: number; total: number; imported: number; deduplicated: number; skipped: number }) => void;
 }
 
 export interface MubitRemoteSyncSummary {
   runId: string;
   timelineEvents: number;
+  requestedTimelineLimit: number;
+  refresh: boolean;
   imported: number;
   deduplicated: number;
   skipped: number;
   sessions: number;
   contributors: number;
   lastTs: string | null;
+  snapshotFingerprint: string | null;
+  consecutiveSameSnapshotCount: number;
+  noRemoteChangesDetected: boolean;
+  suspectedServerCap: boolean;
+  diagnosticNote: string | null;
 }
 
 function isRecord(value: unknown): value is JsonRecord {
@@ -81,6 +96,10 @@ function isIsoDate(value: string): boolean {
 
 function buildFallbackEventId(seed: string): string {
   return createHash("sha256").update(seed).digest("hex").slice(0, 24);
+}
+
+function hashText(text: string): string {
+  return createHash("sha256").update(text).digest("hex").slice(0, 16);
 }
 
 function extractActivityRecord(rawTimeline: JsonRecord): JsonRecord | null {
@@ -215,24 +234,119 @@ function parseTimelineEntry(
   };
 }
 
-export async function syncMubitRemoteActivity(options: MubitRemoteSyncOptions): Promise<MubitRemoteSyncSummary> {
-  const snapshot = await options.memory.fetchContextSnapshot({
-    runId: options.runId,
-    timelineLimit: options.timelineLimit ?? 1200,
-    refresh: false,
-  });
+function summarizeTimelineFingerprint(timeline: unknown[]): string | null {
+  if (timeline.length === 0) {
+    return null;
+  }
 
-  const timeline = Array.isArray(snapshot.timeline) ? snapshot.timeline : [];
+  const hasher = createHash("sha256");
+  for (let i = 0; i < timeline.length; i += 1) {
+    const entry = timeline[i];
+    if (isRecord(entry)) {
+      const id = asString(entry.id) ?? `idx:${i}`;
+      const createdAt = asString(entry.created_at) ?? "";
+      const payloadStr =
+        typeof entry.payload === "string"
+          ? entry.payload
+          : typeof entry.activity === "string"
+            ? entry.activity
+            : "";
+      hasher.update(`${id}|${createdAt}|${hashText(payloadStr)}\n`);
+      continue;
+    }
+    hasher.update(`${hashText(JSON.stringify(entry) ?? String(entry))}\n`);
+  }
+  return hasher.digest("hex").slice(0, 24);
+}
+
+function maxIsoTs(a: string | null, b: string | null): string | null {
+  if (!a) {
+    return b;
+  }
+  if (!b) {
+    return a;
+  }
+  return a > b ? a : b;
+}
+
+export async function syncMubitRemoteActivity(options: MubitRemoteSyncOptions): Promise<MubitRemoteSyncSummary> {
+  const requestedTimelineLimit =
+    Number.isFinite(options.timelineLimit) && (options.timelineLimit ?? 0) > 0
+      ? Math.floor(options.timelineLimit as number)
+      : 1200;
+  const refresh = options.refresh ?? true;
+  const priorState = options.statePath ? await readMubitRemoteSyncState(options.statePath) : defaultMubitRemoteSyncState();
+  const startedAt = new Date().toISOString();
+
+  let timeline: unknown[] = [];
+  let snapshotFingerprint: string | null = null;
+  let consecutiveSameSnapshotCount = 0;
+  let suspectedServerCap = false;
+  let diagnosticNote: string | null = null;
+
+  const writeFailureState = async (errorMessage: string): Promise<void> => {
+    if (!options.statePath) {
+      return;
+    }
+    const next = {
+      ...priorState,
+      lastRunAt: startedAt,
+      lastTriggerSource: options.triggerSource ?? priorState.lastTriggerSource ?? "manual",
+      requestedTimelineLimit,
+      lastError: errorMessage,
+    };
+    await writeMubitRemoteSyncState(options.statePath, next);
+  };
+
+  let snapshot: Record<string, unknown>;
+  try {
+    snapshot = await options.memory.fetchContextSnapshot({
+      runId: options.runId,
+      timelineLimit: requestedTimelineLimit,
+      refresh,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    await writeFailureState(message).catch(() => {});
+    throw error;
+  }
+
+  timeline = Array.isArray(snapshot.timeline) ? snapshot.timeline : [];
+  snapshotFingerprint = summarizeTimelineFingerprint(timeline);
+  if (snapshotFingerprint && priorState.lastSnapshotFingerprint && snapshotFingerprint === priorState.lastSnapshotFingerprint) {
+    consecutiveSameSnapshotCount = (priorState.consecutiveSameSnapshotCount ?? 0) + 1;
+  } else {
+    consecutiveSameSnapshotCount = 0;
+  }
+  if (
+    snapshotFingerprint &&
+    consecutiveSameSnapshotCount >= 3 &&
+    requestedTimelineLimit > timeline.length &&
+    timeline.length > 0
+  ) {
+    suspectedServerCap = true;
+    diagnosticNote =
+      `MuBit snapshot appears capped (received ${timeline.length} despite requested ${requestedTimelineLimit}); Codaph is deduping locally. This is a snapshot API limitation, not a local sync error.`;
+  }
+
   let imported = 0;
   let deduplicated = 0;
   let skipped = 0;
   let lastTs: string | null = null;
+  let timelineMaxTs: string | null = null;
   const sessions = new Set<string>();
   const contributors = new Set<string>();
   const fallbackActorId = options.fallbackActorId ?? null;
 
   for (let i = 0; i < timeline.length; i += 1) {
-    const event = parseTimelineEntry(timeline[i], options.repoId, fallbackActorId);
+    const rawTimelineEntry = timeline[i];
+    if (isRecord(rawTimelineEntry)) {
+      const createdAt = asString(rawTimelineEntry.created_at);
+      if (createdAt && isIsoDate(createdAt)) {
+        timelineMaxTs = maxIsoTs(timelineMaxTs, new Date(createdAt).toISOString());
+      }
+    }
+    const event = parseTimelineEntry(rawTimelineEntry, options.repoId, fallbackActorId);
     if (!event) {
       skipped += 1;
       options.onProgress?.({
@@ -258,6 +372,7 @@ export async function syncMubitRemoteActivity(options: MubitRemoteSyncOptions): 
         lastTs = event.ts;
       }
     }
+    timelineMaxTs = maxIsoTs(timelineMaxTs, event.ts);
 
     options.onProgress?.({
       current: i + 1,
@@ -268,14 +383,51 @@ export async function syncMubitRemoteActivity(options: MubitRemoteSyncOptions): 
     });
   }
 
+  const noRemoteChangesDetected = Boolean(snapshotFingerprint && priorState.lastSnapshotFingerprint === snapshotFingerprint);
+  if (noRemoteChangesDetected && !diagnosticNote) {
+    diagnosticNote = "No remote changes detected (snapshot matches previous pull).";
+  }
+
+  if (options.statePath) {
+    const next = {
+      ...priorState,
+      lastRunAt: startedAt,
+      lastSuccessAt: new Date().toISOString(),
+      lastTriggerSource: options.triggerSource ?? priorState.lastTriggerSource ?? "manual",
+      requestedTimelineLimit,
+      receivedTimelineCount: timeline.length,
+      lastImported: imported,
+      lastDeduplicated: deduplicated,
+      lastSkipped: skipped,
+      lastMaxTs: timelineMaxTs,
+      lastSnapshotFingerprint: snapshotFingerprint,
+      consecutiveSameSnapshotCount,
+      suspectedServerCap,
+      lastError: null,
+      pendingTrigger: {
+        pending: false,
+        source: null,
+        ts: null,
+      },
+    };
+    await writeMubitRemoteSyncState(options.statePath, next).catch(() => {});
+  }
+
   return {
     runId: options.runId,
     timelineEvents: timeline.length,
+    requestedTimelineLimit,
+    refresh,
     imported,
     deduplicated,
     skipped,
     sessions: sessions.size,
     contributors: contributors.size,
     lastTs,
+    snapshotFingerprint,
+    consecutiveSameSnapshotCount,
+    noRemoteChangesDetected,
+    suspectedServerCap,
+    diagnosticNote,
   };
 }

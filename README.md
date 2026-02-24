@@ -52,6 +52,8 @@ After npm publish, users can run Codaph directly without cloning:
 ```bash
 npx @codaph/codaph --help
 npx @codaph/codaph tui --cwd /absolute/project/path --mubit
+# fallback if your npx does not auto-resolve the bin:
+npx --yes --package @codaph/codaph codaph --help
 ```
 
 ## Release Tag Publish (GitHub Actions)
@@ -92,7 +94,7 @@ TUI flow:
 1. Add or select a project folder.
 2. Codaph auto-detects GitHub `owner/repo` from `origin` and uses it as shared MuBit project id (if not explicitly set).
 3. Sync Codex history from `~/.codex/sessions` into Codaph mirror + MuBit.
-4. Optionally sync shared remote MuBit timeline back into local mirror (`r`) to pull collaborator activity.
+4. Codaph can auto-install sync automation on first `sync`; use `r` in TUI as a manual cloud pull fallback.
 5. Inspect prompts, thoughts, assistant output, and file changes by session.
 6. Query MuBit semantic memory for the active session.
 
@@ -102,7 +104,7 @@ TUI keyboard map:
 - `o`: settings overlay (set project name/id, actor id, API keys, run scope)
 - `p`: switch project
 - `a`: add/switch project path
-- Browse view: `up/down` navigate sessions, `enter` inspect, `s` sync local codex, `r` sync remote MuBit
+- Browse view: `up/down` navigate sessions, `enter` inspect, `s` sync now (local+cloud), `r` pull cloud MuBit (manual/fallback)
 - Inspect view: `up/down` prompt navigation, `tab` cycle pane focus, `d` full diff overlay, `m` MuBit chat, `f` actor filter, `c` contributors overlay, `left` or `esc` back
 - Chat panel: type message, `enter` send, `esc` close chat
 
@@ -114,10 +116,15 @@ bun run cli doctor
 
 # import normal Codex app/CLI usage into .codaph and MuBit
 bun run cli sync --cwd /absolute/project/path
-# import shared MuBit timeline into local mirror (for collaborator visibility)
+# explicit phases (fallback/manual)
+bun run cli sync push --cwd /absolute/project/path
+bun run cli sync pull --cwd /absolute/project/path
+# compatibility alias (same as sync pull)
 bun run cli sync remote --cwd /absolute/project/path
-# optional local-only mode (no remote writes)
+# optional push-only mode (compat alias)
 bun run cli sync --cwd /absolute/project/path --local-only
+# inspect sync automation + remote snapshot diagnostics
+bun run cli sync status --cwd /absolute/project/path
 
 # direct capture through Codaph
 bun run cli run "Summarize this repo" --cwd /absolute/project/path
@@ -159,6 +166,6 @@ Team-shared MuBit setup:
    In session mode it is `codaph:<owner/repo>:<sessionId>`.
 4. Set per-user `CODAPH_ACTOR_ID` (or `--mubit-actor-id`) so contributor identity is preserved in metadata.
    If unset, Codaph auto-detects via `gh api user`, then git config, then shell user.
-5. Use `bun run cli sync remote --cwd <project>` (or `r` in TUI) to import remote activity into local timeline and render per-actor prompts/thoughts/diffs.
+5. Run `bun run cli sync --cwd <project>` to push local history and pull shared activity. Use `bun run cli sync pull` (or `r` in TUI) as a manual cloud pull fallback.
 
 Codaph is now CLI/TUI-only. All captured events are written under `<project>/.codaph`.

@@ -25,6 +25,7 @@ export interface IngestPipelineOptions {
   onMemoryError?: (error: unknown, event: CapturedEventEnvelope) => void;
   memoryWriteTimeoutMs?: number;
   memoryMaxConsecutiveErrors?: number;
+  memoryWriteConcurrency?: number;
   defaultActorId?: string | null;
 }
 
@@ -63,11 +64,76 @@ function getReasoningAvailability(payload: Record<string, unknown>): ReasoningAv
 export class IngestPipeline {
   private consecutiveMemoryErrors = 0;
   private memoryCircuitOpen = false;
+  private readonly pendingMemoryWrites = new Set<Promise<void>>();
+  private pendingMemoryWriteError: unknown = null;
 
   constructor(
     private readonly mirror: MirrorAppender,
     private readonly options: IngestPipelineOptions = {},
   ) {}
+
+  private getMemoryWriteConcurrency(): number {
+    const raw = this.options.memoryWriteConcurrency ?? 1;
+    if (!Number.isFinite(raw)) {
+      return 1;
+    }
+    return Math.max(1, Math.trunc(raw));
+  }
+
+  private async writeMemoryEvent(event: CapturedEventEnvelope): Promise<void> {
+    if (!this.options.memoryEngine || this.memoryCircuitOpen) {
+      return;
+    }
+
+    try {
+      const timeoutMs = this.options.memoryWriteTimeoutMs ?? 15000;
+      await withTimeout(this.options.memoryEngine.writeEvent(event), timeoutMs, "MuBit write");
+      this.consecutiveMemoryErrors = 0;
+    } catch (error) {
+      this.consecutiveMemoryErrors += 1;
+      const maxConsecutiveErrors = this.options.memoryMaxConsecutiveErrors ?? 3;
+      if (!this.memoryCircuitOpen && this.consecutiveMemoryErrors >= maxConsecutiveErrors) {
+        this.memoryCircuitOpen = true;
+        if (this.options.onMemoryError) {
+          this.options.onMemoryError(
+            new Error(`MuBit write circuit opened after ${this.consecutiveMemoryErrors} consecutive errors`),
+            event,
+          );
+        }
+      }
+      if (this.options.onMemoryError) {
+        this.options.onMemoryError(error, event);
+      }
+      if (this.options.failOnMemoryError) {
+        throw error;
+      }
+    }
+  }
+
+  private async enqueueMemoryWrite(event: CapturedEventEnvelope): Promise<void> {
+    const concurrency = this.getMemoryWriteConcurrency();
+    if (concurrency <= 1) {
+      await this.writeMemoryEvent(event);
+      return;
+    }
+
+    while (this.pendingMemoryWrites.size >= concurrency) {
+      await Promise.race(this.pendingMemoryWrites);
+    }
+
+    let task: Promise<void>;
+    task = this.writeMemoryEvent(event)
+      .catch((error) => {
+        if (this.pendingMemoryWriteError == null) {
+          this.pendingMemoryWriteError = error;
+        }
+      })
+      .finally(() => {
+        this.pendingMemoryWrites.delete(task);
+      });
+
+    this.pendingMemoryWrites.add(task);
+  }
 
   async ingest(
     eventType: string,
@@ -97,29 +163,7 @@ export class IngestPipeline {
     }
 
     if (this.options.memoryEngine && !this.memoryCircuitOpen) {
-      try {
-        const timeoutMs = this.options.memoryWriteTimeoutMs ?? 15000;
-        await withTimeout(this.options.memoryEngine.writeEvent(event), timeoutMs, "MuBit write");
-        this.consecutiveMemoryErrors = 0;
-      } catch (error) {
-        this.consecutiveMemoryErrors += 1;
-        const maxConsecutiveErrors = this.options.memoryMaxConsecutiveErrors ?? 3;
-        if (this.consecutiveMemoryErrors >= maxConsecutiveErrors) {
-          this.memoryCircuitOpen = true;
-          if (this.options.onMemoryError) {
-            this.options.onMemoryError(
-              new Error(`MuBit write circuit opened after ${this.consecutiveMemoryErrors} consecutive errors`),
-              event,
-            );
-          }
-        }
-        if (this.options.onMemoryError) {
-          this.options.onMemoryError(error, event);
-        }
-        if (this.options.failOnMemoryError) {
-          throw error;
-        }
-      }
+      await this.enqueueMemoryWrite(event);
     }
 
     return event;
@@ -127,5 +171,22 @@ export class IngestPipeline {
 
   async ingestRawLine(sessionId: string, line: string): Promise<void> {
     await this.mirror.appendRawLine(sessionId, line);
+  }
+
+  async flush(): Promise<void> {
+    if (this.pendingMemoryWrites.size > 0) {
+      await Promise.allSettled([...this.pendingMemoryWrites]);
+    }
+    if (this.options.failOnMemoryError && this.pendingMemoryWriteError != null) {
+      const error = this.pendingMemoryWriteError;
+      this.pendingMemoryWriteError = null;
+      throw error;
+    }
+    this.pendingMemoryWriteError = null;
+
+    const maybeFlush = (this.mirror as { flush?: () => Promise<void> }).flush;
+    if (typeof maybeFlush === "function") {
+      await maybeFlush.call(this.mirror);
+    }
   }
 }

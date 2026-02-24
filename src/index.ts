@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { emitKeypressEvents } from "node:readline";
+import { createInterface, emitKeypressEvents } from "node:readline";
 import { stdin as input, stdout as output } from "node:process";
 import { basename, isAbsolute, relative, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -16,7 +16,8 @@ import {
   type CodexHistorySyncProgress,
   type CodexHistorySyncSummary,
 } from "./codex-history-sync";
-import { syncMubitRemoteActivity } from "./mubit-remote-sync";
+import { syncMubitRemoteActivity, type MubitRemoteSyncSummary } from "./mubit-remote-sync";
+import { getMubitRemoteSyncStatePath, readMubitRemoteSyncState } from "./mubit-remote-sync-state";
 import {
   addProjectToRegistry,
   loadRegistry,
@@ -33,6 +34,21 @@ import {
   type CodaphSettings,
   type MubitRunScope,
 } from "./settings-store";
+import {
+  SYNC_AUTOMATION_SETUP_VERSION,
+  acquireSyncLock,
+  appendSyncAutomationLog,
+  detectHookManagerWarnings,
+  getSyncAutomationLogPath,
+  getSyncLockPath,
+  installAgentCompleteHookBestEffort,
+  installGitPostCommitHook,
+  markPendingSyncTrigger,
+  normalizeSyncAutomationSettings,
+  releaseSyncLock,
+  shouldRunRemotePullNow,
+  type SyncTriggerSource,
+} from "./sync-automation";
 
 type Flags = Record<string, string | boolean>;
 type CaptureMode = "run" | "exec";
@@ -104,7 +120,12 @@ function help(): string {
     "",
     "History Import (from ~/.codex/sessions):",
     "  codaph sync [--cwd <path>] [--json] [--no-mubit|--local-only]",
-    "  codaph sync remote [--cwd <path>] [--limit <n>] [--json]",
+    "  codaph sync all [--cwd <path>] [--json]",
+    "  codaph sync push [--cwd <path>] [--json] [--local-only]",
+    "  codaph sync pull [--cwd <path>] [--timeline-limit <n>] [--refresh|--no-refresh] [--json]",
+    "  codaph sync remote [--cwd <path>] [--limit <n>] [--json]  (alias for sync pull)",
+    "  codaph sync status [--cwd <path>] [--json]",
+    "  codaph sync setup [--cwd <path>] [--yes] [--force]  (install auto-sync hooks/onboarding)",
     "",
     "Read / Inspect:",
     "  codaph sessions list [--cwd <path>]",
@@ -331,6 +352,8 @@ async function doctor(rest: string[]): Promise<void> {
   const actorId = resolveMubitActorId(flags, cwd, settings);
   const runScope = resolveMubitRunScope(flags, cwd, settings);
   const repoId = resolveRepoIdForProject(flags, cwd, settings);
+  const auto = resolveSyncAutomationConfig(settings, cwd);
+  const remoteState = await maybeReadRemoteSyncStateForProject(cwd, repoId).catch(() => null);
 
   console.log(`cwd: ${cwd}`);
   console.log(`repoId(local): ${repoId}`);
@@ -343,6 +366,19 @@ async function doctor(rest: string[]): Promise<void> {
   console.log(`MuBit runtime: ${memory?.isEnabled() ? "enabled" : "disabled"}`);
   console.log(`MuBit run scope preview: ${mubitRunIdForContext(flags, repoId, "session-preview", cwd, settings)}`);
   console.log(`MuBit write timeout: ${resolveMubitWriteTimeoutMs(flags)}ms`);
+  console.log(
+    `Sync automation: ${auto.enabled ? "enabled" : "disabled"} (post-commit:${auto.gitPostCommit ? "on" : "off"}, agent-complete:${auto.agentComplete ? "on" : "off"}, autoPull:${auto.autoPullOnSync ? "on" : "off"}, tuiWarm:${auto.autoWarmTuiOnOpen ? "on" : "off"}, cooldown=${auto.remotePullCooldownSec}s)`,
+  );
+  if (remoteState) {
+    console.log(
+      `Remote sync state: lastSuccess=${remoteState.lastSuccessAt ?? "(never)"} received=${remoteState.receivedTimelineCount ?? 0} imported=${remoteState.lastImported ?? 0} dedup=${remoteState.lastDeduplicated ?? 0} sameSnapshot=${remoteState.consecutiveSameSnapshotCount} capped=${remoteState.suspectedServerCap ? "yes" : "no"} pending=${remoteState.pendingTrigger.pending ? "yes" : "no"}`,
+    );
+    if (remoteState.lastError) {
+      console.log(`Remote sync last error: ${remoteState.lastError}`);
+    }
+  } else {
+    console.log("Remote sync state: none yet");
+  }
   console.log(`OpenAI key present: ${openAiKeyPresent ? "yes" : "no"}`);
   console.log(`OpenAI agent: ${agentEnabled ? "enabled" : "disabled"}`);
 
@@ -359,23 +395,30 @@ function createPipeline(
   cwd: string,
   flags: Flags,
   settings?: CodaphSettings,
-): { pipeline: IngestPipeline; memory: MubitMemoryEngine | null } {
+  options: {
+    bulkSync?: boolean;
+  } = {},
+): { pipeline: IngestPipeline; memory: MubitMemoryEngine | null; mirror: JsonlMirror } {
   const loaded = loadSettingsOrDefault(settings);
   const mirrorRoot = resolve(cwd, ".codaph");
-  const mirror = new JsonlMirror(mirrorRoot);
+  const mirror = new JsonlMirror(mirrorRoot, {
+    indexWriteMode: "batch",
+    autoFlushEveryEvents: 0,
+  });
   const memory = createMubitMemory(flags, cwd, loaded);
   const memoryWriteTimeoutMs = resolveMubitWriteTimeoutMs(flags);
   const defaultActorId = resolveMubitActorId(flags, cwd, loaded);
   const pipeline = new IngestPipeline(mirror, {
     memoryEngine: memory ?? undefined,
     memoryWriteTimeoutMs,
+    memoryWriteConcurrency: options.bulkSync ? 8 : 1,
     defaultActorId,
     onMemoryError: (error) => {
       const message = error instanceof Error ? error.message : String(error);
       console.warn(`MuBit write failed: ${message}`);
     },
   });
-  return { pipeline, memory };
+  return { pipeline, memory, mirror };
 }
 
 function formatSummary(summary: CodexHistorySyncSummary): string {
@@ -392,38 +435,347 @@ function shortenPath(path: string, maxChars = 58): string {
   return `...${path.slice(-(maxChars - 3))}`;
 }
 
+function renderInlineProgressBar(current: number, total: number, width = 14): string {
+  const safeTotal = Math.max(0, total);
+  const safeCurrent = Math.max(0, Math.min(current, safeTotal));
+  if (safeTotal <= 0) {
+    return `[${"-".repeat(width)}]`;
+  }
+  const filled = Math.round((safeCurrent / safeTotal) * width);
+  return `[${"#".repeat(Math.max(0, filled))}${"-".repeat(Math.max(0, width - filled))}]`;
+}
+
+function formatElapsedMs(startedAtMs: number): string {
+  const elapsedMs = Math.max(0, Date.now() - startedAtMs);
+  const seconds = Math.floor(elapsedMs / 1000);
+  const minutes = Math.floor(seconds / 60);
+  const remSeconds = seconds % 60;
+  if (minutes > 0) {
+    return `${minutes}m${String(remSeconds).padStart(2, "0")}s`;
+  }
+  return `${remSeconds}s`;
+}
+
 function createSyncProgressReporter(prefix: string): {
+  start: () => void;
   onProgress: (progress: CodexHistorySyncProgress) => void;
   finish: () => void;
 } {
   let lastInlineLength = 0;
   let lastPrintAt = 0;
+  let startedAtMs = Date.now();
+  let spinnerAt = 0;
+  let timer: ReturnType<typeof setInterval> | null = null;
+  let lastProgress: CodexHistorySyncProgress | null = null;
+  let announced = false;
+  const spinnerFrames = ["-", "\\", "|", "/"];
+
+  const render = (force = false) => {
+    const progress = lastProgress;
+    const spinner = spinnerFrames[spinnerAt % spinnerFrames.length] ?? "-";
+    spinnerAt += 1;
+    const elapsed = formatElapsedMs(startedAtMs);
+    const line = progress
+      ? (() => {
+        const session = progress.currentSessionId ? progress.currentSessionId.slice(0, 8) : "unknown";
+        const processed = Math.max(0, Math.min(progress.processedFiles ?? progress.matchedFiles, progress.scannedFiles));
+        const progressBar = renderInlineProgressBar(processed, progress.scannedFiles, 14);
+        return `${spinner} ${prefix} ${progressBar} ${elapsed} | scan ${processed}/${progress.scannedFiles} | match ${progress.matchedFiles} | events ${progress.importedEvents} | line ${progress.currentLine} | session ${session} | ${shortenPath(progress.currentFile)}`;
+      })()
+      : `${spinner} ${prefix} [${"-".repeat(14)}] ${elapsed} | starting...`;
+
+    if (output.isTTY) {
+      const padding = " ".repeat(Math.max(0, lastInlineLength - line.length));
+      output.write(`\r${line}${padding}`);
+      lastInlineLength = line.length;
+      announced = true;
+      return;
+    }
+
+    const now = Date.now();
+    if (!force && now - lastPrintAt < 1500) {
+      return;
+    }
+    lastPrintAt = now;
+    console.log(line);
+    announced = true;
+  };
 
   return {
+    start() {
+      startedAtMs = Date.now();
+      spinnerAt = 0;
+      lastProgress = null;
+      if (output.isTTY && !timer) {
+        render(true);
+        timer = setInterval(() => render(false), 120);
+      } else if (!output.isTTY) {
+        render(true);
+      }
+    },
     onProgress(progress) {
-      const session = progress.currentSessionId ? progress.currentSessionId.slice(0, 8) : "unknown";
-      const line = `${prefix} files ${progress.matchedFiles}/${progress.scannedFiles} | events ${progress.importedEvents} | line ${progress.currentLine} | session ${session} | ${shortenPath(progress.currentFile)}`;
-
-      if (output.isTTY) {
-        const padding = " ".repeat(Math.max(0, lastInlineLength - line.length));
-        output.write(`\r${line}${padding}`);
-        lastInlineLength = line.length;
-        return;
-      }
-
-      const now = Date.now();
-      if (now - lastPrintAt < 1500) {
-        return;
-      }
-      lastPrintAt = now;
-      console.log(line);
+      lastProgress = progress;
+      render(false);
     },
     finish() {
+      if (timer) {
+        clearInterval(timer);
+        timer = null;
+      }
+      if (!announced) {
+        return;
+      }
       if (output.isTTY && lastInlineLength > 0) {
         output.write("\n");
       }
     },
   };
+}
+
+interface SyncPushPhaseResult {
+  repoId: string;
+  actorId: string | null;
+  summary: CodexHistorySyncSummary;
+  mubitRequested: boolean;
+  mubitEnabled: boolean;
+}
+
+interface SyncPullPhaseResult {
+  repoId: string;
+  projectId: string;
+  actorId: string | null;
+  statePath: string;
+  summary: MubitRemoteSyncSummary;
+}
+
+interface SyncPullPhaseSkipped {
+  skipped: true;
+  reason: string;
+}
+
+type SyncPullPhaseOutcome = SyncPullPhaseResult | SyncPullPhaseSkipped;
+
+interface SyncWorkflowSummary {
+  schema: "codaph.sync.v2";
+  mode: "all" | "push" | "pull";
+  trigger: SyncTriggerSource;
+  push: (SyncPushPhaseResult & { skipped?: false }) | { skipped: true; reason: string };
+  pull: (SyncPullPhaseResult & { skipped?: false }) | { skipped: true; reason: string };
+  automation: {
+    enabled: boolean;
+    gitPostCommit: boolean;
+    agentComplete: boolean;
+    autoWarmTuiOnOpen: boolean;
+    autoPullOnSync: boolean;
+    remotePullCooldownSec: number;
+  };
+  timing: {
+    startedAt: string;
+    finishedAt: string;
+    durationMs: number;
+  };
+  lockWaited: boolean;
+  lockBusy: boolean;
+}
+
+function isSyncPullPhaseSkipped(value: SyncPullPhaseOutcome): value is SyncPullPhaseSkipped {
+  return (value as SyncPullPhaseSkipped).skipped === true;
+}
+
+function isSyncPushPhaseSkipped(
+  value: SyncPushPhaseResult | { skipped: true; reason: string },
+): value is { skipped: true; reason: string } {
+  return (value as { skipped?: boolean }).skipped === true;
+}
+
+function resolveMirrorRoot(cwd: string): string {
+  return resolve(cwd, ".codaph");
+}
+
+function resolveRemoteSyncStatePath(cwd: string, repoId: string): string {
+  return getMubitRemoteSyncStatePath(resolveMirrorRoot(cwd), repoId);
+}
+
+function resolveSyncAutomationConfig(settings: CodaphSettings, cwd: string) {
+  const project = getProjectSettings(settings, cwd);
+  return normalizeSyncAutomationSettings(project.syncAutomation ?? null);
+}
+
+function formatTimeAgo(ts: string | null): string | null {
+  if (!ts) {
+    return null;
+  }
+  const parsed = Date.parse(ts);
+  if (!Number.isFinite(parsed)) {
+    return null;
+  }
+  const deltaMs = Date.now() - parsed;
+  if (deltaMs < 0) {
+    return "just now";
+  }
+  const seconds = Math.floor(deltaMs / 1000);
+  if (seconds < 60) {
+    return `${seconds}s ago`;
+  }
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) {
+    return `${minutes}m ago`;
+  }
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) {
+    return `${hours}h ago`;
+  }
+  const days = Math.floor(hours / 24);
+  return `${days}d ago`;
+}
+
+function isInteractiveTerminal(): boolean {
+  return Boolean(input.isTTY && output.isTTY);
+}
+
+async function promptYesNo(question: string): Promise<boolean> {
+  const rl = createInterface({ input, output });
+  try {
+    const answer = await new Promise<string>((resolve) => rl.question(`${question} [y/N] `, resolve));
+    const normalized = answer.trim().toLowerCase();
+    return normalized === "y" || normalized === "yes";
+  } finally {
+    rl.close();
+  }
+}
+
+function resolveTimelineLimit(flags: Flags, fallback = 1200): number {
+  const raw = getStringFlag(flags, "timeline-limit") ?? getStringFlag(flags, "limit");
+  if (!raw) {
+    return fallback;
+  }
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function resolvePullRefresh(flags: Flags, fallback = true): boolean {
+  return getBooleanFlag(flags, "refresh", fallback);
+}
+
+async function runSyncPushPhase(options: {
+  cwd: string;
+  flags: Flags;
+  settings: CodaphSettings;
+  onProgress?: (progress: CodexHistorySyncProgress) => void;
+}): Promise<SyncPushPhaseResult> {
+  const { cwd, flags, settings, onProgress } = options;
+  const localOnly = getBooleanFlag(flags, "local-only", false);
+  const legacySyncMubit = getBooleanFlag(flags, "sync-mubit", false);
+  const syncFlags: Flags = { ...flags };
+  if (legacySyncMubit) {
+    syncFlags.mubit = true;
+  }
+  if (localOnly) {
+    syncFlags.mubit = false;
+  }
+
+  const repoId = resolveRepoIdForProject(syncFlags, cwd, settings);
+  const actorId = resolveMubitActorId(syncFlags, cwd, settings);
+  const { pipeline, memory } = createPipeline(cwd, syncFlags, settings, { bulkSync: true });
+  let summary: CodexHistorySyncSummary;
+  try {
+    summary = await syncCodexHistory({
+      projectPath: cwd,
+      pipeline,
+      repoId,
+      actorId,
+      onProgress,
+    });
+  } finally {
+    await pipeline.flush();
+  }
+
+  return {
+    repoId,
+    actorId,
+    summary,
+    mubitRequested: shouldEnableMubit(syncFlags, settings),
+    mubitEnabled: Boolean(memory?.isEnabled()),
+  };
+}
+
+async function runSyncPullPhase(options: {
+  cwd: string;
+  flags: Flags;
+  settings: CodaphSettings;
+  triggerSource: SyncTriggerSource;
+  requireMubit?: boolean;
+  onProgress?: (progress: { current: number; total: number; imported: number; deduplicated: number; skipped: number }) => void;
+}): Promise<SyncPullPhaseOutcome> {
+  const { cwd, flags, settings, triggerSource, requireMubit = true, onProgress } = options;
+  const repoId = resolveRepoIdForProject(flags, cwd, settings);
+  const projectId = resolveMubitProjectId(flags, cwd, settings) ?? repoId;
+  const actorId = resolveMubitActorId(flags, cwd, settings);
+  const engine = createMubitMemory(flags, cwd, settings);
+  if (!engine || !engine.isEnabled()) {
+    if (requireMubit) {
+      throw new Error("MuBit is disabled. Set MUBIT_API_KEY (or MUBIT_APIKEY) and use --mubit.");
+    }
+    return { skipped: true, reason: "MuBit is disabled or not configured." };
+  }
+
+  const mirror = new JsonlMirror(resolveMirrorRoot(cwd), {
+    indexWriteMode: "batch",
+    autoFlushEveryEvents: 0,
+  });
+  let summary: MubitRemoteSyncSummary;
+  try {
+    summary = await syncMubitRemoteActivity({
+      mirror,
+      memory: engine,
+      runId: mubitRunIdForProject(projectId),
+      repoId,
+      fallbackActorId: actorId,
+      timelineLimit: resolveTimelineLimit(flags),
+      refresh: resolvePullRefresh(flags, true),
+      statePath: resolveRemoteSyncStatePath(cwd, repoId),
+      triggerSource,
+      onProgress,
+    });
+  } finally {
+    await mirror.flush();
+  }
+
+  return {
+    repoId,
+    projectId,
+    actorId,
+    statePath: resolveRemoteSyncStatePath(cwd, repoId),
+    summary,
+  };
+}
+
+function formatPushPhaseLine(result: SyncPushPhaseResult | { skipped: true; reason: string }): string {
+  if (isSyncPushPhaseSkipped(result)) {
+    return `Push (local->cloud): skipped (${result.reason})`;
+  }
+  const { summary } = result;
+  if (summary.matchedFiles === 0) {
+    return `Push (local->cloud): No Codex history for this repo (matched 0 of ${summary.scannedFiles} local Codex session files).`;
+  }
+  if (summary.importedEvents === 0) {
+    return `Push (local->cloud): no new local events for this repo (matched files=${summary.matchedFiles}/${summary.scannedFiles}, sessions=${summary.importedSessions}).`;
+  }
+  return `Push (local->cloud): local events imported=${summary.importedEvents}, files=${summary.matchedFiles}/${summary.scannedFiles}, sessions=${summary.importedSessions}, MuBit=${result.mubitEnabled ? "on" : result.mubitRequested ? "requested-unavailable" : "off"}`;
+}
+
+function formatPullPhaseLine(result: SyncPullPhaseOutcome): string {
+  if (isSyncPullPhaseSkipped(result)) {
+    return `Pull (cloud->local): skipped (${result.reason})`;
+  }
+  const s = result.summary;
+  const cap = s.suspectedServerCap ? ", capped?" : "";
+  const noChange = s.noRemoteChangesDetected ? ", no remote changes" : "";
+  return `Pull (cloud->local): snapshot received=${s.timelineEvents} (requested=${s.requestedTimelineLimit}${cap}), imported=${s.imported}, dedup=${s.deduplicated}, skipped=${s.skipped}${noChange}`;
+}
+
+async function maybeReadRemoteSyncStateForProject(cwd: string, repoId: string) {
+  return readMubitRemoteSyncState(resolveRemoteSyncStatePath(cwd, repoId));
 }
 
 async function runCapture(command: CaptureMode, rest: string[]): Promise<void> {
@@ -448,10 +800,16 @@ async function runCapture(command: CaptureMode, rest: string[]): Promise<void> {
 
   const adapter = command === "run" ? new CodexSdkAdapter(pipeline) : new CodexExecAdapter(pipeline);
 
-  const result = await adapter.runAndCapture(options, (event) => {
-    const itemType = (event.payload.item as { type?: string } | undefined)?.type;
-    console.log(`${event.ts} ${event.eventType}${itemType ? `:${itemType}` : ""}`);
-  });
+  const result = await (async () => {
+    try {
+      return await adapter.runAndCapture(options, (event) => {
+        const itemType = (event.payload.item as { type?: string } | undefined)?.type;
+        console.log(`${event.ts} ${event.eventType}${itemType ? `:${itemType}` : ""}`);
+      });
+    } finally {
+      await pipeline.flush();
+    }
+  })();
 
   console.log(`sessionId: ${result.sessionId}`);
   console.log(`threadId: ${result.threadId ?? "(none)"}`);
@@ -533,29 +891,288 @@ async function diff(rest: string[]): Promise<void> {
   }
 }
 
-async function syncHistory(rest: string[]): Promise<void> {
-  const { flags } = parseArgs(rest);
-  const cwd = resolve(getStringFlag(flags, "cwd") ?? process.cwd());
-  const localOnly = getBooleanFlag(flags, "local-only", false);
-  const legacySyncMubit = getBooleanFlag(flags, "sync-mubit", false);
-  const syncFlags: Flags = { ...flags };
-  if (legacySyncMubit) {
-    syncFlags.mubit = true;
-  }
-  if (localOnly) {
-    syncFlags.mubit = false;
+async function enableSyncAutomationForProject(cwd: string, settings: CodaphSettings): Promise<{
+  settings: CodaphSettings;
+  installed: {
+    gitPostCommit: boolean;
+    agentComplete: boolean;
+    partial: boolean;
+    warnings: string[];
+    manualSteps: string[];
+  };
+}> {
+  let repoRoot = cwd;
+  try {
+    repoRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], {
+      cwd,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim() || cwd;
+  } catch {
+    repoRoot = cwd;
   }
 
+  const warnings = await detectHookManagerWarnings(repoRoot);
+  const manualSteps: string[] = [];
+
+  const gitPostCommit = await installGitPostCommitHook(repoRoot);
+  if (!gitPostCommit.ok) {
+    warnings.push(`Git post-commit hook automation was not installed: ${gitPostCommit.warning ?? "unknown error"}`);
+  }
+
+  const agentComplete = await installAgentCompleteHookBestEffort(repoRoot);
+  if (!agentComplete.ok) {
+    warnings.push(agentComplete.warning ?? "Agent-complete hook auto-install was not possible.");
+    manualSteps.push(`Attach this command to your agent-complete hook: ${agentComplete.manualSnippet}`);
+  }
+
+  const currentProject = getProjectSettings(settings, cwd);
+  const mergedAutomation = normalizeSyncAutomationSettings(currentProject.syncAutomation ?? null);
+  const nextSettings = updateProjectSettings(settings, cwd, {
+    ...currentProject,
+    syncAutomation: {
+      ...mergedAutomation,
+      enabled: true,
+      gitPostCommit: gitPostCommit.ok,
+      agentComplete: agentComplete.ok,
+      autoPullOnSync: mergedAutomation.autoPullOnSync,
+      autoWarmTuiOnOpen: mergedAutomation.autoWarmTuiOnOpen,
+      remotePullCooldownSec: mergedAutomation.remotePullCooldownSec,
+      lastSetupVersion: SYNC_AUTOMATION_SETUP_VERSION,
+    },
+  });
+  saveCodaphSettings(nextSettings);
+
+  return {
+    settings: nextSettings,
+    installed: {
+      gitPostCommit: gitPostCommit.ok,
+      agentComplete: agentComplete.ok,
+      partial: !gitPostCommit.ok || !agentComplete.ok,
+      warnings,
+      manualSteps,
+    },
+  };
+}
+
+async function maybeOfferSyncAutomationSetup(
+  cwd: string,
+  flags: Flags,
+  settings: CodaphSettings,
+  mode: "all" | "push" | "pull",
+): Promise<void> {
+  if (mode !== "all" && mode !== "push") {
+    return;
+  }
+  if (getBooleanFlag(flags, "no-auto-enable", false)) {
+    return;
+  }
+
+  const auto = resolveSyncAutomationConfig(settings, cwd);
+  const forceEnable = getBooleanFlag(flags, "enable-auto", false);
+  if (auto.enabled && !forceEnable) {
+    return;
+  }
+
+  const confirmBypass = getBooleanFlag(flags, "yes", false);
+  if (!forceEnable && auto.enabled) {
+    return;
+  }
+
+  if (!isInteractiveTerminal()) {
+    if (forceEnable && !confirmBypass) {
+      console.log("Automation install requires confirmation in non-interactive mode. Re-run with `codaph sync --enable-auto --yes`.");
+      return;
+    }
+    if (!forceEnable) {
+      console.log("Automation is not enabled for this repo.");
+      console.log("Run `codaph sync --enable-auto --yes` to install post-commit and agent-complete sync triggers.");
+      return;
+    }
+  }
+
+  let approved = forceEnable && confirmBypass;
+  if (!approved) {
+    approved = await promptYesNo("Enable Codaph sync automation for this repo (post-commit + agent-complete hooks)?");
+  }
+  if (!approved) {
+    return;
+  }
+
+  const result = await enableSyncAutomationForProject(cwd, settings);
+  console.log(
+    `Automation: enabled (${result.installed.gitPostCommit ? "post-commit" : "post-commit unavailable"}, ${result.installed.agentComplete ? "agent-complete" : "agent-complete partial"})`,
+  );
+  for (const warning of result.installed.warnings) {
+    console.log(`Warning: ${warning}`);
+  }
+  for (const step of result.installed.manualSteps) {
+    console.log(step);
+  }
+}
+
+async function runSyncWorkflow(options: {
+  mode: "all" | "push" | "pull";
+  cwd: string;
+  flags: Flags;
+  settings: CodaphSettings;
+  triggerSource: SyncTriggerSource;
+  hookMode?: boolean;
+  quiet?: boolean;
+  onPushProgress?: (progress: CodexHistorySyncProgress) => void;
+  onPullProgress?: (progress: { current: number; total: number; imported: number; deduplicated: number; skipped: number }) => void;
+}): Promise<SyncWorkflowSummary> {
+  const startedAt = new Date().toISOString();
+  const { mode, cwd, flags, settings, triggerSource } = options;
+  const hookMode = options.hookMode === true;
+  const quiet = options.quiet === true;
+  const repoId = resolveRepoIdForProject(flags, cwd, settings);
+  const mirrorRoot = resolveMirrorRoot(cwd);
+  const statePath = resolveRemoteSyncStatePath(cwd, repoId);
+  const lockPath = getSyncLockPath(mirrorRoot);
+  const logPath = getSyncAutomationLogPath(mirrorRoot);
+  const automation = resolveSyncAutomationConfig(settings, cwd);
+  const lockHandle = await acquireSyncLock(lockPath, {
+    waitMs: hookMode ? 0 : 30_000,
+    pollMs: 250,
+    metadata: { triggerSource, mode, cwd },
+  });
+
+  if (!lockHandle) {
+    if (hookMode) {
+      await markPendingSyncTrigger(statePath, triggerSource).catch(() => {});
+      await appendSyncAutomationLog(logPath, "lock busy; marked pending trigger", { triggerSource, mode }).catch(() => {});
+      return {
+        schema: "codaph.sync.v2",
+        mode,
+        trigger: triggerSource,
+        push: { skipped: true, reason: "Sync lock busy" },
+        pull: { skipped: true, reason: "Sync lock busy" },
+        automation,
+        timing: {
+          startedAt,
+          finishedAt: new Date().toISOString(),
+          durationMs: 0,
+        },
+        lockWaited: false,
+        lockBusy: true,
+      };
+    }
+    throw new Error("Another Codaph sync is already running for this repo. Try again in a few seconds.");
+  }
+
+  try {
+    const pushOutcome: SyncWorkflowSummary["push"] =
+      mode === "pull"
+        ? { skipped: true, reason: "Push phase not requested." }
+        : ({ ...(await runSyncPushPhase({ cwd, flags, settings, onProgress: options.onPushProgress })) } as SyncPushPhaseResult);
+
+    let pullOutcome: SyncWorkflowSummary["pull"];
+    if (mode === "push") {
+      pullOutcome = { skipped: true, reason: "Pull phase not requested." };
+    } else {
+      const remoteState = await maybeReadRemoteSyncStateForProject(cwd, repoId).catch(() => null);
+      const isCooldownSensitive = triggerSource === "hook-agent-complete" || triggerSource === "tui-startup";
+      const cooldownBlocks =
+        mode === "all" &&
+        isCooldownSensitive &&
+        automation.enabled &&
+        !shouldRunRemotePullNow(remoteState?.lastRunAt ?? null, automation.remotePullCooldownSec);
+      const autoPullDisabled =
+        mode === "all" &&
+        (triggerSource === "tui-sync" || triggerSource === "sync-manual" || triggerSource === "tui-startup" || triggerSource === "hook-agent-complete") &&
+        automation.enabled &&
+        !automation.autoPullOnSync;
+
+      if (cooldownBlocks) {
+        pullOutcome = { skipped: true, reason: `Cooldown active (${automation.remotePullCooldownSec}s).` };
+      } else if (autoPullDisabled) {
+        pullOutcome = { skipped: true, reason: "Per-project auto pull is disabled." };
+      } else {
+        const pull = await runSyncPullPhase({
+          cwd,
+          flags,
+          settings,
+          triggerSource,
+          requireMubit: mode === "pull",
+          onProgress: options.onPullProgress,
+        });
+        pullOutcome = isSyncPullPhaseSkipped(pull) ? pull : ({ ...pull } as SyncPullPhaseResult);
+      }
+    }
+
+    const finishedAt = new Date().toISOString();
+    const durationMs = Math.max(0, Date.parse(finishedAt) - Date.parse(startedAt));
+    return {
+      schema: "codaph.sync.v2",
+      mode,
+      trigger: triggerSource,
+      push: pushOutcome,
+      pull: pullOutcome,
+      automation,
+      timing: { startedAt, finishedAt, durationMs },
+      lockWaited: !hookMode,
+      lockBusy: false,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    await appendSyncAutomationLog(logPath, "sync workflow error", { triggerSource, mode, error: message }).catch(() => {});
+    if (hookMode) {
+      return {
+        schema: "codaph.sync.v2",
+        mode,
+        trigger: triggerSource,
+        push: { skipped: true, reason: `Hook sync error: ${message}` },
+        pull: { skipped: true, reason: `Hook sync error: ${message}` },
+        automation,
+        timing: {
+          startedAt,
+          finishedAt: new Date().toISOString(),
+          durationMs: 0,
+        },
+        lockWaited: false,
+        lockBusy: false,
+      };
+    }
+    throw error;
+  } finally {
+    await releaseSyncLock(lockHandle);
+    if (!quiet) {
+      await appendSyncAutomationLog(logPath, "sync workflow finished", { triggerSource, mode }).catch(() => {});
+    }
+  }
+}
+
+function printSyncWorkflowSummary(summary: SyncWorkflowSummary): void {
+  console.log(formatPushPhaseLine(summary.push));
+  console.log(formatPullPhaseLine(summary.pull as SyncPullPhaseOutcome));
+  const pull = summary.pull;
+  if (!isSyncPullPhaseSkipped(pull as SyncPullPhaseOutcome)) {
+    const note = (pull as SyncPullPhaseResult).summary.diagnosticNote;
+    if (note) {
+      console.log(note);
+    }
+  }
+  console.log(
+    `Automation: ${summary.automation.enabled ? "enabled" : "off"} (post-commit:${summary.automation.gitPostCommit ? "on" : "off"}, agent-complete:${summary.automation.agentComplete ? "on" : "off"})`,
+  );
+  if (!summary.automation.enabled) {
+    console.log("Tip: run `codaph sync setup` to enable auto-sync hooks for this repo.");
+  }
+}
+
+async function syncPushCommand(rest: string[]): Promise<void> {
+  const { flags } = parseArgs(rest);
+  const cwd = resolve(getStringFlag(flags, "cwd") ?? process.cwd());
   const settings = loadCodaphSettings();
-  const repoId = resolveRepoIdForProject(syncFlags, cwd, settings);
-  const actorId = resolveMubitActorId(syncFlags, cwd, settings);
-  const { pipeline, memory } = createPipeline(cwd, syncFlags, settings);
-  const reporter = createSyncProgressReporter("Syncing Codex history");
-  const summary = await syncCodexHistory({
-    projectPath: cwd,
-    pipeline,
-    repoId,
-    actorId,
+  const reporter = createSyncProgressReporter("Scanning Codex history");
+  if (flags.json !== true) {
+    reporter.start();
+  }
+  const result = await runSyncPushPhase({
+    cwd,
+    flags,
+    settings,
     onProgress: flags.json === true ? undefined : reporter.onProgress,
   }).finally(() => {
     if (flags.json !== true) {
@@ -564,72 +1181,297 @@ async function syncHistory(rest: string[]): Promise<void> {
   });
 
   if (flags.json === true) {
-    console.log(JSON.stringify(summary, null, 2));
+    console.log(JSON.stringify(result.summary, null, 2));
     return;
   }
-
-  console.log(formatSummary(summary));
-  const mubitRequested = shouldEnableMubit(syncFlags, settings);
-  if (memory?.isEnabled()) {
-    console.log("MuBit ingest during sync: enabled");
-  } else if (mubitRequested) {
-    console.log("MuBit ingest during sync: requested but unavailable (check MUBIT_API_KEY / endpoint)");
-  } else {
-    console.log("MuBit ingest during sync: disabled (--no-mubit or --local-only)");
-  }
+  console.log(formatPushPhaseLine(result));
 }
 
-async function syncRemote(rest: string[]): Promise<void> {
+async function syncPullCommand(rest: string[]): Promise<void> {
   const { flags } = parseArgs(rest);
   const cwd = resolve(getStringFlag(flags, "cwd") ?? process.cwd());
   const settings = loadCodaphSettings();
-  const repoId = resolveRepoIdForProject(flags, cwd, settings);
-  const projectId = resolveMubitProjectId(flags, cwd, settings) ?? repoId;
-  const actorId = resolveMubitActorId(flags, cwd, settings);
-  const engine = createMubitMemory(flags, cwd, settings);
-  if (!engine || !engine.isEnabled()) {
-    throw new Error("MuBit is disabled. Set MUBIT_API_KEY (or MUBIT_APIKEY) and use --mubit.");
-  }
-
-  const limitRaw = getStringFlag(flags, "limit");
-  const timelineLimit = limitRaw ? Number.parseInt(limitRaw, 10) : 1200;
-  const mirror = new JsonlMirror(resolve(cwd, ".codaph"));
-  const runId = mubitRunIdForProject(projectId);
   const reporter = createSyncProgressReporter("Syncing MuBit remote");
-
-  const summary = await syncMubitRemoteActivity({
-    mirror,
-    memory: engine,
-    runId,
-    repoId,
-    fallbackActorId: actorId,
-    timelineLimit: Number.isFinite(timelineLimit) && timelineLimit > 0 ? timelineLimit : 1200,
-    onProgress: flags.json === true
-      ? undefined
-      : (progress) => {
-        reporter.onProgress({
-          scannedFiles: progress.total,
-          matchedFiles: progress.current,
-          importedEvents: progress.imported,
-          currentFile: `dedup=${progress.deduplicated} skipped=${progress.skipped}`,
-          currentLine: progress.current,
-          currentSessionId: null,
-        });
-      },
+  if (flags.json !== true) {
+    reporter.start();
+  }
+  const pull = await runSyncPullPhase({
+    cwd,
+    flags,
+    settings,
+    triggerSource: "sync-manual",
+    requireMubit: true,
+    onProgress:
+      flags.json === true
+        ? undefined
+        : (progress) => {
+          reporter.onProgress({
+            scannedFiles: progress.total,
+            processedFiles: progress.current,
+            matchedFiles: progress.current,
+            importedEvents: progress.imported,
+            currentFile: `dedup=${progress.deduplicated} skipped=${progress.skipped}`,
+            currentLine: progress.current,
+            currentSessionId: null,
+          });
+        },
   }).finally(() => {
     if (flags.json !== true) {
       reporter.finish();
     }
   });
 
+  if (isSyncPullPhaseSkipped(pull)) {
+    throw new Error(pull.reason);
+  }
+
   if (flags.json === true) {
-    console.log(JSON.stringify(summary, null, 2));
+    console.log(JSON.stringify(pull.summary, null, 2));
+    return;
+  }
+  console.log(formatPullPhaseLine(pull));
+  if (pull.summary.diagnosticNote) {
+    console.log(pull.summary.diagnosticNote);
+  }
+  console.log(`Remote sync run: ${pull.summary.runId}`);
+}
+
+async function syncStatus(rest: string[]): Promise<void> {
+  const { flags } = parseArgs(rest);
+  const cwd = resolve(getStringFlag(flags, "cwd") ?? process.cwd());
+  const settings = loadCodaphSettings();
+  const repoId = resolveRepoIdForProject(flags, cwd, settings);
+  const automation = resolveSyncAutomationConfig(settings, cwd);
+  const remoteState = await maybeReadRemoteSyncStateForProject(cwd, repoId).catch(() => null);
+  const payload = {
+    cwd,
+    repoId,
+    automation,
+    remote: remoteState,
+  };
+
+  if (flags.json === true) {
+    console.log(JSON.stringify(payload, null, 2));
     return;
   }
 
-  console.log(`Remote sync run: ${summary.runId}`);
-  console.log(`timeline=${summary.timelineEvents} imported=${summary.imported} deduplicated=${summary.deduplicated} skipped=${summary.skipped}`);
-  console.log(`sessions=${summary.sessions} contributors=${summary.contributors}${summary.lastTs ? ` last=${summary.lastTs}` : ""}`);
+  console.log(`Repo: ${repoId}`);
+  console.log(
+    `Automation: ${automation.enabled ? "enabled" : "disabled"} (post-commit:${automation.gitPostCommit ? "on" : "off"}, agent-complete:${automation.agentComplete ? "on" : "off"})`,
+  );
+  if (!automation.enabled) {
+    console.log("Onboarding: run `codaph sync setup` to install auto-sync hooks for this repo.");
+  }
+  console.log(
+    `Auto pull on sync: ${automation.autoPullOnSync ? "on" : "off"} | TUI warm: ${automation.autoWarmTuiOnOpen ? "on" : "off"} | cooldown=${automation.remotePullCooldownSec}s`,
+  );
+  if (!remoteState) {
+    console.log("Remote sync state: none");
+    return;
+  }
+  console.log(
+    `Remote pull: last=${remoteState.lastSuccessAt ?? "(never)"}${formatTimeAgo(remoteState.lastSuccessAt) ? ` (${formatTimeAgo(remoteState.lastSuccessAt)})` : ""} | received=${remoteState.receivedTimelineCount ?? 0} | imported=${remoteState.lastImported ?? 0} | dedup=${remoteState.lastDeduplicated ?? 0}`,
+  );
+  console.log(
+    `Snapshot: ${remoteState.lastSnapshotFingerprint ? `fp=${remoteState.lastSnapshotFingerprint}` : "none"} | same-count=${remoteState.consecutiveSameSnapshotCount} | capped=${remoteState.suspectedServerCap ? "yes" : "no"} | pending=${remoteState.pendingTrigger.pending ? "yes" : "no"}`,
+  );
+  if (remoteState.lastError) {
+    console.log(`Last error: ${remoteState.lastError}`);
+  }
+}
+
+async function syncSetupCommand(rest: string[]): Promise<void> {
+  const { flags } = parseArgs(rest);
+  const cwd = resolve(getStringFlag(flags, "cwd") ?? process.cwd());
+  const settings = loadCodaphSettings();
+  const auto = resolveSyncAutomationConfig(settings, cwd);
+  const force = getBooleanFlag(flags, "force", false);
+
+  if (flags.json === true) {
+    console.log(
+      JSON.stringify(
+        {
+          cwd,
+          automation: auto,
+          suggestedCommand: auto.enabled ? null : "codaph sync setup --yes",
+        },
+        null,
+        2,
+      ),
+    );
+    return;
+  }
+
+  console.log(`Repo: ${cwd}`);
+  console.log(
+    `Auto-sync: ${auto.enabled ? "enabled" : "off"} (post-commit:${auto.gitPostCommit ? "on" : "off"}, agent-complete:${auto.agentComplete ? "on" : "off"})`,
+  );
+  console.log("This installs repo-scoped hooks so sync runs automatically after commits and agent completion.");
+  if (auto.enabled && !force) {
+    console.log("Auto-sync is already enabled for this repo. Re-run with `codaph sync setup --force` to reinstall hooks.");
+    return;
+  }
+
+  const setupFlags: Flags = {
+    ...flags,
+    "enable-auto": true,
+  };
+  await maybeOfferSyncAutomationSetup(cwd, setupFlags, settings, "all");
+}
+
+async function syncCommand(rest: string[]): Promise<void> {
+  const { flags } = parseArgs(rest);
+  const cwd = resolve(getStringFlag(flags, "cwd") ?? process.cwd());
+  const settings = loadCodaphSettings();
+  const forcePushOnly = getBooleanFlag(flags, "local-only", false);
+  const mode: "all" | "push" = forcePushOnly ? "push" : "all";
+
+  const pushReporter = createSyncProgressReporter("Scanning Codex history");
+  const pullReporter = createSyncProgressReporter("Syncing MuBit remote");
+  let pullReporterStarted = false;
+  if (flags.json !== true) {
+    pushReporter.start();
+  }
+  const summary = await runSyncWorkflow({
+    mode,
+    cwd,
+    flags,
+    settings,
+    triggerSource: "sync-manual",
+    onPushProgress: flags.json === true ? undefined : pushReporter.onProgress,
+    onPullProgress:
+      flags.json === true
+        ? undefined
+        : (progress) => {
+          if (!pullReporterStarted) {
+            pushReporter.finish();
+            pullReporter.start();
+            pullReporterStarted = true;
+          }
+          pullReporter.onProgress({
+            scannedFiles: progress.total,
+            processedFiles: progress.current,
+            matchedFiles: progress.current,
+            importedEvents: progress.imported,
+            currentFile: `dedup=${progress.deduplicated} skipped=${progress.skipped}`,
+            currentLine: progress.current,
+            currentSessionId: null,
+          });
+        },
+  }).finally(() => {
+    if (flags.json !== true) {
+      pushReporter.finish();
+      pullReporter.finish();
+    }
+  });
+
+  if (flags.json === true) {
+    const legacyPush = summary.push && !(summary.push as { skipped?: boolean }).skipped ? (summary.push as SyncPushPhaseResult) : null;
+    console.log(
+      JSON.stringify(
+        {
+          ...legacyPush?.summary,
+          ...summary,
+        },
+        null,
+        2,
+      ),
+    );
+  } else {
+    if (forcePushOnly) {
+      console.log("Note: `--local-only` is a compatibility alias and will be deprecated. Prefer `codaph sync push`.");
+    }
+    printSyncWorkflowSummary(summary);
+  }
+
+  if (flags.json !== true) {
+    await maybeOfferSyncAutomationSetup(cwd, flags, settings, mode);
+  }
+}
+
+async function syncHistory(rest: string[]): Promise<void> {
+  await syncPushCommand(rest);
+}
+
+async function syncRemote(rest: string[]): Promise<void> {
+  await syncPullCommand(rest);
+}
+
+async function readOptionalStdinJson(): Promise<Record<string, unknown> | null> {
+  if (input.isTTY) {
+    return null;
+  }
+  const chunks: Buffer[] = [];
+  for await (const chunk of input) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
+    chunks.push(buffer);
+    if (Buffer.concat(chunks).length > 512 * 1024) {
+      break;
+    }
+  }
+  if (chunks.length === 0) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function cwdFromHookPayload(payload: Record<string, unknown> | null): string | null {
+  if (!payload) {
+    return null;
+  }
+  const keys = ["cwd", "project_path", "projectPath", "repo_root", "repoRoot", "worktree", "worktreePath"] as const;
+  for (const key of keys) {
+    const value = payload[key];
+    if (typeof value === "string" && value.trim().length > 0) {
+      return value.trim();
+    }
+  }
+  return null;
+}
+
+async function hooksRun(rest: string[]): Promise<void> {
+  const [hookName, ...args] = rest;
+  if (!hookName) {
+    throw new Error("Hook name is required (post-commit | agent-complete)");
+  }
+  const { flags } = parseArgs(args);
+  const payload = await readOptionalStdinJson();
+  const cwd = resolve(getStringFlag(flags, "cwd") ?? cwdFromHookPayload(payload) ?? process.cwd());
+  const settings = loadCodaphSettings();
+  const quiet = getBooleanFlag(flags, "quiet", false);
+
+  let mode: "all" | "push";
+  let triggerSource: SyncTriggerSource;
+  if (hookName === "post-commit") {
+    mode = "push";
+    triggerSource = "hook-post-commit";
+  } else if (hookName === "agent-complete") {
+    mode = "all";
+    triggerSource = "hook-agent-complete";
+  } else {
+    throw new Error(`Unknown hook trigger: ${hookName}`);
+  }
+
+  const summary = await runSyncWorkflow({
+    mode,
+    cwd,
+    flags,
+    settings,
+    triggerSource,
+    hookMode: true,
+    quiet,
+  });
+
+  if (flags.json === true && !quiet) {
+    console.log(JSON.stringify(summary, null, 2));
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -1425,6 +2267,11 @@ interface TuiState {
   inputMode: InputMode;
   inputBuffer: string;
   chatBySession: Map<string, ChatMessage[]>;
+  autoSyncEnabled: boolean;
+  autoSyncLastPullAgo: string | null;
+  autoSyncCloudStatus: string;
+  autoSyncPending: boolean;
+  lastLocalSyncAt: string | null;
 }
 
 const ANSI_ESCAPE_REGEX = /\u001b\[[0-9;]*m/g;
@@ -2439,8 +3286,10 @@ function renderBrowseView(
   height: number,
 ): string {
   const leftHeader = `${paint("codaph", TUI_COLORS.brand)}  >  ${projectLabel}`;
-  const rightHeader = `${paint(mubitEnabled ? "MuBit:on" : "MuBit:off", mubitEnabled ? TUI_COLORS.cyan : TUI_COLORS.yellow)}   ${paint("[o] settings  [?] help", TUI_COLORS.dim)}`;
-  const header = headerLine(leftHeader, rightHeader, width);
+  const syncBits = `AutoSync:${state.autoSyncEnabled ? "on" : "off"}  Cloud:${state.autoSyncCloudStatus}${state.autoSyncPending ? "*" : ""}  Push:${formatTimeAgo(state.lastLocalSyncAt) ?? "never"}  Pull:${state.autoSyncLastPullAgo ?? "never"}`;
+  const rightHeader = `${paint(mubitEnabled ? "MuBit:on" : "MuBit:off", mubitEnabled ? TUI_COLORS.cyan : TUI_COLORS.yellow)}   ${paint(syncBits, TUI_COLORS.dim)}`;
+  const fallbackRightHeader = `${paint(mubitEnabled ? "MuBit:on" : "MuBit:off", mubitEnabled ? TUI_COLORS.cyan : TUI_COLORS.yellow)}   ${paint("[o] settings  [?] help", TUI_COLORS.dim)}`;
+  const header = headerLine(leftHeader, visibleLength(rightHeader) < Math.floor(width * 0.7) ? rightHeader : fallbackRightHeader, width);
 
   const tableHeight = Math.max(10, height - 6);
   const bodyRows = Math.max(3, tableHeight - 4);
@@ -2453,7 +3302,7 @@ function renderBrowseView(
   ];
 
   if (rows.length === 0) {
-    sessionLines.push({ text: "  (no sessions yet) press [s] to sync Codex history", color: TUI_COLORS.muted });
+    sessionLines.push({ text: "  (no sessions yet) press [s] to sync now", color: TUI_COLORS.muted });
   } else {
     for (let i = 0; i < rows.length; i += 1) {
       const absoluteIndex = start + i;
@@ -2475,7 +3324,7 @@ function renderBrowseView(
   }
 
   const sessionsBox = boxLines("Sessions", width, tableHeight, sessionLines, true);
-  const footer = "[up/down] navigate   [enter] inspect   [s] sync local   [r] sync remote   [p] switch project   [a] add project   [o] settings   [q] quit";
+  const footer = "[up/down] navigate   [enter] inspect   [s] sync now   [r] pull cloud   [p] switch project   [a] add project   [o] settings   [q] quit";
   return [header, "", ...sessionsBox, "", paint(clipPlain(footer, width), TUI_COLORS.dim)].join("\n");
 }
 
@@ -2542,9 +3391,13 @@ function renderInspectView(
   const chatHeight = state.chatOpen ? Math.max(10, Math.floor(height * 0.32)) : 0;
   const baseHeight = Math.max(14, height - 4 - (state.chatOpen ? chatHeight + 1 : 0));
 
+  const inspectRightText = clipPlain(
+    `AutoSync:${state.autoSyncEnabled ? "on" : "off"} Cloud:${state.autoSyncCloudStatus}${state.autoSyncPending ? "*" : ""} Push:${formatTimeAgo(state.lastLocalSyncAt) ?? "never"} Pull:${state.autoSyncLastPullAgo ?? "never"}  [f] actor:${state.actorFilter ?? "all"}  [c] contributors  [left] back  [?] help`,
+    Math.max(18, Math.floor(width * 0.58)),
+  );
   const topHeader = headerLine(
     `${paint("codaph", TUI_COLORS.brand)}  >  ${projectLabel}  >  Session ${selectedSession.sessionId.slice(0, 8)} - ${formatDateCell(selectedSession.to)}`,
-    `${paint(mubitEnabled ? "MuBit:on" : "MuBit:off", mubitEnabled ? TUI_COLORS.cyan : TUI_COLORS.yellow)}   ${paint(`[f] actor:${state.actorFilter ?? "all"}  [c] contributors  [left] back  [?] help`, TUI_COLORS.dim)}`,
+    `${paint(mubitEnabled ? "MuBit:on" : "MuBit:off", mubitEnabled ? TUI_COLORS.cyan : TUI_COLORS.yellow)}   ${paint(inspectRightText, TUI_COLORS.dim)}`,
     width,
   );
 
@@ -2811,8 +3664,8 @@ function renderHelpOverlay(width: number, height: number): string {
     { text: "Browse", color: TUI_COLORS.muted },
     { text: "up/down navigate sessions" },
     { text: "enter   open session inspect view" },
-    { text: "s       sync local Codex history" },
-    { text: "r       sync remote MuBit activity timeline" },
+    { text: "s       sync now (local->cloud, then cloud->local when available)" },
+    { text: "r       pull cloud (MuBit remote activity fallback/manual)" },
     { text: "" },
     { text: "Inspect", color: TUI_COLORS.muted },
     { text: "enter   from prompts -> focus thoughts" },
@@ -3077,6 +3930,11 @@ async function tui(rest: string[]): Promise<void> {
     inputMode: null,
     inputBuffer: "",
     chatBySession: new Map<string, ChatMessage[]>(),
+    autoSyncEnabled: false,
+    autoSyncLastPullAgo: null,
+    autoSyncCloudStatus: "unknown",
+    autoSyncPending: false,
+    lastLocalSyncAt: null,
   };
 
   let query = new QueryService(resolve(state.projectPath, ".codaph"));
@@ -3121,6 +3979,39 @@ async function tui(rest: string[]): Promise<void> {
   const refreshSettingsAndMemory = (): void => {
     settings = loadCodaphSettings();
     memory = createMubitMemory(flags, state.projectPath, settings);
+    void refreshSyncIndicators().then(() => {
+      if (!state.busy) {
+        render();
+      }
+    });
+  };
+
+  const refreshSyncIndicators = async (): Promise<void> => {
+    const auto = resolveSyncAutomationConfig(settings, state.projectPath);
+    state.autoSyncEnabled = auto.enabled;
+    const currentRepoId = resolveRepoIdForProject(flags, state.projectPath, settings);
+    const remote = await maybeReadRemoteSyncStateForProject(state.projectPath, currentRepoId).catch(() => null);
+    if (!remote) {
+      state.autoSyncLastPullAgo = null;
+      state.autoSyncPending = false;
+      state.autoSyncCloudStatus = auto.enabled ? "none" : "off";
+      return;
+    }
+    state.autoSyncLastPullAgo = formatTimeAgo(remote.lastSuccessAt);
+    state.autoSyncPending = remote.pendingTrigger.pending;
+    if (remote.lastError) {
+      state.autoSyncCloudStatus = "error";
+    } else if (remote.suspectedServerCap) {
+      state.autoSyncCloudStatus = "capped?";
+    } else if (remote.pendingTrigger.pending) {
+      state.autoSyncCloudStatus = "pending";
+    } else if (remote.consecutiveSameSnapshotCount > 0) {
+      state.autoSyncCloudStatus = "no-change";
+    } else if (remote.lastSuccessAt) {
+      state.autoSyncCloudStatus = "ok";
+    } else {
+      state.autoSyncCloudStatus = "none";
+    }
   };
 
   const render = (): void => {
@@ -3269,18 +4160,25 @@ async function tui(rest: string[]): Promise<void> {
     return created;
   };
 
-  const syncProject = async (): Promise<void> => {
+  const syncProject = async (triggerSource: SyncTriggerSource = "tui-sync"): Promise<void> => {
     refreshSettingsAndMemory();
-    const { pipeline, memory: syncMemory } = createPipeline(state.projectPath, flags, settings);
-    const actorId = resolveMubitActorId(flags, state.projectPath, settings);
     let lastRefresh = 0;
-    const summary = await syncCodexHistory({
-      projectPath: state.projectPath,
-      pipeline,
-      repoId,
-      actorId,
-      onProgress: (progress) => {
-        state.statusLine = `Sync ${progress.matchedFiles}/${progress.scannedFiles} | events ${progress.importedEvents} | line ${progress.currentLine} | ${shortenPath(progress.currentFile, 42)}`;
+    const summary = await runSyncWorkflow({
+      mode: "all",
+      cwd: state.projectPath,
+      flags,
+      settings,
+      triggerSource,
+      onPushProgress: (progress) => {
+        state.statusLine = `Push ${progress.matchedFiles}/${progress.scannedFiles} | events ${progress.importedEvents} | line ${progress.currentLine} | ${shortenPath(progress.currentFile, 42)}`;
+        const now = Date.now();
+        if (now - lastRefresh > 180) {
+          lastRefresh = now;
+          render();
+        }
+      },
+      onPullProgress: (progress) => {
+        state.statusLine = `Pull ${progress.current}/${progress.total} | imported ${progress.imported} | dedup ${progress.deduplicated} | skipped ${progress.skipped}`;
         const now = Date.now();
         if (now - lastRefresh > 180) {
           lastRefresh = now;
@@ -3288,29 +4186,25 @@ async function tui(rest: string[]): Promise<void> {
         }
       },
     });
+    state.lastLocalSyncAt = new Date().toISOString();
     analysisCache.clear();
     await refreshRows("Refreshing sessions");
-    state.statusLine = `${formatSummary(summary)} | MuBit ${syncMemory?.isEnabled() ? "enabled" : "disabled"}`;
+    await refreshSyncIndicators();
+    const pushLine = formatPushPhaseLine(summary.push);
+    const pullLine = formatPullPhaseLine(summary.pull as SyncPullPhaseOutcome);
+    state.statusLine = `${clipPlain(pushLine, 120)} | ${clipPlain(pullLine, 120)}`;
   };
 
-  const syncRemoteProject = async (): Promise<void> => {
+  const syncRemoteProject = async (triggerSource: SyncTriggerSource = "tui-pull"): Promise<void> => {
     refreshSettingsAndMemory();
-    const engine = createMubitMemory(flags, state.projectPath, settings);
-    if (!engine || !engine.isEnabled()) {
-      throw new Error("MuBit is disabled. Set MUBIT_API_KEY and enable --mubit.");
-    }
-    const projectId = resolveMubitProjectId(flags, state.projectPath, settings) ?? repoId;
-    const actorId = resolveMubitActorId(flags, state.projectPath, settings);
-    const mirror = new JsonlMirror(resolve(state.projectPath, ".codaph"));
     let lastRefresh = 0;
-    const summary = await syncMubitRemoteActivity({
-      mirror,
-      memory: engine,
-      runId: mubitRunIdForProject(projectId),
-      repoId,
-      fallbackActorId: actorId,
-      timelineLimit: 1200,
-      onProgress: (progress) => {
+    const workflow = await runSyncWorkflow({
+      mode: "pull",
+      cwd: state.projectPath,
+      flags,
+      settings,
+      triggerSource,
+      onPullProgress: (progress) => {
         state.statusLine = `Remote sync ${progress.current}/${progress.total} | imported ${progress.imported} | dedup ${progress.deduplicated} | skipped ${progress.skipped}`;
         const now = Date.now();
         if (now - lastRefresh > 180) {
@@ -3321,7 +4215,14 @@ async function tui(rest: string[]): Promise<void> {
     });
     analysisCache.clear();
     await refreshRows("Refreshing sessions");
-    state.statusLine = `Remote sync imported=${summary.imported} dedup=${summary.deduplicated} contributors=${summary.contributors}`;
+    await refreshSyncIndicators();
+    state.statusLine = formatPullPhaseLine(workflow.pull as SyncPullPhaseOutcome);
+    if (!isSyncPullPhaseSkipped(workflow.pull as SyncPullPhaseOutcome)) {
+      const note = (workflow.pull as SyncPullPhaseResult).summary.diagnosticNote;
+      if (note) {
+        state.statusLine = note;
+      }
+    }
   };
 
   const cycleProject = async (): Promise<void> => {
@@ -3349,6 +4250,7 @@ async function tui(rest: string[]): Promise<void> {
     refreshSettingsAndMemory();
     await setLastProject(state.projectPath);
     await refreshRows(`Loading ${basename(state.projectPath)}`);
+    await refreshSyncIndicators();
     state.statusLine = `Project: ${state.projectPath}`;
   };
 
@@ -3469,6 +4371,7 @@ async function tui(rest: string[]): Promise<void> {
   screenReady = true;
 
   await refreshRows("Indexing sessions");
+  await refreshSyncIndicators();
   state.statusLine = `Project: ${state.projectPath}`;
 
   const onResize = (): void => {
@@ -3476,6 +4379,26 @@ async function tui(rest: string[]): Promise<void> {
   };
   output.on("resize", onResize);
   render();
+
+  const maybeWarmTuiOnStartup = async (): Promise<void> => {
+    const auto = resolveSyncAutomationConfig(settings, state.projectPath);
+    if (!auto.enabled || !auto.autoWarmTuiOnOpen) {
+      return;
+    }
+    const currentRepoId = resolveRepoIdForProject(flags, state.projectPath, settings);
+    const remote = await maybeReadRemoteSyncStateForProject(state.projectPath, currentRepoId).catch(() => null);
+    const stale =
+      !remote ||
+      remote.pendingTrigger.pending ||
+      shouldRunRemotePullNow(remote.lastSuccessAt, auto.remotePullCooldownSec);
+    if (!stale || state.busy) {
+      return;
+    }
+    runTask("Auto syncing project...", async () => {
+      await syncProject("tui-startup");
+    });
+  };
+  void maybeWarmTuiOnStartup();
 
   let closed = false;
   let resolveDone: (() => void) | null = null;
@@ -3885,11 +4808,11 @@ async function tui(rest: string[]): Promise<void> {
         return;
       }
       if (str === "s") {
-        runTask("Syncing Codex history...", syncProject);
+        runTask("Syncing project...", () => syncProject("tui-sync"));
         return;
       }
       if (str === "r") {
-        runTask("Syncing MuBit remote...", syncRemoteProject);
+        runTask("Pulling cloud activity...", () => syncRemoteProject("tui-pull"));
         return;
       }
       return;
@@ -4091,11 +5014,36 @@ async function main(): Promise<void> {
   }
 
   if (cmd === "sync") {
-    if (sub === "remote") {
-      await syncRemote(rest);
+    if (!sub) {
+      await syncCommand(rest);
       return;
     }
-    await syncHistory([sub, ...rest].filter(Boolean) as string[]);
+    if (sub === "all") {
+      await syncCommand(rest);
+      return;
+    }
+    if (sub === "push") {
+      await syncPushCommand(rest);
+      return;
+    }
+    if (sub === "pull" || sub === "remote") {
+      await syncPullCommand(rest);
+      return;
+    }
+    if (sub === "status") {
+      await syncStatus(rest);
+      return;
+    }
+    if (sub === "setup") {
+      await syncSetupCommand(rest);
+      return;
+    }
+    await syncCommand([sub, ...rest].filter(Boolean) as string[]);
+    return;
+  }
+
+  if (cmd === "hooks" && sub === "run") {
+    await hooksRun(rest);
     return;
   }
 
