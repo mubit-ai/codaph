@@ -54,6 +54,37 @@ describe("ingest pipeline", () => {
     expect(writeEvent).toHaveBeenCalledTimes(0);
   });
 
+  it("can retry memory writes for deduplicated local events when enabled", async () => {
+    const appendEvent = vi.fn(async () => ({ segment: "x", offset: 1, checksum: "abc", deduplicated: true }));
+    const appendRawLine = vi.fn(async () => {});
+    const writeEvent = vi.fn(async () => ({ accepted: true }));
+
+    const pipeline = new IngestPipeline(
+      { appendEvent, appendRawLine },
+      {
+        memoryEngine: {
+          writeEvent,
+          writeRunState: async () => {},
+        },
+        retryMemoryWriteOnLocalDedup: true,
+      },
+    );
+
+    await pipeline.ingest(
+      "prompt.submitted",
+      { prompt: "retry cloud publish" },
+      {
+        source: "codex_exec",
+        repoId: "r",
+        sessionId: "s",
+        threadId: "t",
+        sequence: 1,
+      },
+    );
+
+    expect(writeEvent).toHaveBeenCalledTimes(1);
+  });
+
   it("opens memory circuit after repeated write failures", async () => {
     const appendEvent = vi.fn(async () => ({ segment: "x", offset: 1, checksum: "abc", deduplicated: false }));
     const appendRawLine = vi.fn(async () => {});

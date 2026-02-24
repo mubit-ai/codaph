@@ -84,18 +84,21 @@ function shellQuote(text: string): string {
 }
 
 function hookCommandCandidates(hookName: "post-commit" | "post-push" | "agent-complete"): string[] {
-  const out = [`codaph hooks run ${hookName} --quiet`];
+  const out: string[] = [];
 
   const scriptPath = process.argv[1];
   const runtimePath = typeof process.execPath === "string" && process.execPath.length > 0 ? process.execPath : null;
+  const isLocalSourceEntry = Boolean(scriptPath && /(?:^|\/)(?:src\/index\.ts|dist\/index\.js)$/.test(scriptPath));
   if (runtimePath && scriptPath && isAbsolute(scriptPath)) {
     out.push(`${shellQuote(runtimePath)} ${shellQuote(scriptPath)} hooks run ${hookName} --quiet`);
   }
 
-  if (scriptPath && /(?:^|\/)(?:src\/index\.ts|dist\/index\.js)$/.test(scriptPath)) {
+  if (isLocalSourceEntry && scriptPath) {
     const codaphRoot = resolve(dirname(scriptPath), "..");
     out.push(`bun --cwd ${shellQuote(codaphRoot)} run cli hooks run ${hookName} --quiet`);
+    out.push(`codaph hooks run ${hookName} --quiet`);
   } else {
+    out.push(`codaph hooks run ${hookName} --quiet`);
     try {
       const thisFile = fileURLToPath(import.meta.url);
       const codaphRoot = resolve(dirname(thisFile), "..");
@@ -443,6 +446,7 @@ function createPipeline(
     memoryWriteTimeoutMs,
     memoryWriteConcurrency: options.bulkSync ? 2 : 1,
     memoryBatchSize: options.bulkSync ? 24 : 1,
+    retryMemoryWriteOnLocalDedup: options.bulkSync,
     defaultActorId,
     onMemoryError: (error) => {
       const message = error instanceof Error ? error.message : String(error);

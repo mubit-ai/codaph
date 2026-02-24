@@ -27,6 +27,7 @@ export interface IngestPipelineOptions {
   memoryMaxConsecutiveErrors?: number;
   memoryWriteConcurrency?: number;
   memoryBatchSize?: number;
+  retryMemoryWriteOnLocalDedup?: boolean;
   defaultActorId?: string | null;
 }
 
@@ -236,6 +237,9 @@ export class IngestPipeline {
 
     const appendResult = await this.mirror.appendEvent(event);
     if (appendResult.deduplicated) {
+      if (this.options.retryMemoryWriteOnLocalDedup && this.options.memoryEngine && !this.memoryCircuitOpen) {
+        await this.enqueueMemoryWrite(event);
+      }
       return event;
     }
 
