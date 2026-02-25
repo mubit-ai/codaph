@@ -2545,7 +2545,10 @@ function sanitizeMubitAnswer(answer: string): string {
       (line) =>
         !/^(Codaph TUI|Project:|Sessions:|Active Session:|Mubit:|Prompts|Thoughts|Assistant Output|Diff Summary|Actions)/i.test(
           line,
-        ),
+        ) &&
+        !/hdql/i.test(line) &&
+        !/direct bypass/i.test(line) &&
+        !/\/v2\/core\/hdc\/query/i.test(line),
     );
 
   if (filtered.length === 0) {
@@ -2576,8 +2579,65 @@ function summarizeEvidence(response: Record<string, unknown>): string[] {
     });
 }
 
+function isIdentityLikeQuestion(question: string): boolean {
+  const q = question.trim().toLowerCase();
+  return (
+    q === "whoami" ||
+    q === "whoami?" ||
+    q.includes("who am i") ||
+    q.includes("contributors") ||
+    q.includes("who contributed") ||
+    q.includes("who's contributing") ||
+    q.includes("who is contributing")
+  );
+}
+
+function isContributorRankingQuestion(question: string): boolean {
+  const q = question.trim().toLowerCase();
+  return (
+    q.includes("major contributor") ||
+    q.includes("main contributor") ||
+    q.includes("top contributor") ||
+    q.includes("most active contributor") ||
+    q.includes("biggest contributor")
+  );
+}
+
+function buildLocalTuiChatIdentityAnswer(
+  question: string,
+  analysis: SessionAnalysis,
+  prompt: PromptSlice,
+  actorFilter: string | null,
+): string | null {
+  if (!isIdentityLikeQuestion(question)) {
+    return null;
+  }
+
+  const selectedActor = actorLabel(prompt.actorId);
+  const contributors = analysis.contributors.slice(0, 8);
+
+  if (contributors.length === 0) {
+    return `No contributors found in this session yet.\nSelected prompt actor: ${selectedActor}`;
+  }
+
+  const q = question.trim().toLowerCase();
+  if (q === "whoami" || q === "whoami?" || q.includes("who am i")) {
+    const currentFilter = actorFilter ?? "all";
+    return [
+      `Selected prompt actor: ${selectedActor}`,
+      `Actor filter: ${currentFilter}`,
+      `Contributors: ${contributors.map((c) => `${c.actorId} (${c.promptCount}p)`).join(", ")}`,
+    ].join("\n");
+  }
+
+  return [
+    `Contributors (${analysis.contributors.length}):`,
+    ...contributors.map((c) => `- ${c.actorId}: prompts=${c.promptCount}, thoughts=${c.thoughtCount}, files=${c.fileCount}`),
+  ].join("\n");
+}
+
 function buildMubitQueryPrompt(question: string): string {
-  return `${question}\n\nReturn a concise answer in up to 6 bullet points. Avoid raw terminal dumps or repeated transcript blocks.`;
+  return `${question}\n\nReturn a concise answer in up to 6 bullet points. Do not suggest endpoints, lanes, or internal query modes unless explicitly asked. Avoid raw terminal dumps or repeated transcript blocks.`;
 }
 
 function printMubitNoDataHint(cwd: string, sessionId: string): void {
@@ -2766,12 +2826,24 @@ function printMubitResponse(
     return;
   }
 
+  const evidenceCount = getEvidenceCount(response);
+  const confidence = getConfidence(response);
+  const snippets = summarizeEvidence(response);
   const finalAnswer =
     typeof response.final_answer === "string" && response.final_answer.trim().length > 0
       ? response.final_answer
       : null;
-  const evidenceCount = getEvidenceCount(response);
-  const confidence = getConfidence(response);
+
+  if (snippets.length > 0) {
+    console.log("Mubit answer:");
+    for (const snippet of snippets) {
+      console.log(snippet);
+    }
+    const confidenceText =
+      typeof confidence === "number" ? ` | confidence=${confidence.toFixed(2)}` : "";
+    console.log(`evidence=${evidenceCount}${confidenceText}`);
+    return;
+  }
 
   if (finalAnswer) {
     console.log("Mubit answer:");
@@ -2786,8 +2858,6 @@ function printMubitResponse(
     printMubitNoDataHint(cwd, sessionId);
     return;
   }
-
-  const snippets = summarizeEvidence(response);
   console.log(`Mubit returned ${evidenceCount} evidence items, but no final answer.`);
   for (const snippet of snippets) {
     console.log(snippet);
@@ -2817,6 +2887,7 @@ async function mubitQuery(rest: string[]): Promise<void> {
   const limitRaw = getStringFlag(flags, "limit");
   const limit = limitRaw ? Number.parseInt(limitRaw, 10) : undefined;
   const rawMode = getBooleanFlag(flags, "raw", false);
+  const forceDirect = getBooleanFlag(flags, "direct", false) || getBooleanFlag(flags, "hdql", false);
   const runId = mubitRunIdForContext(flags, repoId, sessionId, cwd, settings);
   console.log(`Querying Mubit run scope: ${runId}`);
 
@@ -2825,7 +2896,7 @@ async function mubitQuery(rest: string[]): Promise<void> {
       runId,
       query: buildMubitQueryPrompt(question),
       limit,
-      mode: "direct_bypass",
+      mode: forceDirect ? "direct_bypass" : "agent_routed",
       directLane: "hdql_query",
     }),
     45000,
@@ -4603,18 +4674,23 @@ function composeMubitAnswer(
   response: Record<string, unknown>,
   cwd: string,
   sessionId: string,
+  options?: { preferFinalAnswer?: boolean },
 ): string {
+  const preferFinalAnswer = options?.preferFinalAnswer === true;
   const finalAnswer =
     typeof response.final_answer === "string" && response.final_answer.trim().length > 0
       ? response.final_answer
       : null;
-  if (finalAnswer) {
+  if (preferFinalAnswer && finalAnswer) {
     return sanitizeMubitAnswer(finalAnswer);
   }
 
   const snippets = summarizeEvidence(response);
   if (snippets.length > 0) {
     return snippets.map((line) => line.replace(/^- /, "")).join("\n");
+  }
+  if (finalAnswer) {
+    return sanitizeMubitAnswer(finalAnswer);
   }
 
   return `Mubit returned no answer/evidence for session ${sessionId}. Try refining query for ${cwd}.`;
@@ -5698,14 +5774,16 @@ async function tui(rest: string[]): Promise<void> {
     const promptSelection = selectedPromptFromAnalysis(analysis, state.selectedPromptIndex, state.actorFilter);
     const prompt = promptSelection.prompt;
     state.selectedPromptIndex = promptSelection.index;
+
     const contextualQuery = `${question}\n\nCurrent prompt context:\n${clipText(prompt.prompt, 400)}`;
+    const useMubitAgentRouting = true;
 
     const response = await withTimeout(
       memory.querySemanticContext({
         runId,
         query: buildMubitQueryPrompt(contextualQuery),
         limit: 8,
-        mode: "direct_bypass",
+        mode: useMubitAgentRouting ? "agent_routed" : "direct_bypass",
         directLane: "hdql_query",
       }),
       45000,
@@ -5723,7 +5801,9 @@ async function tui(rest: string[]): Promise<void> {
     }
 
     const agentResult = await runOpenAiAgentFromMubit(question, response, runId, flags);
-    const answer = agentResult?.text ?? composeMubitAnswer(response, state.projectPath, session.sessionId);
+    const answer = agentResult?.text ?? composeMubitAnswer(response, state.projectPath, session.sessionId, {
+      preferFinalAnswer: useMubitAgentRouting,
+    });
     chat.push({
       role: "mubit",
       text: answer,
@@ -5999,7 +6079,8 @@ async function tui(rest: string[]): Promise<void> {
     }
   };
 
-  const onKey = (str: string, key: { name?: string; ctrl?: boolean; meta?: boolean; sequence?: string }): void => {
+  const onKey = (str: string | undefined, key: { name?: string; ctrl?: boolean; meta?: boolean; sequence?: string }): void => {
+    str = typeof str === "string" ? str : "";
     if (key.ctrl && key.name === "c") {
       close();
       return;
@@ -6143,6 +6224,25 @@ async function tui(rest: string[]): Promise<void> {
         return;
       }
       return;
+    }
+
+    // When the Mubit chat pane is focused, printable keys should edit the draft
+    // instead of triggering global one-key shortcuts (a/p/q/o/? etc).
+    if (state.chatOpen && state.inspectPane === "chat") {
+      if (key.name === "backspace") {
+        state.chatDraft = state.chatDraft.slice(0, -1);
+        render();
+        return;
+      }
+      if (key.name === "return") {
+        runTask("Querying Mubit...", sendChatQuestion);
+        return;
+      }
+      if (!key.ctrl && !key.meta && str.length === 1 && str >= " ") {
+        state.chatDraft += str;
+        render();
+        return;
+      }
     }
 
     if (str === "q" || key.name === "q") {
@@ -6405,21 +6505,6 @@ async function tui(rest: string[]): Promise<void> {
       return;
     }
 
-    if (state.chatOpen && state.inspectPane === "chat") {
-      if (key.name === "backspace") {
-        state.chatDraft = state.chatDraft.slice(0, -1);
-        render();
-        return;
-      }
-      if (key.name === "return") {
-        runTask("Querying Mubit...", sendChatQuestion);
-        return;
-      }
-      if (!key.ctrl && !key.meta && str.length === 1 && str >= " ") {
-        state.chatDraft += str;
-        render();
-      }
-    }
   };
 
   input.on("keypress", onKey);

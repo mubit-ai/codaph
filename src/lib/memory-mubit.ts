@@ -770,20 +770,24 @@ export class MubitMemoryEngine implements MemoryEngine {
     }
 
     const limit = Number.isFinite(options.limit) && (options.limit ?? 0) > 0 ? Math.floor(options.limit as number) : 8;
+    const mode = options.mode ?? "direct_bypass";
+    const directLane = options.directLane ?? "hdql_query";
     const payload: Record<string, unknown> = {
       run_id: options.runId,
       query: options.query,
-      mode: "direct_bypass",
-      direct_lane: "hdql_query",
+      mode,
       include_linked_runs: options.includeLinkedRuns ?? false,
       limit,
       embedding: [],
     };
+    if (mode === "direct_bypass") {
+      payload.direct_lane = directLane;
+    }
     const result = await this.client.control.query(payload);
     const record = asRecord(result);
     const meta = {
-      codaph_query_lane: "hdql_query" as const,
-      codaph_query_mode: "direct_bypass" as const,
+      codaph_query_lane: mode === "direct_bypass" ? directLane : "agent_routed",
+      codaph_query_mode: mode,
     };
     return record ? { ...record, ...meta } : { raw: result, ...meta };
   }
