@@ -166,6 +166,24 @@ export function updateProjectSettings(
   };
 }
 
+export function removeProjectSettings(settings: CodaphSettings, projectPath: string): CodaphSettings {
+  const normalized = resolve(projectPath);
+  const existing = settings.projects ?? {};
+  if (!(normalized in existing)) {
+    return {
+      ...settings,
+      projects: { ...existing },
+    };
+  }
+
+  const projects = { ...existing };
+  delete projects[normalized];
+  return {
+    ...settings,
+    projects,
+  };
+}
+
 export function updateGlobalSettings(
   settings: CodaphSettings,
   patch: Partial<Pick<CodaphSettings, "mubitApiKey" | "openAiApiKey" | "mubitActorId">>,

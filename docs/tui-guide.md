@@ -87,6 +87,7 @@ If the cloud is unchanged, Codaph shows a `no-change` state instead of looking l
 - `q` quit
 - `?` help
 - `o` settings
+- `P` projects overlay (list / switch / remove)
 
 ### Browse view
 
@@ -94,7 +95,8 @@ If the cloud is unchanged, Codaph shows a `no-change` state instead of looking l
 - `enter` open selected session
 - `s` sync now (push + pull)
 - `r` pull cloud now (manual fallback)
-- `p` switch project
+- `p` cycle to next saved project
+- `P` open projects overlay
 - `a` add project
 
 ### Inspect view
@@ -113,6 +115,17 @@ If the cloud is unchanged, Codaph shows a `no-change` state instead of looking l
 - `up/down` select contributor
 - `enter` apply actor filter
 - `esc` or `c` close overlay
+
+### Projects overlay
+
+- `up/down` select project
+- `enter` switch to selected project
+- `x` start remove confirmation
+- `1` remove from registry only (when confirming)
+- `2` remove from registry + saved Codaph settings (when confirming)
+- `a` add project path
+- `esc` cancel remove confirmation or close overlay
+- `P` close overlay
 
 ### Chat panel
 

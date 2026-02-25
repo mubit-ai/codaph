@@ -902,3 +902,13 @@ Do not rewrite history; append a new snapshot each run.
 - unstaged: 0
 - untracked: 0
 - files: package.json
+
+## Status Snapshot — 2026-02-25T16:19:06.099Z
+- source: pre-commit
+- repo: /Users/anilp/Code/codaph
+- branch: main
+- head: 7e2d62a
+- staged: 4
+- unstaged: 0
+- untracked: 0
+- files: docs/tui-guide.md, src/index.ts, src/settings-store.ts, test/settings-store.test.ts

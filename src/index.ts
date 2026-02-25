@@ -41,11 +41,13 @@ import {
   loadRegistry,
   removeProjectFromRegistry,
   setLastProject,
+  type ProjectRegistry,
 } from "./project-registry";
 import {
   detectGitHubDefaults,
   getProjectSettings,
   loadCodaphSettings,
+  removeProjectSettings,
   saveCodaphSettings,
   updateGlobalSettings,
   updateProjectSettings,
@@ -3293,6 +3295,10 @@ interface TuiState {
   settingsOpen: boolean;
   contributorsOpen: boolean;
   selectedContributorIndex: number;
+  projectManagerOpen: boolean;
+  projectManagerRegistry: ProjectRegistry;
+  selectedProjectManagerIndex: number;
+  projectManagerRemoveTargetPath: string | null;
   busy: boolean;
   statusLine: string;
   actorFilter: string | null;
@@ -4808,7 +4814,7 @@ function renderBrowseView(
   }
 
   const sessionsBox = boxLines("Sessions", width, tableHeight, sessionLines, true);
-  const footer = "[up/down] navigate   [enter] inspect   [s] sync now   [r] pull cloud   [p] switch project   [a] add project   [o] settings   [q] quit";
+  const footer = "[up/down] navigate   [enter] inspect   [s] sync now   [r] pull cloud   [p] next project   [P] projects   [a] add project   [o] settings   [q] quit";
   return [header, "", ...sessionsBox, "", paint(clipPlain(footer, width), TUI_COLORS.dim)].join("\n");
 }
 
@@ -5144,7 +5150,8 @@ function renderHelpOverlay(width: number, height: number): string {
     { text: "q       quit" },
     { text: "?       toggle help" },
     { text: "o       settings" },
-    { text: "p       switch project" },
+    { text: "p       cycle to next project" },
+    { text: "P       projects overlay (list/switch/remove)" },
     { text: "a       add/switch project path" },
     { text: "" },
     { text: "Browse", color: TUI_COLORS.muted },
@@ -5182,6 +5189,62 @@ function renderHelpOverlay(width: number, height: number): string {
     ...padded,
     "",
     `${" ".repeat(leftPad)}${paint("[esc/?] close", TUI_COLORS.dim)}`,
+  ].join("\n");
+}
+
+function renderProjectManagerOverlay(state: TuiState, width: number, height: number): string {
+  const projects = state.projectManagerRegistry.projects;
+  const selected = projects.length === 0
+    ? 0
+    : Math.max(0, Math.min(state.selectedProjectManagerIndex, projects.length - 1));
+  state.selectedProjectManagerIndex = selected;
+
+  const overlayWidth = Math.max(72, Math.min(width - 6, 144));
+  const overlayHeight = Math.max(12, Math.min(height - 6, 30));
+  const bodyHeight = Math.max(1, overlayHeight - 2);
+  const lines: PaneLine[] = [];
+
+  if (projects.length === 0) {
+    lines.push({ text: "No saved projects in registry. Press [a] to add one.", color: TUI_COLORS.muted });
+  } else {
+    lines.push({ text: "Legend: > selected   * current project", color: TUI_COLORS.muted });
+    if (state.projectManagerRemoveTargetPath) {
+      lines.push({
+        text: `Pending remove: ${shortenPath(state.projectManagerRemoveTargetPath, Math.max(24, overlayWidth - 22))}`,
+        color: TUI_COLORS.yellow,
+      });
+    }
+    lines.push({ text: "" });
+
+    const visibleListRows = Math.max(1, bodyHeight - lines.length);
+    const start = windowStart(projects.length, selected, visibleListRows);
+    const end = Math.min(projects.length, start + visibleListRows);
+
+    for (let i = start; i < end; i += 1) {
+      const project = projects[i] as string;
+      const marker = i === selected ? ">" : " ";
+      const current = resolve(project) === resolve(state.projectPath) ? "*" : " ";
+      const prefix = `${marker}${current} `;
+      const maxPathWidth = Math.max(8, overlayWidth - 2 - visibleLength(prefix));
+      lines.push({
+        text: `${prefix}${clipPlain(project, maxPathWidth)}`,
+        highlight: i === selected,
+      });
+    }
+  }
+
+  const box = boxLines("Projects", overlayWidth, overlayHeight, lines, true);
+  const leftPad = Math.max(0, Math.floor((width - overlayWidth) / 2));
+  const topPad = Math.max(0, Math.floor((height - overlayHeight) / 2) - 1);
+  const footer = state.projectManagerRemoveTargetPath
+    ? "Remove selected project? [1] registry only  [2] +settings  [esc] cancel"
+    : "[up/down] select  [enter] switch  [x] remove  [a] add  [esc/P] close";
+
+  return [
+    ...Array.from({ length: topPad }, () => ""),
+    ...box.map((line) => `${" ".repeat(leftPad)}${line}`),
+    "",
+    `${" ".repeat(leftPad)}${paint(clipPlain(footer, overlayWidth), TUI_COLORS.dim)}`,
   ].join("\n");
 }
 
@@ -5411,6 +5474,10 @@ async function tui(rest: string[]): Promise<void> {
     settingsOpen: false,
     contributorsOpen: false,
     selectedContributorIndex: 0,
+    projectManagerOpen: false,
+    projectManagerRegistry: { projects: [], lastProjectPath: null },
+    selectedProjectManagerIndex: 0,
+    projectManagerRemoveTargetPath: null,
     busy: false,
     statusLine: "",
     actorFilter: null,
@@ -5434,7 +5501,7 @@ async function tui(rest: string[]): Promise<void> {
   let lastRenderedFrame = "";
 
   const getSize = (): { width: number; height: number } => ({
-    width: Math.max(20, Math.min(180, Math.max(20, (output.columns ?? 120) - 4))),
+    width: Math.max(20, (output.columns ?? 120) - 1),
     height: Math.max(2, Math.max(2, (output.rows ?? 40) - 2)),
   });
 
@@ -5454,6 +5521,17 @@ async function tui(rest: string[]): Promise<void> {
     return analysisCache.get(row.sessionId)?.analysis ?? null;
   };
 
+  const selectedProjectManagerPath = (): string | null => {
+    const projects = state.projectManagerRegistry.projects;
+    if (projects.length === 0) {
+      state.selectedProjectManagerIndex = 0;
+      return null;
+    }
+    const idx = Math.max(0, Math.min(state.selectedProjectManagerIndex, projects.length - 1));
+    state.selectedProjectManagerIndex = idx;
+    return projects[idx] ?? null;
+  };
+
   const resetInspectScroll = (): void => {
     state.selectedThoughtIndex = 0;
     state.thoughtsScroll = 0;
@@ -5461,6 +5539,41 @@ async function tui(rest: string[]): Promise<void> {
     state.diffScroll = 0;
     state.fullDiffScroll = 0;
     state.fullDiffData = null;
+  };
+
+  const refreshProjectManagerRegistry = async (preferPath?: string): Promise<void> => {
+    const registrySnapshot = await loadRegistry();
+    state.projectManagerRegistry = registrySnapshot;
+
+    if (registrySnapshot.projects.length === 0) {
+      state.selectedProjectManagerIndex = 0;
+      return;
+    }
+
+    const preferred = preferPath ? resolve(preferPath) : null;
+    const current = resolve(state.projectPath);
+    const last = registrySnapshot.lastProjectPath ? resolve(registrySnapshot.lastProjectPath) : null;
+    let at = -1;
+    for (const candidate of [preferred, current, last]) {
+      if (!candidate) {
+        continue;
+      }
+      at = registrySnapshot.projects.indexOf(candidate);
+      if (at >= 0) {
+        break;
+      }
+    }
+    state.selectedProjectManagerIndex = at >= 0 ? at : 0;
+  };
+
+  const openProjectManager = async (): Promise<void> => {
+    state.projectManagerRemoveTargetPath = null;
+    await refreshProjectManagerRegistry();
+    state.projectManagerOpen = true;
+    if (state.projectManagerRegistry.projects.length === 0) {
+      state.statusLine = "No projects in registry. Press [a] to add one.";
+    }
+    render();
   };
 
   const refreshSettingsAndMemory = (): void => {
@@ -5516,6 +5629,8 @@ async function tui(rest: string[]): Promise<void> {
       screen = renderHelpOverlay(width, height);
     } else if (state.settingsOpen) {
       screen = renderSettingsOverlay(flags, settings, state, memory?.isEnabled() ?? false, width, height);
+    } else if (state.projectManagerOpen) {
+      screen = renderProjectManagerOverlay(state, width, height);
     } else if (state.view === "browse") {
       screen = renderBrowseView(state, projectLabel, memory?.isEnabled() ?? false, width, height);
     } else {
@@ -5647,6 +5762,31 @@ async function tui(rest: string[]): Promise<void> {
     return created;
   };
 
+  const activateProject = async (nextProjectPath: string, progressLabel: string): Promise<void> => {
+    const normalized = resolve(nextProjectPath);
+    state.projectPath = normalized;
+    state.view = "browse";
+    state.inspectPane = "prompts";
+    state.selectedSessionIndex = 0;
+    state.selectedPromptIndex = 0;
+    state.actorFilter = null;
+    state.contributorsOpen = false;
+    state.selectedContributorIndex = 0;
+    state.chatOpen = false;
+    state.chatDraft = "";
+    state.chatScroll = 0;
+    state.fullDiffOpen = false;
+    state.projectManagerRemoveTargetPath = null;
+    resetInspectScroll();
+    analysisCache.clear();
+    gitAuthorCache.clear();
+    refreshSettingsAndMemory();
+    await setLastProject(normalized);
+    await refreshRows(progressLabel);
+    await refreshSyncIndicators();
+    state.statusLine = `Project: ${normalized}`;
+  };
+
   const syncProject = async (triggerSource: SyncTriggerSource = "tui-sync"): Promise<void> => {
     refreshSettingsAndMemory();
     let lastRefresh = 0;
@@ -5721,24 +5861,62 @@ async function tui(rest: string[]): Promise<void> {
 
     const at = current.projects.indexOf(state.projectPath);
     const next = current.projects[(at + 1 + current.projects.length) % current.projects.length] ?? current.projects[0];
-    state.projectPath = resolve(next);
-    state.view = "browse";
-    state.selectedSessionIndex = 0;
-    state.selectedPromptIndex = 0;
-    state.actorFilter = null;
-    state.contributorsOpen = false;
-    state.chatOpen = false;
-    state.chatDraft = "";
-    state.chatScroll = 0;
-    state.fullDiffOpen = false;
-    resetInspectScroll();
-    analysisCache.clear();
-    gitAuthorCache.clear();
-    refreshSettingsAndMemory();
-    await setLastProject(state.projectPath);
-    await refreshRows(`Loading ${basename(state.projectPath)}`);
-    await refreshSyncIndicators();
-    state.statusLine = `Project: ${state.projectPath}`;
+    await activateProject(next, `Loading ${basename(resolve(next))}`);
+  };
+
+  const removeProjectFromTui = async (
+    targetPath: string,
+    options: { removeSettings: boolean },
+  ): Promise<void> => {
+    const normalized = resolve(targetPath);
+    const before = await loadRegistry();
+    if (before.projects.length <= 1) {
+      state.projectManagerRemoveTargetPath = null;
+      await refreshProjectManagerRegistry(normalized);
+      state.statusLine = "Cannot remove the last saved project while TUI is open.";
+      return;
+    }
+
+    const targetIndex = before.projects.indexOf(normalized);
+    if (targetIndex < 0) {
+      state.projectManagerRemoveTargetPath = null;
+      await refreshProjectManagerRegistry();
+      state.statusLine = "Project is already removed from the registry.";
+      return;
+    }
+
+    const wasCurrent = resolve(state.projectPath) === normalized;
+    const updated = await removeProjectFromRegistry(normalized);
+
+    if (options.removeSettings) {
+      settings = removeProjectSettings(settings, normalized);
+      saveCodaphSettings(settings);
+      refreshSettingsAndMemory();
+    }
+
+    state.projectManagerRemoveTargetPath = null;
+
+    if (wasCurrent) {
+      const fallbackIndex = Math.max(0, Math.min(targetIndex, updated.projects.length - 1));
+      const fallbackPath = updated.projects[fallbackIndex] ?? updated.projects[0];
+      if (!fallbackPath) {
+        await refreshProjectManagerRegistry();
+        state.statusLine = "Removed project.";
+        return;
+      }
+
+      await activateProject(fallbackPath, `Loading ${basename(resolve(fallbackPath))}`);
+      await refreshProjectManagerRegistry(fallbackPath);
+      state.statusLine = options.removeSettings
+        ? `Removed current project (+settings); switched to ${basename(resolve(fallbackPath))}`
+        : `Removed current project; switched to ${basename(resolve(fallbackPath))}`;
+      return;
+    }
+
+    await refreshProjectManagerRegistry(state.projectPath);
+    state.statusLine = options.removeSettings
+      ? `Removed project from registry + settings: ${normalized}`
+      : `Removed project from registry: ${normalized}`;
   };
 
   const sendChatQuestion = async (): Promise<void> => {
@@ -5905,6 +6083,7 @@ async function tui(rest: string[]): Promise<void> {
     input.off("keypress", onKey);
     output.off("resize", onResize);
     input.setRawMode(false);
+    input.pause();
     output.write("\u001b[?25h");
     output.write("\u001b[?7h");
     output.write("\u001b[?1049l");
@@ -5942,6 +6121,8 @@ async function tui(rest: string[]): Promise<void> {
     state.inputBuffer = "";
     state.statusLine = inputPrompt(mode);
     state.settingsOpen = false;
+    state.projectManagerOpen = false;
+    state.projectManagerRemoveTargetPath = null;
     render();
   };
 
@@ -5949,21 +6130,7 @@ async function tui(rest: string[]): Promise<void> {
     if (mode === "add_project") {
       const normalized = resolve(candidate);
       await addProjectToRegistry(normalized);
-      state.projectPath = normalized;
-      await setLastProject(normalized);
-      state.selectedSessionIndex = 0;
-      state.selectedPromptIndex = 0;
-      state.view = "browse";
-      state.actorFilter = null;
-      state.contributorsOpen = false;
-      state.chatOpen = false;
-      state.fullDiffOpen = false;
-      resetInspectScroll();
-      analysisCache.clear();
-      gitAuthorCache.clear();
-      refreshSettingsAndMemory();
-      await refreshRows(`Loading ${basename(normalized)}`);
-      state.statusLine = `Project: ${normalized}`;
+      await activateProject(normalized, `Loading ${basename(normalized)}`);
       return;
     }
 
@@ -6185,6 +6352,112 @@ async function tui(rest: string[]): Promise<void> {
       return;
     }
 
+    if (state.projectManagerOpen) {
+      if (str === "q" || key.name === "q") {
+        close();
+        return;
+      }
+      if (str === "P") {
+        state.projectManagerOpen = false;
+        state.projectManagerRemoveTargetPath = null;
+        render();
+        return;
+      }
+
+      if (state.projectManagerRemoveTargetPath) {
+        if (key.name === "escape") {
+          state.projectManagerRemoveTargetPath = null;
+          state.statusLine = "Remove cancelled.";
+          render();
+          return;
+        }
+        if (str === "1" || str === "2") {
+          if (state.busy) {
+            state.statusLine = "Busy. Wait for the current task to finish.";
+            render();
+            return;
+          }
+          const target = state.projectManagerRemoveTargetPath;
+          const removeSettingsToo = str === "2";
+          runTask(
+            removeSettingsToo ? "Removing project + settings..." : "Removing project...",
+            async () => {
+              await removeProjectFromTui(target, { removeSettings: removeSettingsToo });
+            },
+          );
+          return;
+        }
+        return;
+      }
+
+      if (key.name === "escape") {
+        state.projectManagerOpen = false;
+        state.projectManagerRemoveTargetPath = null;
+        render();
+        return;
+      }
+      if (key.name === "up") {
+        if (state.projectManagerRegistry.projects.length > 0) {
+          state.selectedProjectManagerIndex = Math.max(0, state.selectedProjectManagerIndex - 1);
+          render();
+        }
+        return;
+      }
+      if (key.name === "down") {
+        if (state.projectManagerRegistry.projects.length > 0) {
+          state.selectedProjectManagerIndex = Math.min(
+            state.projectManagerRegistry.projects.length - 1,
+            state.selectedProjectManagerIndex + 1,
+          );
+          render();
+        }
+        return;
+      }
+      if (str === "a") {
+        state.projectManagerOpen = false;
+        state.projectManagerRemoveTargetPath = null;
+        beginInputMode("add_project");
+        return;
+      }
+      if (str === "x") {
+        const target = selectedProjectManagerPath();
+        if (!target) {
+          state.statusLine = "No project selected.";
+          render();
+          return;
+        }
+        if (state.projectManagerRegistry.projects.length <= 1) {
+          state.statusLine = "Cannot remove the last saved project while TUI is open.";
+          render();
+          return;
+        }
+        state.projectManagerRemoveTargetPath = resolve(target);
+        state.statusLine = `Remove project: ${resolve(target)} (press 1 or 2, esc to cancel)`;
+        render();
+        return;
+      }
+      if (key.name === "return") {
+        const target = selectedProjectManagerPath();
+        if (!target) {
+          state.statusLine = "No project selected.";
+          render();
+          return;
+        }
+        if (state.busy) {
+          state.statusLine = "Busy. Wait for the current task to finish.";
+          render();
+          return;
+        }
+        state.projectManagerOpen = false;
+        state.projectManagerRemoveTargetPath = null;
+        runTask("Switching project...", async () => {
+          await activateProject(target, `Loading ${basename(resolve(target))}`);
+        });
+        return;
+      }
+      return;
+    }
+
     if (state.contributorsOpen) {
       if (key.name === "escape" || str === "c") {
         state.contributorsOpen = false;
@@ -6259,6 +6532,20 @@ async function tui(rest: string[]): Promise<void> {
     if (str === "o") {
       state.settingsOpen = true;
       render();
+      return;
+    }
+
+    if (str === "P") {
+      if (state.fullDiffOpen) {
+        state.statusLine = "Close the full diff overlay first.";
+        render();
+        return;
+      }
+      void openProjectManager().catch((error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        state.statusLine = `Error: ${message}`;
+        render();
+      });
       return;
     }
 
