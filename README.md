@@ -29,11 +29,29 @@ bun install
 bun run build
 ```
 
+## First-Time Setup (Keys)
+
+Codaph uses Mubit for shared cloud memory and sync. Configure a Mubit API key before your first `sync`.
+
+OpenAI is optional. If you add `OPENAI_API_KEY`, Codaph can produce OpenAI-assisted answers for `codaph mubit query` and TUI chat (`m`) using Mubit evidence. The default OpenAI model is `gpt-4.1-mini`, and you can override it with `OPENAI_MODEL`.
+
+```bash
+codaph setup --mubit-api-key <your-mubit-key>
+
+# optional: OpenAI-assisted query/chat
+codaph setup --openai-api-key <your-openai-key>
+```
+
+You can also set `MUBIT_API_KEY`, `OPENAI_API_KEY`, and `OPENAI_MODEL` as environment variables. If a Mubit key is missing, `codaph init` prompts for it.
+
 ## Usage
 
 Run Codaph from the project root you want to inspect.
 
 ```bash
+# one-time key setup (recommended; can also use env vars)
+codaph setup --mubit-api-key <your-mubit-key>
+
 # one-time repo setup (wizard)
 codaph init
 
@@ -50,6 +68,12 @@ codaph import
 codaph status
 ```
 
+Optional query example (OpenAI-assisted if `OPENAI_API_KEY` is set, otherwise Mubit response):
+
+```bash
+codaph mubit query "what changed in auth?" --session <session-id>
+```
+
 If you are running from source, use `bun run cli` instead of `codaph`.
 
 ```bash
@@ -59,6 +83,8 @@ bun run cli tui --cwd /absolute/project/path
 ```
 
 ## Documentation
+
+Start with [Quickstart](docs/quickstart.md) for Mubit API key setup, optional OpenAI-assisted query/chat setup, and the recommended first-run flow.
 
 - [Docs Index](docs/index.md)
 - [Quickstart](docs/quickstart.md)
