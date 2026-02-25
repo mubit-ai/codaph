@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import { createInterface, emitKeypressEvents } from "node:readline";
 import { stdin as input, stdout as output } from "node:process";
+import { readFileSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -70,6 +71,46 @@ import {
 
 type Flags = Record<string, string | boolean>;
 type CaptureMode = "run" | "exec";
+
+function detectCliVersion(): string {
+  if (typeof process.env.npm_package_version === "string" && process.env.npm_package_version.trim().length > 0) {
+    return process.env.npm_package_version.trim();
+  }
+
+  const candidates = new Set<string>();
+  try {
+    const fromArgv = process.argv[1];
+    if (typeof fromArgv === "string" && fromArgv.length > 0) {
+      candidates.add(resolve(dirname(fromArgv), "..", "package.json"));
+      candidates.add(resolve(dirname(fromArgv), "package.json"));
+    }
+  } catch {
+    // ignore
+  }
+  try {
+    const thisFile = fileURLToPath(import.meta.url);
+    candidates.add(resolve(dirname(thisFile), "..", "package.json"));
+    candidates.add(resolve(dirname(thisFile), "package.json"));
+  } catch {
+    // ignore
+  }
+
+  for (const candidate of candidates) {
+    try {
+      const raw = readFileSync(candidate, "utf8");
+      const parsed = JSON.parse(raw) as { version?: unknown };
+      if (typeof parsed.version === "string" && parsed.version.trim().length > 0) {
+        return parsed.version.trim();
+      }
+    } catch {
+      // try next
+    }
+  }
+
+  return "dev";
+}
+
+const CODAPH_CLI_VERSION = detectCliVersion();
 
 interface CodaphProjectFile {
   schema: "codaph.project.v1";
@@ -179,6 +220,11 @@ function getBooleanFlag(flags: Flags, key: string, fallback: boolean): boolean {
 function help(): string {
   return [
     "Codaph CLI/TUI (Mubit-first project memory)",
+    "",
+    "Defaults:",
+    "  codaph                              (opens TUI)",
+    "  codaph --help                       (show help)",
+    "  codaph --version                    (show version)",
     "",
     "Onboarding:",
     "  codaph setup [--mubit-api-key <key>] [--mubit-actor-id <id>] [--json]",
@@ -836,6 +882,46 @@ function cliStatusWord(text: string, tone: "ok" | "warn" | "dim" = "dim"): strin
   return paint(text, color);
 }
 
+function cliToneColor(tone: "ok" | "warn" | "error" | "info" | "dim"): string | undefined {
+  if (tone === "ok") {
+    return TUI_COLORS.green;
+  }
+  if (tone === "warn") {
+    return TUI_COLORS.yellow;
+  }
+  if (tone === "error") {
+    return TUI_COLORS.red;
+  }
+  if (tone === "info") {
+    return TUI_COLORS.cyan;
+  }
+  return TUI_COLORS.dim;
+}
+
+function cliToneIcon(tone: "ok" | "warn" | "error" | "info" | "dim"): string {
+  if (tone === "ok") {
+    return "✓";
+  }
+  if (tone === "warn") {
+    return "!";
+  }
+  if (tone === "error") {
+    return "x";
+  }
+  if (tone === "info") {
+    return "•";
+  }
+  return "·";
+}
+
+function cliBadge(text: string, tone: "ok" | "warn" | "error" | "info" | "dim"): string {
+  return paint(`${cliToneIcon(tone)} ${text}`, cliToneColor(tone));
+}
+
+function cliLabelValue(label: string, value: string, tone: "ok" | "warn" | "error" | "info" | "dim" = "dim"): string {
+  return `${paint(label, TUI_COLORS.dim)} ${paint(value, cliToneColor(tone))}`;
+}
+
 function formatAutoSyncSummaryLine(
   label: string,
   auto: { enabled: boolean; gitPostCommit: boolean; agentComplete: boolean },
@@ -876,9 +962,9 @@ async function maybePromptForMubitApiKeyDuringInit(
     return settings;
   }
 
-  console.log("Mubit API key not found.");
-  console.log("Codaph is Mubit-first. Without a Mubit API key, cloud sync/shared memory are disabled.");
-  console.log("Get one from: https://console.mubit.ai");
+  console.log(cliBadge("Mubit API key not found", "warn"));
+  console.log(`${cliBadge("Mubit-first", "info")} Without a Mubit API key, cloud sync/shared memory are disabled.`);
+  console.log(`${paint("Get one from:", TUI_COLORS.dim)} https://console.mubit.ai`);
 
   let entered = "";
   for (;;) {
@@ -892,24 +978,24 @@ async function maybePromptForMubitApiKeyDuringInit(
         "Continue without Mubit cloud sync? (`codaph pull` will stay local-only until you add a key)",
       );
       if (confirmSkip) {
-        console.log("Continuing local-only. Add a key later with `codaph setup --mubit-api-key <key>`.");
+        console.log(`${cliBadge("Continuing local-only", "warn")} Add a key later with \`codaph setup --mubit-api-key <key>\`.`);
         return settings;
       }
       continue;
     }
-    console.log("Mubit API key is recommended for Codaph setup. Paste a key, or type `skip` to continue local-only.");
+    console.log(`${cliBadge("Mubit API key is recommended", "warn")} Paste a key, or type \`skip\` to continue local-only.`);
   }
 
   const next = updateGlobalSettings(settings, { mubitApiKey: entered });
   saveCodaphSettings(next);
-  console.log("Saved Mubit API key to ~/.codaph/settings.json");
+  console.log(`${cliBadge("Saved Mubit API key", "ok")} ${paint("~/.codaph/settings.json", TUI_COLORS.dim)}`);
 
   if (!next.mubitActorId) {
     const actor = detectGitHubDefaults(cwd).actorId ?? resolveMubitActorId(flags, cwd, next);
     if (actor) {
       const withActor = updateGlobalSettings(next, { mubitActorId: actor });
       saveCodaphSettings(withActor);
-      console.log(`Detected actor id: ${actor}`);
+      console.log(`${cliBadge("Detected actor id", "ok")} ${paint(actor, TUI_COLORS.cyan)}`);
       return withActor;
     }
   }
@@ -1063,6 +1149,184 @@ function formatPullPhaseLine(result: SyncPullPhaseOutcome): string {
   const sessionStream = (s.sessionSummaryTimelineEvents ?? 0) > 0 ? `, session-stream=${s.sessionSummaryTimelineEvents}` : "";
   const diffStream = (s.diffTimelineEvents ?? 0) > 0 ? `, diff-stream=${s.diffTimelineEvents}` : "";
   return `Pull (cloud->local): snapshot received=${s.timelineEvents} (requested=${s.requestedTimelineLimit}${cap}${promptStream}${sessionStream}${diffStream}), imported=${s.imported}, dedup=${s.deduplicated}, skipped=${s.skipped}${noChange}`;
+}
+
+function tuiStatusBadge(icon: string, label: string, color: string): string {
+  return `${paint(icon, color)} ${paint(label, color)}`;
+}
+
+function tuiStatusKV(key: string, value: string, tone: "ok" | "warn" | "dim" | "info" | "error" = "dim"): string {
+  const color = cliToneColor(tone) ?? TUI_COLORS.dim;
+  return `${paint(`${key}:`, TUI_COLORS.muted)}${paint(value, color)}`;
+}
+
+function formatTuiSyncFooterSummary(raw: string, width: number): string | null {
+  const pushPrefix = "Push (local->cloud): ";
+  const pullPrefix = "Pull (cloud->local): ";
+  let pushPart: string | null = null;
+  let pullPart: string | null = null;
+
+  if (raw.startsWith(pushPrefix)) {
+    const splitToken = ` | ${pullPrefix}`;
+    const splitIndex = raw.indexOf(splitToken);
+    if (splitIndex >= 0) {
+      pushPart = raw.slice(pushPrefix.length, splitIndex);
+      pullPart = raw.slice(splitIndex + 3 + pullPrefix.length);
+    } else {
+      pushPart = raw.slice(pushPrefix.length);
+    }
+  } else if (raw.startsWith(pullPrefix)) {
+    pullPart = raw.slice(pullPrefix.length);
+  } else {
+    return null;
+  }
+
+  const segments: string[] = [];
+
+  if (pushPart !== null) {
+    const lower = pushPart.toLowerCase();
+    const importedMatch = /local events imported=(\d+)/.exec(pushPart);
+    const filesMatch = /files=(\d+\/\d+)/.exec(pushPart);
+    const sessionsMatch = /sessions=(\d+)/.exec(pushPart);
+    const noOp =
+      lower.includes("no queued local uploads") ||
+      lower.includes("no new local events");
+    const noHistory = lower.includes("no codex history");
+    const skipped = lower.startsWith("skipped");
+    const tone = importedMatch ? "ok" : noHistory ? "warn" : skipped ? "warn" : noOp ? "dim" : "info";
+    const pushBits: string[] = [tuiStatusBadge("↑", "Push", cliToneColor(tone) ?? TUI_COLORS.cyan)];
+    if (importedMatch) {
+      pushBits.push(tuiStatusKV("events", importedMatch[1] ?? "0", "ok"));
+    } else if (noHistory) {
+      pushBits.push(paint("no history for repo", TUI_COLORS.yellow));
+    } else if (noOp) {
+      pushBits.push(paint("no-op", TUI_COLORS.muted));
+    } else if (skipped) {
+      pushBits.push(paint(pushPart, TUI_COLORS.yellow));
+    }
+    if (filesMatch) {
+      pushBits.push(tuiStatusKV("files", filesMatch[1] ?? "", "dim"));
+    }
+    if (sessionsMatch) {
+      pushBits.push(tuiStatusKV("sessions", sessionsMatch[1] ?? "", "dim"));
+    }
+    if (!importedMatch && !noOp && !noHistory && !skipped) {
+      pushBits.push(paint(clipPlain(pushPart, 56), TUI_COLORS.dim));
+    }
+    segments.push(pushBits.join(` ${paint("·", TUI_COLORS.dim)} `));
+  }
+
+  if (pullPart !== null) {
+    const receivedMatch = /snapshot received=(\d+)/.exec(pullPart);
+    const requestedMatch = /requested=(\d+)/.exec(pullPart);
+    const importedMatch = /imported=(\d+)/.exec(pullPart);
+    const dedupMatch = /dedup=(\d+)/.exec(pullPart);
+    const skippedMatch = /skipped=(\d+)/.exec(pullPart);
+    const promptStreamMatch = /prompt-stream=(\d+)/.exec(pullPart);
+    const sessionStreamMatch = /session-stream=(\d+)/.exec(pullPart);
+    const diffStreamMatch = /diff-stream=(\d+)/.exec(pullPart);
+    const noChange = pullPart.includes("no remote changes");
+    const capped = pullPart.includes("capped?");
+    const skipped = pullPart.toLowerCase().startsWith("skipped");
+    const recv = Number(receivedMatch?.[1] ?? "0");
+    const pullTone =
+      skipped ? "warn" :
+      recv === 0 ? "warn" :
+      noChange ? "dim" :
+      "ok";
+    const pullBits: string[] = [tuiStatusBadge("↓", "Pull", cliToneColor(pullTone) ?? TUI_COLORS.cyan)];
+
+    if (receivedMatch) {
+      const req = requestedMatch?.[1] ?? "?";
+      pullBits.push(tuiStatusKV("recv", `${receivedMatch[1]}/${req}`, recv > 0 ? "ok" : "warn"));
+    } else {
+      pullBits.push(paint(clipPlain(pullPart, 56), TUI_COLORS.dim));
+    }
+    if (importedMatch) {
+      pullBits.push(tuiStatusKV("+", importedMatch[1] ?? "0", Number(importedMatch[1] ?? "0") > 0 ? "ok" : "dim"));
+    }
+    if (dedupMatch) {
+      pullBits.push(tuiStatusKV("dedup", dedupMatch[1] ?? "0", "dim"));
+    }
+    if (skippedMatch) {
+      pullBits.push(tuiStatusKV("skip", skippedMatch[1] ?? "0", "dim"));
+    }
+    if (promptStreamMatch) {
+      pullBits.push(tuiStatusKV("prompts", promptStreamMatch[1] ?? "0", "info"));
+    }
+    if (sessionStreamMatch) {
+      pullBits.push(tuiStatusKV("sessions", sessionStreamMatch[1] ?? "0", "info"));
+    }
+    if (diffStreamMatch) {
+      pullBits.push(tuiStatusKV("diffs", diffStreamMatch[1] ?? "0", "info"));
+    }
+    if (capped) {
+      pullBits.push(paint("capped?", TUI_COLORS.yellow));
+    }
+    if (noChange) {
+      pullBits.push(paint("no-change", TUI_COLORS.muted));
+    }
+    segments.push(pullBits.join(` ${paint("·", TUI_COLORS.dim)} `));
+  }
+
+  if (segments.length === 0) {
+    return null;
+  }
+
+  const joined = segments.join(` ${paint("│", TUI_COLORS.dim)} `);
+  if (visibleLength(joined) <= width) {
+    return joined;
+  }
+  return paint(clipPlain(raw, width), TUI_COLORS.dim);
+}
+
+function formatTuiProgressStatus(raw: string, width: number): string | null {
+  let match = /^Push (\d+)\/(\d+) \| events (\d+) \| line (\d+) \| (.+)$/.exec(raw);
+  if (match) {
+    const [, matched, scanned, events, line, file] = match;
+    const text = [
+      tuiStatusBadge("↑", "Push", TUI_COLORS.cyan),
+      tuiStatusKV("match", `${matched}/${scanned}`, "info"),
+      tuiStatusKV("events", events ?? "0", Number(events ?? "0") > 0 ? "ok" : "dim"),
+      tuiStatusKV("line", line ?? "0", "dim"),
+      paint(shortenPath(file ?? "", 40), TUI_COLORS.muted),
+    ].join(` ${paint("·", TUI_COLORS.dim)} `);
+    return visibleLength(text) <= width ? text : paint(clipPlain(raw, width), TUI_COLORS.yellow);
+  }
+
+  match = /^(Pull|Remote sync) (\d+)\/(\d+) \| imported (\d+) \| dedup (\d+) \| skipped (\d+)$/.exec(raw);
+  if (match) {
+    const [, label, current, total, imported, dedup, skipped] = match;
+    const text = [
+      tuiStatusBadge("↓", label === "Remote sync" ? "Pull" : label, TUI_COLORS.cyan),
+      tuiStatusKV("scan", `${current}/${total}`, "info"),
+      tuiStatusKV("+", imported ?? "0", Number(imported ?? "0") > 0 ? "ok" : "dim"),
+      tuiStatusKV("dedup", dedup ?? "0", "dim"),
+      tuiStatusKV("skip", skipped ?? "0", "dim"),
+    ].join(` ${paint("·", TUI_COLORS.dim)} `);
+    return visibleLength(text) <= width ? text : paint(clipPlain(raw, width), TUI_COLORS.yellow);
+  }
+
+  return null;
+}
+
+function renderTuiStatusLine(statusLine: string, busy: boolean, width: number): string {
+  const raw = statusLine.trim();
+  if (raw.length === 0) {
+    return "";
+  }
+  const syncSummary = formatTuiSyncFooterSummary(raw, width);
+  if (syncSummary) {
+    return syncSummary;
+  }
+  const progress = formatTuiProgressStatus(raw, width);
+  if (progress) {
+    return progress;
+  }
+  if (raw.startsWith("Error:")) {
+    return paint(clipPlain(raw, width), TUI_COLORS.red);
+  }
+  return paint(clipPlain(raw, width), busy ? TUI_COLORS.yellow : TUI_COLORS.dim);
 }
 
 async function maybeReadRemoteSyncStateForProject(cwd: string, repoId: string) {
@@ -1663,11 +1927,11 @@ async function syncSetupCommand(rest: string[]): Promise<void> {
     return;
   }
 
-  console.log(`Repo: ${cwd}`);
+  console.log(cliLabelValue("Repo:", cwd, "info"));
   console.log(formatAutoSyncSummaryLine("Current auto-sync:", auto));
-  console.log("This installs repo-scoped hooks so sync runs automatically after commits and agent completion.");
+  console.log(`${cliBadge("Automation setup", "info")} Installs repo-scoped hooks for commit/push and agent completion sync.`);
   if (auto.enabled && !force) {
-    console.log("Auto-sync is already enabled for this repo. Re-run with `codaph sync setup --force` to reinstall hooks.");
+    console.log(`${cliBadge("Auto-sync already enabled", "ok")} Re-run with \`codaph sync setup --force\` to reinstall hooks.`);
     return;
   }
 
@@ -1723,14 +1987,16 @@ async function setupCommand(rest: string[]): Promise<void> {
     return;
   }
 
-  console.log("Codaph setup (global)");
-  console.log(`Config: ${payload.globalConfigPath}`);
-  console.log(`Mubit: ${payload.mubit.configured ? "configured" : "missing API key"} | actor=${payload.mubit.actorId ?? "(auto-detect on use)"}`);
-  console.log(`OpenAI agent: ${payload.openai.configured ? "configured" : "off"}`);
+  console.log(`${paint("Codaph setup", TUI_COLORS.brand)} ${paint("(global)", TUI_COLORS.dim)}`);
+  console.log(cliLabelValue("Config:", payload.globalConfigPath, "dim"));
+  console.log(
+    `${paint("Mubit:", TUI_COLORS.dim)} ${payload.mubit.configured ? cliBadge("configured", "ok") : cliBadge("missing API key", "warn")} ${paint("|", TUI_COLORS.dim)} ${paint("actor", TUI_COLORS.dim)}=${paint(payload.mubit.actorId ?? "(auto-detect on use)", payload.mubit.actorId ? TUI_COLORS.cyan : TUI_COLORS.muted)}`,
+  );
+  console.log(`${paint("OpenAI agent:", TUI_COLORS.dim)} ${payload.openai.configured ? cliBadge("configured", "ok") : cliBadge("off", "dim")}`);
   if (!payload.mubit.configured) {
-    console.log("Set Mubit globally: `codaph setup --mubit-api-key <key>`");
+    console.log(`${cliBadge("Action", "warn")} Set Mubit globally: \`codaph setup --mubit-api-key <key>\``);
   }
-  console.log("Next: run `codaph init` inside a repo to create `.codaph/` and enable repo automation.");
+  console.log(`${cliBadge("Next", "info")} Run \`codaph init\` inside a repo to create \`.codaph/\` and enable repo automation.`);
 }
 
 async function initCommand(rest: string[]): Promise<void> {
@@ -1804,30 +2070,35 @@ async function initCommand(rest: string[]): Promise<void> {
     return;
   }
 
-  console.log(`Initialized Codaph for ${cwd}`);
-  console.log(`Repo id: ${repoId}`);
-  console.log(`Mubit API: ${payload.mubitConfigured ? "configured" : "not configured (set with \`codaph setup --mubit-api-key <key>\` or rerun \`codaph init\`)"}`
+  console.log(`${cliBadge("Initialized Codaph", "ok")} ${paint(cwd, TUI_COLORS.dim)}`);
+  console.log(cliLabelValue("Repo id:", repoId, "info"));
+  console.log(
+    `${paint("Mubit API:", TUI_COLORS.dim)} ${payload.mubitConfigured
+      ? cliBadge("configured", "ok")
+      : `${cliBadge("not configured", "warn")} ${paint("(set with `codaph setup --mubit-api-key <key>` or rerun `codaph init`)", TUI_COLORS.muted)}`}`,
   );
-  console.log(`Mubit project: ${payload.mubitProjectId ?? "(auto-detect unavailable)"} | run scope: ${payload.mubitRunScope}`);
-  console.log(`Local project config: ${projectConfigPath}`);
+  console.log(
+    `${paint("Mubit project:", TUI_COLORS.dim)} ${paint(payload.mubitProjectId ?? "(auto-detect unavailable)", payload.mubitProjectId ? TUI_COLORS.cyan : TUI_COLORS.yellow)} ${paint("|", TUI_COLORS.dim)} ${paint("run scope", TUI_COLORS.dim)}: ${paint(String(payload.mubitRunScope), TUI_COLORS.cyan)}`,
+  );
+  console.log(cliLabelValue("Local project config:", projectConfigPath, "dim"));
   const autoAfter = resolveSyncAutomationConfig(settings, cwd);
   console.log(
-    `Auto-sync: ${autoAfter.enabled ? "enabled" : "off"} (post-commit:${autoAfter.gitPostCommit ? "on" : "off"}, agent-complete:${autoAfter.agentComplete ? "on" : "off"})`,
+    formatAutoSyncSummaryLine("Auto-sync:", autoAfter),
   );
   if (automationInstalled) {
     for (const warning of automationInstalled.warnings) {
-      console.log(`Warning: ${warning}`);
+      console.log(`${cliBadge("Warning", "warn")} ${warning}`);
     }
     for (const step of automationInstalled.manualSteps) {
-      console.log(step);
+      console.log(`${cliBadge("Manual step", "warn")} ${step}`);
     }
   } else if (noAutoSync) {
-    console.log("Auto-sync install skipped (`--no-auto-sync`).");
+    console.log(`${cliBadge("Auto-sync install skipped", "warn")} (\`--no-auto-sync\`)`);
   }
-  console.log("Next:");
-  console.log("  1. `codaph pull` (cloud -> local, daily)");
-  console.log("  2. `codaph push` (optional one-time Codex history backfill)");
-  console.log("  3. `codaph tui`");
+  console.log(cliBadge("Next", "info"));
+  console.log(`  1. ${paint("codaph pull", TUI_COLORS.cyan)} ${paint("(cloud -> local, daily)", TUI_COLORS.dim)}`);
+  console.log(`  2. ${paint("codaph push", TUI_COLORS.cyan)} ${paint("(optional one-time Codex history backfill)", TUI_COLORS.dim)}`);
+  console.log(`  3. ${paint("codaph tui", TUI_COLORS.cyan)}`);
 }
 
 async function statusCommand(rest: string[]): Promise<void> {
@@ -3731,15 +4002,42 @@ function buildSessionAnalysis(sessionId: string, events: CapturedEventEnvelope[]
       partCount: number;
       files: FileStatRow[];
       parts: Map<number, string[]>;
+      lineCount: number;
+      hasCodeLevelDiff: boolean;
     }>();
     for (const snapshot of promptDiffSnapshots.values()) {
+      const assembledPreview: string[] = [];
+      let lineCount = 0;
+      for (let i = 0; i < snapshot.partCount; i += 1) {
+        const chunk = snapshot.parts.get(i);
+        if (!chunk || chunk.length === 0) {
+          continue;
+        }
+        lineCount += chunk.length;
+        if (assembledPreview.length < 400) {
+          const remaining = 400 - assembledPreview.length;
+          assembledPreview.push(...chunk.slice(0, remaining));
+        }
+      }
+      const hasCodeLevelDiff = lineCount > 0 && hasCodeLevelDiffLines(assembledPreview);
       const existing = latestByPromptKey.get(snapshot.promptKey);
-      if (!existing || snapshot.ts >= existing.ts) {
+      const shouldReplace =
+        !existing ||
+        (hasCodeLevelDiff && !existing.hasCodeLevelDiff) ||
+        (hasCodeLevelDiff === existing.hasCodeLevelDiff && lineCount > existing.lineCount) ||
+        (
+          hasCodeLevelDiff === existing.hasCodeLevelDiff &&
+          lineCount === existing.lineCount &&
+          snapshot.ts >= existing.ts
+        );
+      if (shouldReplace) {
         latestByPromptKey.set(snapshot.promptKey, {
           ts: snapshot.ts,
           partCount: snapshot.partCount,
           files: snapshot.files,
           parts: snapshot.parts,
+          lineCount,
+          hasCodeLevelDiff,
         });
       }
     }
@@ -5157,12 +5455,7 @@ async function tui(rest: string[]): Promise<void> {
       }
     }
 
-    const statusText = state.statusLine.trim().length > 0
-      ? clipPlain(state.statusLine, width)
-      : "";
-    const status = statusText.length > 0
-      ? paint(statusText, state.busy ? TUI_COLORS.yellow : TUI_COLORS.dim)
-      : "";
+    const status = renderTuiStatusLine(state.statusLine, state.busy, width);
 
     const bodyHeight = Math.max(1, height - 1);
     const frameLines = screen.split("\n").slice(0, bodyHeight);
@@ -6136,8 +6429,18 @@ async function tui(rest: string[]): Promise<void> {
 async function main(): Promise<void> {
   const [cmd, sub, ...rest] = process.argv.slice(2);
 
-  if (!cmd || cmd === "--help" || cmd === "-h") {
+  if (!cmd) {
+    await tui([]);
+    return;
+  }
+
+  if (cmd === "--help" || cmd === "-h" || cmd === "help") {
     console.log(help());
+    return;
+  }
+
+  if (cmd === "--version" || cmd === "-V" || cmd === "version") {
+    console.log(CODAPH_CLI_VERSION);
     return;
   }
 
