@@ -1,8 +1,34 @@
 # Codaph
 
-Codaph is a terminal-first CLI/TUI for inspecting coding-agent activity with shared Mubit-backed memory.
+Codaph is a terminal-first CLI interface for inspecting coding-agent activity with shared Mubit-backed memory.
 
-Once a legend said, if Pentagon can vibe code secret ops with AI, we can surely engineer a CLI with it. That legend is Shankha
+Codaph is the result of a confusion - who prompted _(this)_? during our dev cycle. The prompt or code wasn't the problem but the lack of story around it. With agentic coding tools, we are shipping faster than ever but also missing out on so much story. Codaph aims to be the bridge and to also convince you to sign up to Mubit.
+
+> [!WARNING]
+> Codaph is in beta and can break. Plus, its agentically engineered. Be mindful.
+
+> Once a legend said, if Pentagon can vibe code secret ops with AI, we can surely engineer a CLI with it.
+
+## Plans
+
+- [ ] Rust rewrite for the love of game and performance optimisation
+- [ ] Use Mubit state subscription for auto exec / scripting
+- [ ] Dependencies map and upgrade sync in Mubit
+- [ ] Plugin for coding agents
+- [ ] Add support for
+  - [ ] Claude Code
+  - [ ] OpenCode
+  - [ ] Gemini
+  - [ ] Cursor
+  - [x] Codex
+
+## What's the Point of using a memory platform like Mubit
+
+If you have more than 2 engineers working in parallel with various coding agents, it gets difficult to trace semantic reasoning and understand the story.
+
+Onboarding a new engineer or a new agent becomes a problem with the coldstart. Using Mubit helps avoid it and build on top the semantic layer (of your own code).
+
+The goal with Codaph is to enable a VCS that humans can use to understand the code story while we offload the tasks to agents.
 
 ## Installation
 
@@ -11,13 +37,7 @@ Use one of the following methods.
 ### npm / npx
 
 ```bash
-npx @codaph/codaph --help
-```
-
-If your environment does not resolve the scoped bin automatically:
-
-```bash
-npx --yes --package @codaph/codaph codaph --help
+npm i -g @codaph/codaph
 ```
 
 ### From source (development)
