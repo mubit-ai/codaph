@@ -822,3 +822,13 @@ Do not rewrite history; append a new snapshot each run.
 - unstaged: 0
 - untracked: 0
 - files: package.json
+
+## Status Snapshot — 2026-02-25T07:25:38.862Z
+- source: pre-commit
+- repo: /Users/anilp/Code/codaph
+- branch: optimisation
+- head: 5a9da7c
+- staged: 4
+- unstaged: 0
+- untracked: 0
+- files: docs/README.md, docs/cli-reference.md, docs/index.md, docs/quickstart.md

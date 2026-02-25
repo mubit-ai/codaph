@@ -4,24 +4,95 @@ layout: docs
 
 # Quickstart
 
-This guide gets Codaph running with shared Mubit memory in a few minutes.
+Codaph lets you inspect coding-agent activity in a terminal UI and share project memory through Mubit.
+This quickstart gets a new project working in a few minutes, including Mubit setup and optional OpenAI-assisted query/chat.
 
 ## What You Need
 
+Required:
+
 - A repository you want to inspect
-- Bun `1.3.9+`
 - Codex CLI installed and authenticated
-- A Mubit API key from [console.mubit.ai](https://console.mubit.ai)
+- A Mubit API key (you can create one in [console.mubit.ai](https://console.mubit.ai))
 
-Optional:
+Only needed for source/development install:
 
-- `OPENAI_API_KEY` for Mubit query answer synthesis
+- Bun `1.3.9+`
+
+Optional (recommended for query/chat quality):
+
+- `OPENAI_API_KEY` for OpenAI-assisted synthesis in `codaph mubit query` and TUI chat
+- `OPENAI_MODEL` only if you want to override the default OpenAI model (`gpt-4.1-mini`)
+
+## Before You Start: Keys and What They Do
+
+Codaph uses Mubit for shared cloud memory and sync. You must configure a Mubit API key to use Mubit-backed sync and collaboration features.
+
+Codaph can also use OpenAI for small query/chat responses on top of Mubit evidence. This is optional and affects `codaph mubit query ...` and the TUI chat panel (`m`) when agent mode is enabled.
+
+By default, Codaph uses `gpt-4.1-mini` for OpenAI-assisted synthesis/chat. You can override it with `OPENAI_MODEL` or `--openai-model <model>`.
+
+If you do not configure OpenAI, Codaph falls back to Mubit responses.
+
+## Get a Mubit API Key
+
+Create your Mubit key before running the first sync.
+
+1. Open [mubit.ai](https://mubit.ai), then go to [console.mubit.ai](https://console.mubit.ai).
+2. Create an account or sign in.
+<!-- MEDIA PLACEHOLDER: Mubit signup / console account creation screenshot or short video (future asset path: docs/assets/img/quickstart/mubit-signup.png) -->
+3. Open the developer/API access area in the console.
+4. Create an API key and copy it.
+<!-- MEDIA PLACEHOLDER: Mubit console API key creation / copy flow screenshot or short video (future asset path: docs/assets/img/quickstart/mubit-api-key.png) -->
+5. Store it securely. Do not commit it to your repository.
+
+## Add Your Keys (Recommended Setup Path)
+
+Set global keys first so `codaph init` can run without prompting for missing credentials.
+
+```bash
+codaph setup --mubit-api-key <your-mubit-key>
+```
+
+If you want OpenAI-assisted query/chat answers, add your OpenAI key too:
+
+```bash
+codaph setup --openai-api-key <your-openai-key>
+```
+
+You can also use environment variables instead of `codaph setup`:
+
+```bash
+export MUBIT_API_KEY=<your-mubit-key>
+# Optional:
+export OPENAI_API_KEY=<your-openai-key>
+# Optional model override (default is gpt-4.1-mini):
+export OPENAI_MODEL=<your-model>
+```
+
+`codaph init` still prompts for a Mubit API key if one is not configured yet, so the wizard-first path remains valid.
 
 ## Install Codaph
 
-Choose one path.
+Choose one install path.
 
-### Option A: Run from source (current repo)
+### Option A: Published binary (recommended for most users)
+
+Start by verifying the installed binary:
+
+```bash
+codaph --help
+```
+
+If you run through `npx`, use this fallback form when your shell does not resolve the scoped binary automatically:
+
+```bash
+npx --yes --package @codaph/codaph codaph --help
+```
+
+### Option B: Run from source (contributors / local development)
+
+Use this path when you are developing Codaph itself.
 
 ```bash
 cd /Users/anilp/Code/codaph
@@ -32,21 +103,9 @@ bun run build
 
 Run commands with `bun run cli ...` while developing from source.
 
-### Option B: Published binary (recommended for docs/site users)
+## Initialize Codaph in a Project
 
-```bash
-codaph --help
-```
-
-If you install through `npx`, use the fallback form when your shell does not resolve the scoped bin automatically:
-
-```bash
-npx --yes --package @codaph/codaph codaph --help
-```
-
-## 1. Initialize Codaph in a Project
-
-Open the target project and run:
+Open the repository you want to inspect and run:
 
 ```bash
 cd /absolute/path/to/your/project
@@ -62,7 +121,9 @@ What `codaph init` does:
 
 If you do not have a Mubit key yet, the wizard points you to [console.mubit.ai](https://console.mubit.ai).
 
-## 2. Run Fast Sync (Daily Sync Path)
+## Run Your First Sync
+
+Run the fast daily sync path after initialization:
 
 ```bash
 codaph sync
@@ -77,7 +138,9 @@ What `codaph sync` does:
 
 Use this command for normal day-to-day usage.
 
-## 3. Open the TUI
+## Open the TUI
+
+Launch the terminal UI to browse sessions, prompts, thoughts, and diffs:
 
 ```bash
 codaph tui
@@ -90,7 +153,21 @@ Inside the TUI:
 - press `enter` on a session to inspect prompts, thoughts, and diffs
 - press `c` to filter by contributor
 
-## 4. Backfill Historical Codex Sessions (Optional)
+## Ask Mubit a Question (Optional OpenAI-assisted)
+
+After you identify a session id, you can query Mubit directly from the CLI:
+
+```bash
+codaph mubit query "what changed in auth?" --session <session-id>
+```
+
+Codaph returns a Mubit response by default. If `OPENAI_API_KEY` is configured, Codaph can synthesize a shorter answer using OpenAI (`gpt-4.1-mini` by default) on top of Mubit evidence.
+
+Use `--agent` or `--no-agent` to control OpenAI-assisted behavior for a specific query. Use `--openai-model <model>` to override the model for that command.
+
+In the TUI, press `m` to open the Mubit chat panel. OpenAI-assisted chat is optional and uses the same key/model settings when enabled.
+
+## Backfill Historical Codex Sessions (Optional)
 
 If you want older Codex sessions from `~/.codex/sessions` to appear in Codaph and Mubit, run:
 
@@ -100,7 +177,9 @@ codaph import
 
 Use `codaph import` once (or occasionally). It is not part of the default daily `sync` path.
 
-## 5. Check Status
+## Check Status
+
+Check local sync state and Mubit diagnostics when you finish setup:
 
 ```bash
 codaph status
@@ -127,8 +206,12 @@ Read [Mubit Collaboration](./collaboration-mubit.md) for details and current lim
 
 ## Non-Interactive Setup (CI / demos / scripted envs)
 
+Use explicit flags in scripted environments:
+
 ```bash
 codaph setup --mubit-api-key <your-key>
+# Optional OpenAI-assisted query/chat:
+codaph setup --openai-api-key <your-openai-key>
 cd /absolute/path/to/your/project
 codaph init --yes
 codaph sync
@@ -136,7 +219,7 @@ codaph sync
 
 ## If Something Looks Wrong
 
-Start with:
+Start with diagnostics before resetting anything:
 
 ```bash
 codaph status

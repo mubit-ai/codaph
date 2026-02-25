@@ -187,6 +187,7 @@ Most users only need:
 
 Codaph can also use:
 
+- `OPENAI_MODEL` (optional override, default OpenAI synthesis/chat model is `gpt-4.1-mini`)
 - `CODAPH_PROJECT_ID`
 - `CODAPH_ACTOR_ID`
 - `CODAPH_MUBIT_RUN_SCOPE`
@@ -218,11 +219,14 @@ codaph diff --session <session-id>
 codaph mubit query "what changed in auth?" --session <session-id>
 ```
 
+OpenAI-assisted synthesis is optional. Without `OPENAI_API_KEY`, Codaph falls back to the Mubit response.
+
 Useful query flags:
 
 - `--limit <n>`
 - `--raw`
 - `--agent` / `--no-agent`
+- `--openai-model <model>` (override OpenAI model for this query)
 
 ### Direct capture (advanced)
 

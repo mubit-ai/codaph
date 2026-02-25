@@ -23,6 +23,8 @@ codaph sync
 codaph tui
 ```
 
+Use [Quickstart](./quickstart.md) for first-time setup details, including Mubit API key setup and optional OpenAI-assisted query/chat configuration.
+
 Optional historical backfill from local Codex history:
 
 ```bash

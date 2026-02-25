@@ -17,6 +17,8 @@ Use these docs in this order:
 
 ### New user (recommended)
 
+Use [Quickstart](./quickstart.md) first for Mubit API key setup, optional OpenAI-assisted query/chat setup, and the recommended first-run flow.
+
 1. Open the target repository.
 2. Run `codaph init`.
 3. Run `codaph sync`.
@@ -48,7 +50,7 @@ This split keeps daily sync fast and makes history replay explicit.
 ### User docs
 
 - [Quickstart](./quickstart.md)
-  Wizard-first setup and first run.
+  First-time setup, keys, and first run.
 - [One-Page CLI/TUI Guide](./one-page-cli-tui.md)
   Publish-ready overview page.
 - [CLI Reference](./cli-reference.md)
