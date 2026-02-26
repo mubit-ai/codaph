@@ -30,6 +30,7 @@ Primary commands:
 - `tui` (terminal UI)
 
 Advanced commands are available but not required for normal usage.
+This includes the local MCP server (`codaph mcp`) for Claude Code and other MCP clients.
 
 ## `codaph setup`
 
@@ -66,6 +67,7 @@ What it does:
 
 - detects or stores repo identity (`owner/repo` when available)
 - creates `.codaph/project.json`
+- writes `.codaph/mcp/claude-code.json` (Claude Code MCP config template)
 - prompts for Mubit API key if missing
 - detects `.codex`, `.claude`, and `.gemini` folders and lets you multi-select agent integrations (preselected when recognized)
 - installs repo-scoped auto-sync hooks (best effort)
@@ -233,6 +235,38 @@ Useful query flags:
 - `--raw`
 - `--agent` / `--no-agent`
 - `--openai-model <model>` (override OpenAI model for this query)
+
+### MCP server (Claude Code / MCP clients)
+
+```bash
+codaph mcp
+```
+
+Start the local Codaph MCP server over stdio.
+
+### `codaph mcp setup claude`
+
+Use this helper to print or run the recommended Claude Code registration command.
+
+```bash
+codaph mcp setup claude
+codaph mcp setup claude --run
+```
+
+Useful flags:
+
+- `--scope user|project|local` (default: `user`)
+- `--mode codaph|npx` (default: `codaph`)
+- `--cwd <path>`
+- `--json`
+
+Recommended flow:
+
+1. Run `codaph init` (generates `.codaph/mcp/claude-code.json`)
+2. Run `codaph mcp setup claude --scope user --run`
+3. Verify in Claude Code with `/mcp`
+
+See [MCP Setup (Claude Code)](./mcp-setup.md) for manual `claude mcp add` and JSON config options.
 
 ### Direct capture (advanced)
 

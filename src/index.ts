@@ -28,6 +28,7 @@ import {
   type CodexHistorySyncProgress,
   type CodexHistorySyncSummary,
 } from "./codex-history-sync";
+import { startCodaphMcpServer } from "./mcp-server";
 import {
   syncClaudeHistory,
   type ClaudeHistorySyncProgress,
@@ -374,6 +375,8 @@ function help(): string {
     "  codaph sync all|pull|status|setup ...",
     "  codaph sync push ...      (compat alias for `codaph push`)",
     "  codaph run|exec ...       (Codex capture wrappers)",
+    "  codaph mcp [serve] [--cwd <path>]            (MCP stdio server for agents/tools)",
+    "  codaph mcp setup claude [--scope user|project] [--run] [--cwd <path>]",
     "  codaph sessions|timeline|diff|inspect ...",
     "  codaph doctor, codaph hooks run ..., codaph mubit query ...",
     "",
@@ -865,6 +868,30 @@ function resolveLocalProjectConfigPath(cwd: string): string {
   return join(resolveMirrorRoot(cwd), "project.json");
 }
 
+function resolveClaudeCodeMcpTemplatePath(cwd: string): string {
+  return join(resolveMirrorRoot(cwd), "mcp", "claude-code.json");
+}
+
+function buildClaudeCodeMcpTemplate(): {
+  mcpServers: {
+    codaph: {
+      type: "stdio";
+      command: string;
+      args: string[];
+    };
+  };
+} {
+  return {
+    mcpServers: {
+      codaph: {
+        type: "stdio",
+        command: "codaph",
+        args: ["mcp"],
+      },
+    },
+  };
+}
+
 function resolveGitRepoRootOrCwd(cwd: string): string {
   try {
     return execFileSync("git", ["rev-parse", "--show-toplevel"], {
@@ -903,6 +930,13 @@ async function writeLocalProjectConfigSnapshot(cwd: string, flags: Flags, settin
   const path = resolveLocalProjectConfigPath(projectPath);
   await mkdir(dirname(path), { recursive: true });
   await writeFile(path, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+  return path;
+}
+
+async function writeClaudeCodeMcpTemplateSnapshot(cwd: string): Promise<string> {
+  const path = resolveClaudeCodeMcpTemplatePath(cwd);
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, `${JSON.stringify(buildClaudeCodeMcpTemplate(), null, 2)}\n`, "utf8");
   return path;
 }
 
@@ -2539,11 +2573,13 @@ async function initCommand(rest: string[]): Promise<void> {
   }
 
   const projectConfigPath = await writeLocalProjectConfigSnapshot(cwd, flags, settings);
+  const claudeMcpTemplatePath = await writeClaudeCodeMcpTemplateSnapshot(cwd);
   const repoId = resolveRepoIdForProject(flags, cwd, settings);
   const payload = {
     cwd,
     repoId,
     projectConfigPath,
+    claudeMcpTemplatePath,
     mubitConfigured: resolveMubitApiKey(flags, settings) !== null,
     mubitProjectId: resolveMubitProjectId(flags, cwd, settings),
     mubitRunScope: resolveMubitRunScope(flags, cwd, settings),
@@ -2577,6 +2613,8 @@ async function initCommand(rest: string[]): Promise<void> {
     `${paint("Agents:", TUI_COLORS.dim)} ${providerListText(payload.agentProviders)} ${paint("|", TUI_COLORS.dim)} ${paint("recognized", TUI_COLORS.dim)}=${providerListText(payload.recognizedAgentProviders)}`,
   );
   console.log(cliLabelValue("Local project config:", projectConfigPath, "dim"));
+  console.log(cliLabelValue("Claude MCP template:", claudeMcpTemplatePath, "dim"));
+  console.log(`${paint("MCP setup:", TUI_COLORS.dim)} ${paint("use `codaph mcp setup claude` (user-scope recommended) or merge the template into ~/.claude.json / .mcp.json", TUI_COLORS.muted)}`);
   const autoAfter = resolveSyncAutomationConfig(settings, cwd);
   console.log(
     formatAutoSyncSummaryLine("Auto-sync:", autoAfter),
@@ -2600,6 +2638,149 @@ async function initCommand(rest: string[]): Promise<void> {
 
 async function statusCommand(rest: string[]): Promise<void> {
   await syncStatus(rest);
+}
+
+function buildClaudeMcpAddInvocation(options: {
+  scope: "user" | "project" | "local";
+  mode: "codaph" | "npx";
+  cwd: string;
+}): { command: string; args: string[]; display: string } {
+  const baseArgs = ["mcp", "add", "--scope", options.scope, "codaph", "--"];
+  const runner = options.mode === "npx"
+    ? ["npx", "--yes", "--package", "@codaph/codaph", "codaph", "mcp"]
+    : ["codaph", "mcp"];
+  const command = "claude";
+  const args = [...baseArgs, ...runner];
+  const display = [command, ...args].map((part) => shellQuote(part)).join(" ");
+  return { command, args, display };
+}
+
+async function mcpSetupClaudeCommand(rest: string[]): Promise<void> {
+  const { flags } = parseArgs(rest);
+  const cwd = resolve(getStringFlag(flags, "cwd") ?? process.cwd());
+  const requestedScope = (getStringFlag(flags, "scope") ?? "user").trim().toLowerCase();
+  const scope = requestedScope === "project" || requestedScope === "local" ? requestedScope : "user";
+  const requestedMode = (getStringFlag(flags, "mode") ?? "codaph").trim().toLowerCase();
+  const mode: "codaph" | "npx" = requestedMode === "npx" ? "npx" : "codaph";
+  const runNow = getBooleanFlag(flags, "run", false);
+
+  const templatePath = await writeClaudeCodeMcpTemplateSnapshot(cwd);
+  const invocation = buildClaudeMcpAddInvocation({ scope, mode, cwd });
+  const payload = {
+    cwd,
+    scope,
+    mode,
+    templatePath,
+    recommended: {
+      command: invocation.command,
+      args: invocation.args,
+      shell: invocation.display,
+    },
+    note:
+      scope === "user"
+        ? "User scope is recommended for personal setup. The Codaph MCP server still works across repos."
+        : "Project scope writes Claude MCP config for this repo (shared setup if committed).",
+  };
+  let runResult:
+    | {
+      executed: true;
+      ok: boolean;
+      error?: string;
+      stdout?: string;
+      stderr?: string;
+    }
+    | null = null;
+
+  if (runNow) {
+    try {
+      execFileSync(invocation.command, invocation.args, {
+        cwd,
+        stdio: flags.json === true ? ["ignore", "pipe", "pipe"] : "inherit",
+        encoding: "utf8",
+      });
+      runResult = {
+        executed: true,
+        ok: true,
+      };
+    } catch (error) {
+      const e = error as NodeJS.ErrnoException & { stdout?: string; stderr?: string };
+      runResult = {
+        executed: true,
+        ok: false,
+        error: e.message ?? String(error),
+      };
+      if (typeof e.stdout === "string" && e.stdout.trim().length > 0) {
+        runResult.stdout = e.stdout;
+      }
+      if (typeof e.stderr === "string" && e.stderr.trim().length > 0) {
+        runResult.stderr = e.stderr;
+      }
+    }
+  }
+
+  if (flags.json === true) {
+    console.log(JSON.stringify({ ...payload, ...(runResult ?? {}) }, null, 2));
+    return;
+  }
+
+  console.log(cliBadge("Claude MCP setup", "info"));
+  console.log(cliLabelValue("Repo:", cwd, "dim"));
+  console.log(cliLabelValue("Scope:", scope, "info"));
+  console.log(cliLabelValue("Mode:", mode, "info"));
+  console.log(cliLabelValue("Template:", templatePath, "dim"));
+  if (runNow) {
+    if (runResult?.ok === true) {
+      console.log(`${cliBadge("Configured", "ok")} Claude Code MCP entry added.`);
+    } else {
+      console.log(`${cliBadge("Failed", "warn")} ${String(runResult?.error ?? "claude mcp add failed")}`);
+      if (typeof runResult?.stderr === "string") {
+        console.log(runResult.stderr);
+      }
+    }
+  } else {
+    console.log(`${paint("Recommended command:", TUI_COLORS.dim)} ${paint(invocation.display, TUI_COLORS.cyan)}`);
+    console.log(`${paint("Tip:", TUI_COLORS.dim)} ${paint("add `--run` to execute it for you", TUI_COLORS.muted)}`);
+  }
+  if (scope === "user") {
+    console.log(`${paint("Why user scope:", TUI_COLORS.dim)} ${paint("one setup works across repos; Codaph tools can still target specific projects via cwd/project_path", TUI_COLORS.muted)}`);
+  }
+}
+
+async function mcpCommand(rest: string[]): Promise<void> {
+  const [sub, next, ...tail] = rest;
+
+  if (sub === "help" || sub === "--help" || sub === "-h") {
+    console.log("Usage:");
+    console.log("  codaph mcp [serve] [--cwd <path>]");
+    console.log("  codaph mcp setup claude [--scope user|project|local] [--mode codaph|npx] [--run] [--cwd <path>] [--json]");
+    console.log("");
+    console.log("Commands:");
+    console.log("  serve                Run the Codaph MCP server over stdio (default)");
+    console.log("  setup claude         Print or run `claude mcp add ...` with a Codaph entry");
+    return;
+  }
+
+  if (sub === "setup") {
+    if (!next) {
+      throw new Error("Usage: codaph mcp setup claude [--scope user|project|local] [--mode codaph|npx] [--run]");
+    }
+    if (next !== "claude") {
+      throw new Error(`Unknown mcp setup target: ${next}`);
+    }
+    await mcpSetupClaudeCommand(tail);
+    return;
+  }
+
+  let args = rest;
+  if (!sub || sub === "serve" || sub === "server") {
+    args = sub ? [next, ...tail].filter(Boolean) as string[] : rest;
+  } else if (!sub.startsWith("--")) {
+    throw new Error(`Unknown mcp subcommand: ${sub}`);
+  }
+
+  const { flags } = parseArgs(args);
+  const cwd = resolve(getStringFlag(flags, "cwd") ?? process.cwd());
+  await startCodaphMcpServer({ defaultCwd: cwd });
 }
 
 async function syncCommand(rest: string[]): Promise<void> {
@@ -7953,6 +8134,11 @@ async function main(): Promise<void> {
 
   if (cmd === "mubit" && sub === "backfill") {
     await mubitBackfill(rest);
+    return;
+  }
+
+  if (cmd === "mcp") {
+    await mcpCommand([sub, ...rest].filter(Boolean) as string[]);
     return;
   }
 

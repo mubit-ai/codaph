@@ -18,6 +18,53 @@ codaph doctor --mubit
 `codaph status` explains repo automation and recent sync state.
 `codaph doctor` explains resolved runtime configuration.
 
+## Claude Code `/mcp` Shows Codaph MCP as `failed`
+
+Symptoms:
+
+- Claude Code `/mcp` shows `codaph` with status `failed`
+- reconnect fails immediately
+
+What is usually happening:
+
+- the configured command is invalid for Claude Code's MCP launcher
+- a stale or duplicate Codaph MCP entry is taking precedence
+- `bun run ...` script wrappers fail in the MCP process environment
+
+What to do:
+
+1. Regenerate or inspect the Codaph template:
+
+```bash
+codaph init
+cat .codaph/mcp/claude-code.json
+```
+
+2. Prefer user-scope setup and let Codaph print/run the correct command:
+
+```bash
+codaph mcp setup claude --scope user --run
+```
+
+3. If `codaph` is not installed globally, use the `npx` fallback:
+
+```bash
+codaph mcp setup claude --mode npx --scope user --run
+```
+
+4. Disable/remove stale duplicate Codaph entries in Claude Code `/mcp`.
+5. Restart Claude Code and verify `/mcp` again.
+
+Quick terminal check:
+
+```bash
+codaph mcp
+```
+
+If the process starts and waits (no immediate exit), the MCP server is launching correctly.
+
+See [MCP Setup (Claude Code)](./mcp-setup.md) for manual `claude mcp add` and JSON config examples.
+
 ## `codaph import` Looks Stuck or Runs for a Long Time
 
 Symptoms:

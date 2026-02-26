@@ -115,12 +115,31 @@ codaph init
 What `codaph init` does:
 
 - creates repo-local `.codaph/project.json`
+- writes `.codaph/mcp/claude-code.json` (Claude Code MCP config template)
 - prompts for a Mubit API key if one is not configured yet
 - detects `.codex`, `.claude`, `.gemini` folders and lets you multi-select agent integrations (recognized providers are preselected)
 - enables repo-scoped auto-sync hooks (post-commit, and agent-complete when detectable)
 - stores repo sync settings
 
 If you do not have a Mubit key yet, the wizard points you to [console.mubit.ai](https://console.mubit.ai).
+
+## Optional: Connect Claude Code via MCP
+
+Codaph can expose a local MCP server so Claude Code can inspect Codaph status, sessions, timelines, and diffs.
+
+Recommended setup (user scope / global):
+
+```bash
+codaph mcp setup claude --scope user --run
+```
+
+`codaph init` also writes a reusable template at:
+
+- `.codaph/mcp/claude-code.json`
+
+Use that template when you prefer manual JSON merge into `~/.claude.json` or repo `.mcp.json`.
+
+See [MCP Setup (Claude Code)](./mcp-setup.md) for `claude mcp add` examples, JSON examples, and troubleshooting.
 
 ## Run Your First Sync
 

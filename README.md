@@ -88,6 +88,9 @@ codaph import
 codaph status
 ```
 
+`codaph init` also writes a reusable Claude Code MCP template at `.codaph/mcp/claude-code.json`.
+Use `codaph mcp setup claude` to print (or run with `--run`) the recommended `claude mcp add ...` command.
+
 Optional query example (OpenAI-assisted if `OPENAI_API_KEY` is set, otherwise Mubit response):
 
 ```bash
@@ -102,6 +105,26 @@ bun run cli sync --cwd /absolute/project/path
 bun run cli tui --cwd /absolute/project/path
 ```
 
+## MCP (Claude Code)
+
+Codaph ships a local MCP server over stdio:
+
+```bash
+codaph mcp
+```
+
+Recommended setup (personal use):
+
+```bash
+codaph mcp setup claude --scope user --run
+```
+
+This uses Claude Code user scope (`~/.claude.json`) so one Codaph MCP config works across repos.
+
+Project scope (`.mcp.json`) is also supported when you want a shared/team config. `codaph init` writes a copy/merge template at `.codaph/mcp/claude-code.json`.
+
+See [MCP Setup (Claude Code)](docs/mcp-setup.md) for `claude mcp add` commands, JSON examples, and troubleshooting.
+
 ## Documentation
 
 Start with [Quickstart](docs/quickstart.md) for Mubit API key setup, optional OpenAI-assisted query/chat setup, and the recommended first-run flow.
@@ -109,6 +132,7 @@ Start with [Quickstart](docs/quickstart.md) for Mubit API key setup, optional Op
 - [Docs Index](docs/index.md)
 - [Quickstart](docs/quickstart.md)
 - [CLI Reference](docs/cli-reference.md)
+- [MCP Setup (Claude Code)](docs/mcp-setup.md)
 - [TUI Guide](docs/tui-guide.md)
 - [Mubit Collaboration](docs/collaboration-mubit.md)
 - [Troubleshooting](docs/troubleshooting.md)
