@@ -942,3 +942,13 @@ Do not rewrite history; append a new snapshot each run.
 - unstaged: 0
 - untracked: 0
 - files: CLAUDE.md, src/index.ts, src/lib/agent-providers.ts, test/lib-agent-providers.test.ts
+
+## Status Snapshot — 2026-02-26T09:12:26.097Z
+- source: pre-commit
+- repo: /Users/anilp/Code/codaph
+- branch: agents/claude
+- head: a63027b
+- staged: 1
+- unstaged: 0
+- untracked: 0
+- files: README.md

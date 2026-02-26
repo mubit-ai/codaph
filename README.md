@@ -16,11 +16,11 @@ Codaph is the result of a confusion - who prompted _(this)_? during our dev cycl
 - [ ] Dependencies map and upgrade sync in Mubit
 - [ ] Plugin for coding agents
 - [ ] Add support for
-  - [x] Claude Code
+  - [x] Claude Code ✅
   - [ ] OpenCode
-  - [x] Gemini
+  - [x] Gemini ✅
   - [ ] Cursor
-  - [x] Codex
+  - [x] Codex ✅
 
 ## What's the Point of using a memory platform like Mubit
 
