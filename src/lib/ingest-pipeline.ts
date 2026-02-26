@@ -6,7 +6,7 @@ import {
   type MirrorAppender,
   type ReasoningAvailability,
 } from "./core-types";
-import { redactUnknown } from "./security";
+import { redactRawLine, redactUnknown } from "./redactor";
 
 export interface IngestContext {
   source: AgentSource;
@@ -251,7 +251,7 @@ export class IngestPipeline {
   }
 
   async ingestRawLine(sessionId: string, line: string): Promise<void> {
-    await this.mirror.appendRawLine(sessionId, line);
+    await this.mirror.appendRawLine(sessionId, redactRawLine(line));
   }
 
   async flush(): Promise<void> {

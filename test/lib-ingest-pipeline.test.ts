@@ -151,4 +151,22 @@ describe("ingest pipeline", () => {
     const batchArg = (firstCallArgs[0] ?? []) as Array<{ eventId: string }>;
     expect(batchArg.length).toBe(2);
   });
+
+  it("redacts raw transcript lines before writing to the local mirror", async () => {
+    const appendEvent = vi.fn(async () => ({ segment: "x", offset: 1, checksum: "abc" }));
+    const appendRawLine = vi.fn(async () => {});
+    const pipeline = new IngestPipeline({ appendEvent, appendRawLine });
+
+    await pipeline.ingestRawLine(
+      "s1",
+      '{"type":"user","apiKey":"sk-123456789012345678901234567890","tokenEstimate":"24k"}',
+    );
+
+    expect(appendRawLine).toHaveBeenCalledTimes(1);
+    const firstCall = (appendRawLine.mock.calls[0] ?? []) as unknown[];
+    const line = String(firstCall[1] ?? "");
+    expect(line).not.toContain("sk-1234567890");
+    expect(line).toContain("[REDACTED]");
+    expect(line).toContain('"tokenEstimate":"24k"');
+  });
 });
