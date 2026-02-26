@@ -2,10 +2,11 @@
 import { clearLine, createInterface, cursorTo, emitKeypressEvents } from "node:readline";
 import { stdin as input, stdout as output } from "node:process";
 import { readFileSync } from "node:fs";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readdir, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import type { CapturedEventEnvelope } from "./lib/core-types";
 import { repoIdFromPath } from "./lib/core-types";
@@ -3789,6 +3790,15 @@ interface ChatMessage {
   ts: string;
 }
 
+interface ProjectPickerEntry {
+  key: string;
+  label: string;
+  path: string;
+  kind: "parent" | "directory";
+  isGitRepo: boolean;
+  tracked: boolean;
+}
+
 type TuiView = "browse" | "inspect";
 type InspectPane = "prompts" | "thoughts" | "files" | "diff" | "chat";
 type BrowseGroupingMode = "session" | "day";
@@ -3828,6 +3838,11 @@ interface TuiState {
   projectManagerRegistry: ProjectRegistry;
   selectedProjectManagerIndex: number;
   projectManagerRemoveTargetPath: string | null;
+  projectPickerOpen: boolean;
+  projectPickerPath: string;
+  projectPickerEntries: ProjectPickerEntry[];
+  selectedProjectPickerIndex: number;
+  projectPickerShowHidden: boolean;
   busy: boolean;
   statusLine: string;
   actorFilter: string | null;
@@ -5929,6 +5944,106 @@ function renderProjectManagerOverlay(state: TuiState, width: number, height: num
   ].join("\n");
 }
 
+async function pathLooksLikeGitRepo(pathname: string): Promise<boolean> {
+  try {
+    await stat(join(pathname, ".git"));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function readProjectPickerEntries(
+  dirPath: string,
+  trackedProjects: Iterable<string>,
+  showHidden: boolean,
+): Promise<ProjectPickerEntry[]> {
+  const resolvedDir = resolve(dirPath);
+  const tracked = new Set<string>([...trackedProjects].map((entry) => resolve(entry)));
+  const rawEntries = await readdir(resolvedDir, { withFileTypes: true });
+  const dirEntries = rawEntries
+    .filter((entry) => entry.isDirectory())
+    .filter((entry) => showHidden || !entry.name.startsWith("."))
+    .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
+
+  const items = await Promise.all(
+    dirEntries.map(async (entry) => {
+      const fullPath = join(resolvedDir, entry.name);
+      const isGitRepo = await pathLooksLikeGitRepo(fullPath);
+      return {
+        key: `dir:${fullPath}`,
+        label: entry.name,
+        path: fullPath,
+        kind: "directory" as const,
+        isGitRepo,
+        tracked: tracked.has(resolve(fullPath)),
+      };
+    }),
+  );
+
+  const out: ProjectPickerEntry[] = [];
+  const parent = resolve(resolvedDir, "..");
+  if (parent !== resolvedDir) {
+    out.push({
+      key: `parent:${parent}`,
+      label: "..",
+      path: parent,
+      kind: "parent",
+      isGitRepo: false,
+      tracked: tracked.has(parent),
+    });
+  }
+
+  out.push(...items);
+  return out;
+}
+
+function renderProjectPickerOverlay(state: TuiState, width: number, height: number): string {
+  const overlayWidth = Math.max(74, Math.min(width - 6, 148));
+  const overlayHeight = Math.max(14, Math.min(height - 6, 34));
+  const bodyHeight = Math.max(1, overlayHeight - 2);
+  const lines: PaneLine[] = [];
+
+  const pathLine = `Path: ${clipPlain(state.projectPickerPath, Math.max(18, overlayWidth - 8))}`;
+  lines.push({ text: pathLine, color: TUI_COLORS.muted });
+  lines.push({
+    text: `Legend: [repo] git repo  [tracked] already in registry  hidden:${state.projectPickerShowHidden ? "on" : "off"}`,
+    color: TUI_COLORS.muted,
+  });
+  lines.push({ text: "" });
+
+  if (state.projectPickerEntries.length === 0) {
+    lines.push({ text: "(No subdirectories here)", color: TUI_COLORS.muted });
+  } else {
+    const visibleRows = Math.max(1, bodyHeight - lines.length);
+    const start = windowStart(state.projectPickerEntries.length, state.selectedProjectPickerIndex, visibleRows);
+    const end = Math.min(state.projectPickerEntries.length, start + visibleRows);
+    for (let i = start; i < end; i += 1) {
+      const entry = state.projectPickerEntries[i] as ProjectPickerEntry;
+      const marker = i === state.selectedProjectPickerIndex ? ">" : " ";
+      const kind = entry.kind === "parent" ? "[..]" : entry.isGitRepo ? "[repo]" : "[dir]";
+      const tracked = entry.tracked ? " [tracked]" : "";
+      const maxLabel = Math.max(8, overlayWidth - 20);
+      lines.push({
+        text: `${marker} ${kind} ${clipPlain(entry.label, maxLabel)}${tracked}`,
+        highlight: i === state.selectedProjectPickerIndex,
+      });
+    }
+  }
+
+  const box = boxLines("Add Project (Picker)", overlayWidth, overlayHeight, lines, true);
+  const leftPad = Math.max(0, Math.floor((width - overlayWidth) / 2));
+  const topPad = Math.max(0, Math.floor((height - overlayHeight) / 2) - 1);
+  const footer =
+    "[up/down] navigate  [enter] open/add repo  [right] open dir  [.] add current  [/] type path  [h] hidden  [esc/a] close";
+  return [
+    ...Array.from({ length: topPad }, () => ""),
+    ...box.map((line) => `${" ".repeat(leftPad)}${line}`),
+    "",
+    `${" ".repeat(leftPad)}${paint(clipPlain(footer, overlayWidth), TUI_COLORS.dim)}`,
+  ].join("\n");
+}
+
 function lastGitAuthorForFile(
   projectPath: string,
   filePath: string,
@@ -6161,6 +6276,11 @@ async function tui(rest: string[]): Promise<void> {
     projectManagerRegistry: { projects: [], lastProjectPath: null },
     selectedProjectManagerIndex: 0,
     projectManagerRemoveTargetPath: null,
+    projectPickerOpen: false,
+    projectPickerPath: resolve(process.env.HOME ?? homedir()),
+    projectPickerEntries: [],
+    selectedProjectPickerIndex: 0,
+    projectPickerShowHidden: false,
     busy: false,
     statusLine: "",
     actorFilter: null,
@@ -6285,6 +6405,55 @@ async function tui(rest: string[]): Promise<void> {
     render();
   };
 
+  const loadProjectPickerDir = async (nextPath: string): Promise<void> => {
+    const resolvedPath = resolve(nextPath);
+    await refreshProjectManagerRegistry();
+    const entries = await readProjectPickerEntries(
+      resolvedPath,
+      state.projectManagerRegistry.projects,
+      state.projectPickerShowHidden,
+    );
+    state.projectPickerPath = resolvedPath;
+    state.projectPickerEntries = entries;
+    state.selectedProjectPickerIndex = Math.max(
+      0,
+      Math.min(state.selectedProjectPickerIndex, Math.max(0, entries.length - 1)),
+    );
+    state.statusLine = `Project picker: ${resolvedPath}`;
+  };
+
+  const openProjectPicker = async (initialPath?: string): Promise<void> => {
+    state.helpOpen = false;
+    state.settingsOpen = false;
+    state.projectManagerOpen = false;
+    state.projectManagerRemoveTargetPath = null;
+    state.inputMode = null;
+    state.inputBuffer = "";
+    state.projectPickerOpen = true;
+    state.selectedProjectPickerIndex = 0;
+
+    const fallback = dirname(state.projectPath);
+    const start = initialPath ?? state.projectPickerPath ?? fallback;
+    await loadProjectPickerDir(start);
+    render();
+  };
+
+  const closeProjectPicker = (message?: string): void => {
+    state.projectPickerOpen = false;
+    if (message) {
+      state.statusLine = message;
+    }
+  };
+
+  const selectedProjectPickerEntry = (): ProjectPickerEntry | null => {
+    if (!state.projectPickerOpen || state.projectPickerEntries.length === 0) {
+      return null;
+    }
+    const idx = Math.max(0, Math.min(state.selectedProjectPickerIndex, state.projectPickerEntries.length - 1));
+    state.selectedProjectPickerIndex = idx;
+    return state.projectPickerEntries[idx] ?? null;
+  };
+
   const refreshSettingsAndMemory = (): void => {
     settings = loadCodaphSettings();
     memory = createMubitMemory(flags, state.projectPath, settings);
@@ -6338,6 +6507,8 @@ async function tui(rest: string[]): Promise<void> {
       screen = renderHelpOverlay(width, height);
     } else if (state.settingsOpen) {
       screen = renderSettingsOverlay(flags, settings, state, memory?.isEnabled() ?? false, width, height);
+    } else if (state.projectPickerOpen) {
+      screen = renderProjectPickerOverlay(state, width, height);
     } else if (state.projectManagerOpen) {
       screen = renderProjectManagerOverlay(state, width, height);
     } else if (state.view === "browse") {
@@ -6535,6 +6706,7 @@ async function tui(rest: string[]): Promise<void> {
     state.chatScroll = 0;
     state.fullDiffOpen = false;
     state.projectManagerRemoveTargetPath = null;
+    state.projectPickerOpen = false;
     resetInspectScroll();
     analysisCache.clear();
     gitAuthorCache.clear();
@@ -6881,6 +7053,7 @@ async function tui(rest: string[]): Promise<void> {
     state.settingsOpen = false;
     state.projectManagerOpen = false;
     state.projectManagerRemoveTargetPath = null;
+    state.projectPickerOpen = false;
     render();
   };
 
@@ -7073,6 +7246,90 @@ async function tui(rest: string[]): Promise<void> {
       return;
     }
 
+    if (state.projectPickerOpen) {
+      if (str === "q" || key.name === "q") {
+        close();
+        return;
+      }
+      if (key.name === "escape" || str === "a") {
+        closeProjectPicker("Project picker closed.");
+        render();
+        return;
+      }
+      if (str === "/") {
+        beginInputMode("add_project");
+        return;
+      }
+      if (str === "h") {
+        runTask("Refreshing directory...", async () => {
+          state.projectPickerShowHidden = !state.projectPickerShowHidden;
+          await loadProjectPickerDir(state.projectPickerPath);
+        });
+        return;
+      }
+      if (str === ".") {
+        const target = state.projectPickerPath;
+        closeProjectPicker();
+        runTask("Adding project...", async () => {
+          await addProjectToRegistry(target);
+          await activateProject(target, `Loading ${basename(resolve(target))}`);
+        });
+        return;
+      }
+      if (key.name === "up") {
+        if (state.projectPickerEntries.length > 0) {
+          state.selectedProjectPickerIndex = Math.max(0, state.selectedProjectPickerIndex - 1);
+          render();
+        }
+        return;
+      }
+      if (key.name === "down") {
+        if (state.projectPickerEntries.length > 0) {
+          state.selectedProjectPickerIndex = Math.min(
+            state.projectPickerEntries.length - 1,
+            state.selectedProjectPickerIndex + 1,
+          );
+          render();
+        }
+        return;
+      }
+      if (key.name === "left" || key.name === "backspace") {
+        runTask("Opening parent...", async () => {
+          await loadProjectPickerDir(resolve(state.projectPickerPath, ".."));
+        });
+        return;
+      }
+      if (key.name === "right") {
+        const entry = selectedProjectPickerEntry();
+        if (!entry) {
+          return;
+        }
+        runTask("Opening directory...", async () => {
+          await loadProjectPickerDir(entry.path);
+        });
+        return;
+      }
+      if (key.name === "return") {
+        const entry = selectedProjectPickerEntry();
+        if (!entry) {
+          return;
+        }
+        if (entry.kind === "directory" && entry.isGitRepo) {
+          closeProjectPicker();
+          runTask("Adding project...", async () => {
+            await addProjectToRegistry(entry.path);
+            await activateProject(entry.path, `Loading ${basename(resolve(entry.path))}`);
+          });
+          return;
+        }
+        runTask("Opening directory...", async () => {
+          await loadProjectPickerDir(entry.path);
+        });
+        return;
+      }
+      return;
+    }
+
     if (state.inputMode) {
       const mode = state.inputMode;
       if (key.name === "escape") {
@@ -7174,7 +7431,9 @@ async function tui(rest: string[]): Promise<void> {
       if (str === "a") {
         state.projectManagerOpen = false;
         state.projectManagerRemoveTargetPath = null;
-        beginInputMode("add_project");
+        runTask("Opening project picker...", async () => {
+          await openProjectPicker();
+        });
         return;
       }
       if (str === "x") {
@@ -7325,7 +7584,9 @@ async function tui(rest: string[]): Promise<void> {
     }
 
     if (str === "a") {
-      beginInputMode("add_project");
+      runTask("Opening project picker...", async () => {
+        await openProjectPicker();
+      });
       return;
     }
 
