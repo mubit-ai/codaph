@@ -15,6 +15,7 @@ Codaph is the result of a confusion - who prompted _(this)_? during our dev cycl
 - [ ] Use Mubit state subscription for auto exec / scripting
 - [ ] Dependencies map and upgrade sync in Mubit
 - [ ] Plugin for coding agents
+- [x] MCP Server
 - [ ] Add support for
   - [x] Claude Code ✅
   - [ ] OpenCode
