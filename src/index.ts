@@ -3695,19 +3695,28 @@ interface ThoughtSlice {
   id: number;
   ts: string;
   actorId: string | null;
+  provider: AgentProviderId | null;
   text: string;
   diffLines: string[];
+}
+
+interface OutputSlice {
+  ts: string;
+  actorId: string | null;
+  provider: AgentProviderId | null;
+  text: string;
 }
 
 interface PromptSlice {
   id: number;
   ts: string;
   actorId: string | null;
+  provider: AgentProviderId | null;
   promptEventId: string | null;
   prompt: string;
   thoughts: string[];
   thoughtSlices: ThoughtSlice[];
-  outputs: string[];
+  outputs: OutputSlice[];
   files: Map<string, FileStatRow>;
   diffLines: string[];
 }
@@ -3735,12 +3744,18 @@ interface SessionAnalysis {
   files: FileStatRow[];
   contributors: ContributorSlice[];
   tokenEstimate: number;
+  providers: AgentProviderId[];
   canonicalPromptCount?: number;
   canonicalFileCount?: number;
 }
 
 interface SessionBrowseRow {
   sessionId: string;
+  kind: "session" | "day";
+  dayKey: string;
+  memberSessionIds?: string[];
+  memberSessionCount?: number;
+  providers: AgentProviderId[];
   from: string;
   to: string;
   eventCount: number;
@@ -3776,6 +3791,7 @@ interface ChatMessage {
 
 type TuiView = "browse" | "inspect";
 type InspectPane = "prompts" | "thoughts" | "files" | "diff" | "chat";
+type BrowseGroupingMode = "session" | "day";
 type InputMode =
   | null
   | "add_project"
@@ -3789,6 +3805,8 @@ interface TuiState {
   projectPath: string;
   view: TuiView;
   inspectPane: InspectPane;
+  browseGrouping: BrowseGroupingMode;
+  canonicalRows: SessionBrowseRow[];
   rows: SessionBrowseRow[];
   selectedSessionIndex: number;
   selectedPromptIndex: number;
@@ -4159,6 +4177,127 @@ function actorLabel(actorId: string | null | undefined): string {
   return normalizeActorId(actorId) ?? "unknown";
 }
 
+function providerFromEventSource(source: string | null | undefined): AgentProviderId | null {
+  if (!source) {
+    return null;
+  }
+  if (source.startsWith("codex_")) {
+    return "codex";
+  }
+  if (source.startsWith("claude_code_")) {
+    return "claude-code";
+  }
+  if (source.startsWith("gemini_cli_")) {
+    return "gemini-cli";
+  }
+  return null;
+}
+
+function providerTag(provider: AgentProviderId | null | undefined): string {
+  if (provider === "codex") {
+    return "[Codex]";
+  }
+  if (provider === "claude-code") {
+    return "[Claude]";
+  }
+  if (provider === "gemini-cli") {
+    return "[Gemini]";
+  }
+  return "[unknown]";
+}
+
+function providerRowSummary(providers: AgentProviderId[] | null | undefined): string {
+  const list = normalizeAgentProviderList(providers ?? []);
+  if (list.length === 0) {
+    return "-";
+  }
+  const compact = list.map((provider) => {
+    if (provider === "codex") {
+      return "Codex";
+    }
+    if (provider === "claude-code") {
+      return "Claude";
+    }
+    return "Gemini";
+  });
+  return compact.join("+");
+}
+
+function localDayKey(ts: string): string {
+  const date = new Date(ts);
+  if (Number.isNaN(date.getTime())) {
+    return "unknown";
+  }
+  const y = String(date.getFullYear());
+  const m = String(date.getMonth() + 1).padStart(2, "0");
+  const d = String(date.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
+
+function formatDayBucketCell(ts: string, sessionCount: number): string {
+  const date = new Date(ts);
+  if (Number.isNaN(date.getTime())) {
+    return `unknown (${sessionCount})`;
+  }
+  const month = date.toLocaleString("en-US", { month: "short" });
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${month} ${day} (${sessionCount})`;
+}
+
+function browseRowKey(row: SessionBrowseRow): string {
+  return row.kind === "day" ? `day:${row.dayKey}` : `session:${row.sessionId}`;
+}
+
+function browseRowTitle(row: SessionBrowseRow): string {
+  if (row.kind === "day") {
+    const count = row.memberSessionCount ?? row.memberSessionIds?.length ?? 0;
+    return `Day ${row.dayKey} (${count} session${count === 1 ? "" : "s"})`;
+  }
+  return `Session ${row.sessionId.slice(0, 8)} - ${formatDateCell(row.to)}`;
+}
+
+function groupBrowseRowsByDay(rows: SessionBrowseRow[]): SessionBrowseRow[] {
+  const buckets = new Map<string, SessionBrowseRow[]>();
+  for (const row of rows) {
+    const key = row.dayKey;
+    const bucket = buckets.get(key);
+    if (bucket) {
+      bucket.push(row);
+    } else {
+      buckets.set(key, [row]);
+    }
+  }
+
+  const grouped: SessionBrowseRow[] = [];
+  for (const [dayKey, bucket] of buckets.entries()) {
+    const sorted = [...bucket].sort((a, b) => b.to.localeCompare(a.to));
+    const providers = normalizeAgentProviderList(sorted.flatMap((row) => row.providers));
+    grouped.push({
+      sessionId: `day:${dayKey}`,
+      kind: "day",
+      dayKey,
+      memberSessionIds: sorted.map((row) => row.sessionId),
+      memberSessionCount: sorted.length,
+      providers,
+      from: sorted.reduce((min, row) => (row.from < min ? row.from : min), sorted[0]?.from ?? new Date().toISOString()),
+      to: sorted.reduce((max, row) => (row.to > max ? row.to : max), sorted[0]?.to ?? new Date().toISOString()),
+      eventCount: sorted.reduce((sum, row) => sum + row.eventCount, 0),
+      threadCount: sorted.reduce((sum, row) => sum + row.threadCount, 0),
+      promptCount: sorted.reduce((sum, row) => sum + row.promptCount, 0),
+      fileCount: sorted.reduce((sum, row) => sum + row.fileCount, 0),
+      tokenEstimate: sorted.reduce((sum, row) => sum + row.tokenEstimate, 0),
+      status: sorted.some((row) => row.status === "synced") ? "synced" : "no_files",
+    });
+  }
+
+  grouped.sort((a, b) => b.to.localeCompare(a.to));
+  return grouped;
+}
+
+function applyBrowseGroupingMode(rows: SessionBrowseRow[], mode: BrowseGroupingMode): SessionBrowseRow[] {
+  return mode === "day" ? groupBrowseRowsByDay(rows) : rows;
+}
+
 function promptIndicesForActor(analysis: SessionAnalysis, actorFilter: string | null): number[] {
   if (!actorFilter) {
     return analysis.prompts.map((_, index) => index);
@@ -4391,6 +4530,7 @@ function buildSessionAnalysis(sessionId: string, events: CapturedEventEnvelope[]
   const prompts: PromptSlice[] = [];
   const sessionFiles = new Map<string, FileStatRow>();
   const pendingDiffByPrompt = new WeakMap<PromptSlice, string[]>();
+  const providerSet = new Set<AgentProviderId>();
   let canonicalSessionSummary: SyntheticSessionSummarySnapshot | null = null;
   const promptDiffSnapshots = new Map<
     string,
@@ -4412,6 +4552,7 @@ function buildSessionAnalysis(sessionId: string, events: CapturedEventEnvelope[]
         id: nextPromptId,
         ts: events[0]?.ts ?? new Date().toISOString(),
         actorId: null,
+        provider: null,
         promptEventId: null,
         prompt: "(No prompt captured)",
         thoughts: [],
@@ -4470,12 +4611,17 @@ function buildSessionAnalysis(sessionId: string, events: CapturedEventEnvelope[]
     }
 
     const eventActor = normalizeActorId(event.actorId);
+    const eventProvider = providerFromEventSource(event.source);
+    if (eventProvider) {
+      providerSet.add(eventProvider);
+    }
     const promptText = getPromptText(event);
     if (promptText) {
       const created: PromptSlice = {
         id: nextPromptId,
         ts: event.ts,
         actorId: eventActor,
+        provider: eventProvider,
         promptEventId: event.eventId,
         prompt: promptText,
         thoughts: [],
@@ -4500,6 +4646,7 @@ function buildSessionAnalysis(sessionId: string, events: CapturedEventEnvelope[]
         id: current.thoughtSlices.length + 1,
         ts: event.ts,
         actorId: eventActor,
+        provider: eventProvider,
         text: thought,
         diffLines: pending.slice(0, 220),
       });
@@ -4509,7 +4656,12 @@ function buildSessionAnalysis(sessionId: string, events: CapturedEventEnvelope[]
 
     const outputText = getAssistantText(event);
     if (outputText) {
-      current.outputs.push(outputText);
+      current.outputs.push({
+        ts: event.ts,
+        actorId: eventActor,
+        provider: eventProvider,
+        text: outputText,
+      });
       tokenChars += outputText.length;
     }
 
@@ -4549,6 +4701,7 @@ function buildSessionAnalysis(sessionId: string, events: CapturedEventEnvelope[]
       id: 1,
       ts: events[0]?.ts ?? new Date().toISOString(),
       actorId: null,
+      provider: null,
       promptEventId: null,
       prompt: "(No prompt captured)",
       thoughts: [],
@@ -4573,6 +4726,7 @@ function buildSessionAnalysis(sessionId: string, events: CapturedEventEnvelope[]
           id: 1,
           ts: prompt.ts,
           actorId: prompt.actorId,
+          provider: prompt.provider,
           text: "(No exposed reasoning text)",
           diffLines: pending.slice(0, 220),
         });
@@ -4717,6 +4871,7 @@ function buildSessionAnalysis(sessionId: string, events: CapturedEventEnvelope[]
     files: sessionFileRows,
     contributors,
     tokenEstimate,
+    providers: AGENT_PROVIDER_ORDER.filter((provider) => providerSet.has(provider)),
     canonicalPromptCount: canonicalSessionSummary?.promptCount,
     canonicalFileCount: canonicalSessionSummary?.fileCount,
   };
@@ -4909,9 +5064,10 @@ function thoughtEntriesForPrompt(prompt: PromptSlice): ThoughtSlice[] {
   if (prompt.outputs.length > 0) {
     return prompt.outputs.map((output, index) => ({
       id: index + 1,
-      ts: prompt.ts,
-      actorId: prompt.actorId,
-      text: output,
+      ts: output.ts,
+      actorId: output.actorId ?? prompt.actorId,
+      provider: output.provider ?? prompt.provider,
+      text: output.text,
       diffLines: index === prompt.outputs.length - 1 ? prompt.diffLines : [],
     }));
   }
@@ -4920,6 +5076,7 @@ function thoughtEntriesForPrompt(prompt: PromptSlice): ThoughtSlice[] {
     id: 1,
     ts: prompt.ts,
     actorId: prompt.actorId,
+    provider: prompt.provider,
     text: "(No exposed reasoning text)",
     diffLines: prompt.diffLines,
   }];
@@ -5254,7 +5411,7 @@ function buildFullDiffOverlayData(
 
   return {
     key,
-    title: `Session ${selectedSession.sessionId.slice(0, 8)} - Prompt ${prompt.id} - Thought ${thoughtSelection.index + 1}`,
+    title: `${browseRowTitle(selectedSession)} - Prompt ${prompt.id} - Thought ${thoughtSelection.index + 1}`,
     lines,
   };
 }
@@ -5296,10 +5453,11 @@ function renderBrowseView(
   const bodyRows = Math.max(3, tableHeight - 4);
   const start = windowStart(state.rows.length, state.selectedSessionIndex, bodyRows);
   const rows = state.rows.slice(start, start + bodyRows);
+  const groupingLabel = state.browseGrouping === "day" ? "day" : "session";
 
   const sessionLines: PaneLine[] = [
-    { text: "  #   Date              Prompts   Files Changed   Tokens    Status", color: TUI_COLORS.muted },
-    { text: " -------------------------------------------------------------------", color: TUI_COLORS.muted },
+    { text: "  #   Date              Prompts   Files Changed   Tokens   Agent        Status", color: TUI_COLORS.muted },
+    { text: " --------------------------------------------------------------------------------", color: TUI_COLORS.muted },
   ];
 
   if (rows.length === 0) {
@@ -5310,22 +5468,31 @@ function renderBrowseView(
       const row = rows[i] as SessionBrowseRow;
       const marker = absoluteIndex === state.selectedSessionIndex ? ">" : " ";
       const idx = String(absoluteIndex + 1).padStart(2, " ");
-      const dateCell = padPlain(formatDateCell(row.to), 16);
+      const dateText =
+        row.kind === "day"
+          ? formatDayBucketCell(row.to, row.memberSessionCount ?? row.memberSessionIds?.length ?? 0)
+          : formatDateCell(row.to);
+      const dateCell = padPlain(dateText, 16);
       const prompts = String(row.promptCount).padStart(4, " ");
       const files = String(row.fileCount).padStart(6, " ");
       const tokens = padPlain(formatTokenEstimate(row.tokenEstimate), 7);
-      const statusText = row.status === "synced" ? "ok synced" : "! no files";
+      const agentCell = padPlain(providerRowSummary(row.providers), 11);
+      const sessionCountSuffix =
+        row.kind === "day"
+          ? ` (${row.memberSessionCount ?? row.memberSessionIds?.length ?? 0}s)`
+          : "";
+      const statusText = (row.status === "synced" ? "ok synced" : "! no files") + sessionCountSuffix;
 
       sessionLines.push({
-        text: `${marker} ${idx}  ${dateCell}    ${prompts}         ${files}         ${tokens}   ${statusText}`,
+        text: `${marker} ${idx}  ${dateCell}    ${prompts}         ${files}         ${tokens}  ${agentCell} ${statusText}`,
         color: row.status === "no_files" ? TUI_COLORS.yellow : undefined,
         highlight: absoluteIndex === state.selectedSessionIndex,
       });
     }
   }
 
-  const sessionsBox = boxLines("Sessions", width, tableHeight, sessionLines, true);
-  const footer = "[up/down] navigate   [enter] inspect   [s] sync now   [r] pull cloud   [p] next project   [P] projects   [a] add project   [o] settings   [q] quit";
+  const sessionsBox = boxLines(`Sessions (group:${groupingLabel})`, width, tableHeight, sessionLines, true);
+  const footer = "[up/down] navigate   [enter] inspect   [g] group   [s] sync now   [r] pull cloud   [p] next project   [P] projects   [a] add project   [o] settings   [q] quit";
   return [header, "", ...sessionsBox, "", paint(clipPlain(footer, width), TUI_COLORS.dim)].join("\n");
 }
 
@@ -5397,7 +5564,7 @@ function renderInspectView(
     Math.max(18, Math.floor(width * 0.58)),
   );
   const topHeader = headerLine(
-    `${paint("codaph", TUI_COLORS.brand)}  >  ${projectLabel}  >  Session ${selectedSession.sessionId.slice(0, 8)} - ${formatDateCell(selectedSession.to)}`,
+    `${paint("codaph", TUI_COLORS.brand)}  >  ${projectLabel}  >  ${browseRowTitle(selectedSession)}`,
     `${paint(mubitEnabled ? "Mubit:on" : "Mubit:off", mubitEnabled ? TUI_COLORS.cyan : TUI_COLORS.yellow)}   ${paint(inspectRightText, TUI_COLORS.dim)}`,
     width,
   );
@@ -5420,8 +5587,9 @@ function renderInspectView(
       const absoluteIndex = visibleIndices[i] as number;
       const row = analysis.prompts[absoluteIndex] as PromptSlice;
       const actorBadge = actorLabel(row.actorId);
+      const providerBadge = providerTag(row.provider);
       lines.push({
-        text: `${absoluteIndex === state.selectedPromptIndex ? ">" : " "} ${row.id.toString().padStart(2, " ")}  [${actorBadge}] ${promptPreview(row.prompt, Math.max(10, paneWidth - 18))}`,
+        text: `${absoluteIndex === state.selectedPromptIndex ? ">" : " "} ${row.id.toString().padStart(2, " ")}  [${actorBadge}] ${providerBadge} ${promptPreview(row.prompt, Math.max(10, paneWidth - 28))}`,
         highlight: absoluteIndex === state.selectedPromptIndex,
       });
     }
@@ -5437,8 +5605,9 @@ function renderInspectView(
       const absoluteIndex = thoughtStart + i;
       const row = visibleThoughts[i] as ThoughtSlice;
       const actorBadge = actorLabel(row.actorId);
+      const providerBadge = providerTag(row.provider);
       lines.push({
-        text: `${absoluteIndex === state.selectedThoughtIndex ? ">" : " "} ${row.id.toString().padStart(2, " ")}  [${actorBadge}] ${promptPreview(row.text, Math.max(10, paneWidth - 18))}`,
+        text: `${absoluteIndex === state.selectedThoughtIndex ? ">" : " "} ${row.id.toString().padStart(2, " ")}  [${actorBadge}] ${providerBadge} ${promptPreview(row.text, Math.max(10, paneWidth - 28))}`,
         highlight: absoluteIndex === state.selectedThoughtIndex,
       });
     }
@@ -5668,6 +5837,7 @@ function renderHelpOverlay(width: number, height: number): string {
     { text: "Browse", color: TUI_COLORS.muted },
     { text: "up/down navigate sessions" },
     { text: "enter   open session inspect view" },
+    { text: "g       toggle browse grouping (session/day)" },
     { text: "s       sync now (local->cloud, then cloud->local when available)" },
     { text: "r       pull cloud (Mubit remote activity fallback/manual)" },
     { text: "" },
@@ -5968,6 +6138,8 @@ async function tui(rest: string[]): Promise<void> {
     projectPath: resolve(fallbackProject),
     view: "browse",
     inspectPane: "prompts",
+    browseGrouping: "session",
+    canonicalRows: [],
     rows: [],
     selectedSessionIndex: 0,
     selectedPromptIndex: 0,
@@ -6030,6 +6202,32 @@ async function tui(rest: string[]): Promise<void> {
       return null;
     }
     return analysisCache.get(row.sessionId)?.analysis ?? null;
+  };
+
+  const setDisplayedRowsFromCanonical = (preferred?: SessionBrowseRow | null): void => {
+    const previousRow = preferred ?? selectedRow();
+    const previousKey = previousRow ? browseRowKey(previousRow) : null;
+    const previousDayKey = previousRow?.dayKey ?? null;
+    const nextRows = applyBrowseGroupingMode(state.canonicalRows, state.browseGrouping);
+    state.rows = nextRows;
+    if (nextRows.length === 0) {
+      state.selectedSessionIndex = 0;
+      return;
+    }
+
+    let nextIndex = 0;
+    if (previousKey) {
+      const exact = nextRows.findIndex((row) => browseRowKey(row) === previousKey);
+      if (exact >= 0) {
+        nextIndex = exact;
+      } else if (previousDayKey) {
+        const sameDay = nextRows.findIndex((row) => row.dayKey === previousDayKey);
+        if (sameDay >= 0) {
+          nextIndex = sameDay;
+        }
+      }
+    }
+    state.selectedSessionIndex = Math.max(0, Math.min(nextRows.length - 1, nextIndex));
   };
 
   const selectedProjectManagerPath = (): string | null => {
@@ -6194,12 +6392,47 @@ async function tui(rest: string[]): Promise<void> {
     return analysis;
   };
 
+  const ensureAnalysisForBrowseRow = async (row: SessionBrowseRow): Promise<SessionAnalysis> => {
+    const cached = analysisCache.get(row.sessionId);
+    if (cached && cached.eventCount === row.eventCount) {
+      return cached.analysis;
+    }
+
+    if (row.kind === "session") {
+      return ensureAnalysis({
+        sessionId: row.sessionId,
+        from: row.from,
+        to: row.to,
+        eventCount: row.eventCount,
+        threadCount: row.threadCount,
+      });
+    }
+
+    const memberIds = row.memberSessionIds ?? [];
+    const mergedEvents: CapturedEventEnvelope[] = [];
+    for (const sessionId of memberIds) {
+      const events = await query.getTimeline({ repoId, sessionId });
+      mergedEvents.push(...events);
+    }
+    mergedEvents.sort((a, b) => {
+      if (a.ts !== b.ts) {
+        return a.ts.localeCompare(b.ts);
+      }
+      return a.eventId.localeCompare(b.eventId);
+    });
+
+    const analysis = buildSessionAnalysis(row.sessionId, mergedEvents);
+    analysisCache.set(row.sessionId, { eventCount: row.eventCount, analysis });
+    return analysis;
+  };
+
   const refreshRows = async (progressLabel: string): Promise<void> => {
     query = new QueryService(resolve(state.projectPath, ".codaph"));
     repoId = resolveRepoIdForProject(flags, state.projectPath, settings);
 
     const sessions = await query.listSessions(repoId) as QuerySessionSummary[];
     const rows: SessionBrowseRow[] = [];
+    const previousRow = selectedRow();
     let lastRefreshAt = 0;
 
     for (let i = 0; i < sessions.length; i += 1) {
@@ -6218,6 +6451,9 @@ async function tui(rest: string[]): Promise<void> {
       const fileCount = analysis.canonicalFileCount ?? analysis.files.length;
       rows.push({
         sessionId: session.sessionId,
+        kind: "session",
+        dayKey: localDayKey(session.to),
+        providers: analysis.providers,
         from: session.from,
         to: session.to,
         eventCount: session.eventCount,
@@ -6229,7 +6465,8 @@ async function tui(rest: string[]): Promise<void> {
       });
     }
 
-    state.rows = rows;
+    state.canonicalRows = rows;
+    setDisplayedRowsFromCanonical(previousRow);
     if (state.rows.length === 0) {
       state.selectedSessionIndex = 0;
       state.selectedPromptIndex = 0;
@@ -6273,11 +6510,21 @@ async function tui(rest: string[]): Promise<void> {
     return created;
   };
 
+  const toggleBrowseGrouping = (): void => {
+    const previous = selectedRow();
+    state.browseGrouping = state.browseGrouping === "session" ? "day" : "session";
+    setDisplayedRowsFromCanonical(previous);
+    state.view = "browse";
+    state.statusLine = `Browse grouping: ${state.browseGrouping}`;
+  };
+
   const activateProject = async (nextProjectPath: string, progressLabel: string): Promise<void> => {
     const normalized = resolve(nextProjectPath);
     state.projectPath = normalized;
     state.view = "browse";
     state.inspectPane = "prompts";
+    state.browseGrouping = "session";
+    state.canonicalRows = [];
     state.selectedSessionIndex = 0;
     state.selectedPromptIndex = 0;
     state.actorFilter = null;
@@ -7087,6 +7334,11 @@ async function tui(rest: string[]): Promise<void> {
     }
 
     if (state.view === "browse") {
+      if (str === "g") {
+        toggleBrowseGrouping();
+        render();
+        return;
+      }
       if (key.name === "up") {
         if (state.rows.length > 0) {
           state.selectedSessionIndex = Math.max(0, state.selectedSessionIndex - 1);
@@ -7102,7 +7354,12 @@ async function tui(rest: string[]): Promise<void> {
         return;
       }
       if (key.name === "return") {
-        if (state.rows.length > 0) {
+        const row = selectedRow();
+        if (!row) {
+          return;
+        }
+        runTask("Loading inspect view...", async () => {
+          await ensureAnalysisForBrowseRow(row);
           state.view = "inspect";
           state.inspectPane = "prompts";
           state.selectedPromptIndex = 0;
@@ -7112,8 +7369,7 @@ async function tui(rest: string[]): Promise<void> {
           state.fullDiffOpen = false;
           state.chatScroll = 0;
           resetInspectScroll();
-          render();
-        }
+        });
         return;
       }
       if (str === "s") {
