@@ -952,3 +952,13 @@ Do not rewrite history; append a new snapshot each run.
 - unstaged: 0
 - untracked: 0
 - files: README.md
+
+## Status Snapshot — 2026-02-26T09:30:03.330Z
+- source: pre-commit
+- repo: /Users/anilp/Code/codaph
+- branch: agents/claude
+- head: d3bdd80
+- staged: 1
+- unstaged: 0
+- untracked: 0
+- files: src/claude-history-sync.ts

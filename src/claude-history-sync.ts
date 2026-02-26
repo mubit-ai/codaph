@@ -223,6 +223,105 @@ function extractClaudeAssistantTextAndReasoning(message: Record<string, unknown>
   };
 }
 
+function isClaudeSyntheticUserPrompt(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return true;
+  }
+  // Claude emits synthetic protocol messages into transcripts that are not user prompts.
+  if (/^\[Request interrupted by user\]$/i.test(trimmed)) {
+    return true;
+  }
+  return false;
+}
+
+function formatClaudeUserToolProtocolPart(part: Record<string, unknown>): string | null {
+  const partType = asString(part.type);
+  if (partType === "tool_result") {
+    const body = extractText(part.content ?? part.output);
+    if (!body) {
+      return null;
+    }
+    const toolUseId = asString(part.tool_use_id);
+    const isError = typeof part.is_error === "boolean" ? part.is_error : false;
+    const headerParts = ["[tool_result]"];
+    if (toolUseId) {
+      headerParts.push(toolUseId);
+    }
+    if (isError) {
+      headerParts.push("(error)");
+    }
+    return `${headerParts.join(" ")}\n${body}`.trim();
+  }
+
+  if (partType === "tool_use") {
+    const name = asString(part.name);
+    const argsText = extractText(part.input) ?? (isRecord(part.input) ? JSON.stringify(part.input) : null);
+    const line = ["[tool_use]", name, argsText].filter(Boolean).join("\n");
+    return line.trim().length > 0 ? line : null;
+  }
+
+  return null;
+}
+
+function extractClaudeUserPromptAndToolThoughts(message: Record<string, unknown> | undefined): {
+  prompt: string | null;
+  toolThoughts: string[];
+} {
+  if (!message) {
+    return { prompt: null, toolThoughts: [] };
+  }
+
+  const content = message.content;
+  if (!Array.isArray(content)) {
+    const fallback = extractText(content ?? message);
+    if (!fallback || isClaudeSyntheticUserPrompt(fallback)) {
+      return { prompt: null, toolThoughts: [] };
+    }
+    return { prompt: fallback, toolThoughts: [] };
+  }
+
+  const textParts: string[] = [];
+  const toolThoughts: string[] = [];
+  for (const part of content) {
+    if (!isRecord(part)) {
+      const text = extractText(part);
+      if (text) {
+        textParts.push(text);
+      }
+      continue;
+    }
+
+    const partType = asString(part.type);
+    // Anthropic/Claude tool results are represented as `user` messages in the transcript protocol.
+    // They should not become prompt.submitted events in Codaph. We surface them as thought-like items instead.
+    if (partType === "tool_result" || partType === "tool_use") {
+      const toolText = formatClaudeUserToolProtocolPart(part);
+      if (toolText) {
+        toolThoughts.push(toolText);
+      }
+      continue;
+    }
+    if (partType === "text") {
+      const text = extractText(part.text);
+      if (text) {
+        textParts.push(text);
+      }
+      continue;
+    }
+    const fallback = extractText(part);
+    if (fallback) {
+      textParts.push(fallback);
+    }
+  }
+
+  const prompt = textParts.join("\n").trim();
+  if (!prompt || isClaudeSyntheticUserPrompt(prompt)) {
+    return { prompt: null, toolThoughts };
+  }
+  return { prompt, toolThoughts };
+}
+
 function parseClaudeHistoryLine(rawLine: string): ClaudeHistoryLine | null {
   try {
     const parsed = JSON.parse(rawLine) as unknown;
@@ -248,11 +347,18 @@ function projectClaudeLine(line: ClaudeHistoryLine): ProjectedEvent[] {
   const ts = normalizeIsoTs(line.timestamp);
 
   if (lineType === "user") {
-    const prompt = extractText(line.message?.content ?? line.message);
+    const { prompt, toolThoughts } = extractClaudeUserPromptAndToolThoughts(line.message);
     if (prompt) {
       projected.push({
         eventType: "prompt.submitted",
         payload: { prompt, source: "claude_code_history" },
+        ts,
+      });
+    }
+    for (const toolText of toolThoughts) {
+      projected.push({
+        eventType: "item.completed",
+        payload: { item: { type: "reasoning", subtype: "tool_protocol", text: toolText } },
         ts,
       });
     }
