@@ -1167,6 +1167,8 @@ async function promptMultiSelect<T extends string>(
       if (canSetRaw) {
         (input as NodeJS.ReadStream & { setRawMode: (mode: boolean) => void }).setRawMode(false);
       }
+      // We explicitly resumed stdin for raw keypress handling; pause it again so the process can exit.
+      input.pause();
       output.write("\n");
     };
 

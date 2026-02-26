@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -34,6 +34,17 @@ describe("agent-providers", () => {
       const detected = await detectAgentProvidersForRepo(root);
       expect(detected).toEqual(["claude-code", "gemini-cli"]);
       expect(AGENT_PROVIDER_ORDER).toEqual(["codex", "claude-code", "gemini-cli"]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("detects Claude Code from root CLAUDE.md even without a .claude folder", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codaph-provider-detect-claude-md-"));
+    try {
+      await writeFile(join(root, "CLAUDE.md"), "# Project instructions\n", "utf8");
+      const detected = await detectAgentProvidersForRepo(root);
+      expect(detected).toEqual(["claude-code"]);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

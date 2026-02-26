@@ -17,6 +17,13 @@ const PROVIDER_MARKERS: Record<AgentProviderId, string> = {
   "gemini-cli": ".gemini",
 };
 
+const PROVIDER_REPO_MARKER_CANDIDATES: Record<AgentProviderId, string[]> = {
+  codex: [".codex"],
+  // Claude Code project scope can exist as .claude/ OR CLAUDE.md in the repo root.
+  "claude-code": [".claude", "CLAUDE.md", "CLAUDE.local.md"],
+  "gemini-cli": [".gemini"],
+};
+
 export function isAgentProviderId(value: unknown): value is AgentProviderId {
   return value === "codex" || value === "claude-code" || value === "gemini-cli";
 }
@@ -81,14 +88,16 @@ export function parseProvidersFlag(
 export async function detectAgentProvidersForRepo(repoRoot: string): Promise<AgentProviderId[]> {
   const detected: AgentProviderId[] = [];
   for (const provider of AGENT_PROVIDER_ORDER) {
-    const marker = join(repoRoot, agentProviderMarkerDir(provider));
-    try {
-      const info = await stat(marker);
-      if (info.isDirectory()) {
+    const markers = PROVIDER_REPO_MARKER_CANDIDATES[provider] ?? [agentProviderMarkerDir(provider)];
+    for (const markerRel of markers) {
+      const marker = join(repoRoot, markerRel);
+      try {
+        await stat(marker);
         detected.push(provider);
+        break;
+      } catch {
+        // ignore missing marker
       }
-    } catch {
-      // ignore missing marker
     }
   }
   return detected;
@@ -100,4 +109,3 @@ export function formatAgentProviderList(providers: AgentProviderId[]): string {
   }
   return providers.map((provider) => agentProviderLabel(provider)).join(", ");
 }
-
