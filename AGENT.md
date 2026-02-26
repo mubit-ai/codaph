@@ -922,3 +922,13 @@ Do not rewrite history; append a new snapshot each run.
 - unstaged: 0
 - untracked: 0
 - files: package.json
+
+## Status Snapshot — 2026-02-26T08:54:37.230Z
+- source: pre-commit
+- repo: /Users/anilp/Code/codaph
+- branch: agents/claude
+- head: cf1b57f
+- staged: 19
+- unstaged: 0
+- untracked: 0
+- files: README.md, docs/architecture.md, docs/cli-reference.md, docs/quickstart.md, docs/troubleshooting.md, src/claude-history-sync.ts, src/gemini-history-sync.ts, src/index.ts, src/lib/agent-providers.ts, src/lib/core-types.ts, src/local-push-state.ts, src/mubit-remote-sync.ts, src/settings-store.ts, src/sync-automation.ts, test/lib-agent-providers.test.ts, test/lib-core-types.test.ts, test/lib-mubit-remote-sync.test.ts, test/settings-store.test.ts, test/sync-automation-provider-hooks.test.ts

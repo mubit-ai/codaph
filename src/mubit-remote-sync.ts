@@ -82,10 +82,16 @@ function parseJsonRecord(value: unknown): JsonRecord | null {
 
 function normalizeSource(value: unknown): AgentSource {
   const source = asString(value);
-  if (source === "codex_sdk" || source === "codex_exec") {
+  if (
+    source === "codex_sdk" ||
+    source === "codex_exec" ||
+    source === "codex_history" ||
+    source === "claude_code_history" ||
+    source === "gemini_cli_history"
+  ) {
     return source;
   }
-  return "codex_exec";
+  return "codex_history";
 }
 
 function normalizeReasoning(value: unknown): ReasoningAvailability {

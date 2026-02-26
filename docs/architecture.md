@@ -11,7 +11,7 @@ Codaph uses a dual-store architecture:
 
 ## Design Goals
 
-- Capture Codex activity without changing normal Codex usage.
+- Capture coding-agent activity without changing normal agent usage.
 - Keep timeline rendering deterministic and fast in local terminals.
 - Share cross-contributor memory and context through Mubit.
 - Preserve actor attribution from ingestion to query.
@@ -28,6 +28,10 @@ All runtime code now lives under `src/` for readability.
   Captures JSON output from `codex exec --json`.
 - `codex-history-sync` (`src/codex-history-sync.ts`)
   Imports historical sessions from `~/.codex/sessions`.
+- `claude-history-sync` (`src/claude-history-sync.ts`)
+  Imports historical sessions from local Claude Code transcripts.
+- `gemini-history-sync` (`src/gemini-history-sync.ts`)
+  Imports historical sessions from local Gemini CLI transcripts.
 
 ### Ingestion
 
@@ -55,7 +59,7 @@ All runtime code now lives under `src/` for readability.
 
 ## Data Flow
 
-1. Codaph captures Codex events from live run or session history.
+1. Codaph captures agent events from live Codex runs or provider history importers (Codex / Claude Code / Gemini CLI).
 2. Ingest pipeline redacts and canonicalizes event payloads.
 3. Event is appended to local mirror with `eventId` idempotency checks.
 4. New events are written to Mubit with actor/project metadata.

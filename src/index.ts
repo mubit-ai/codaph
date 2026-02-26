@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { createInterface, emitKeypressEvents } from "node:readline";
+import { clearLine, createInterface, cursorTo, emitKeypressEvents } from "node:readline";
 import { stdin as input, stdout as output } from "node:process";
 import { readFileSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
@@ -28,14 +28,36 @@ import {
   type CodexHistorySyncSummary,
 } from "./codex-history-sync";
 import {
-  defaultCodexLocalPushState,
-  getCodexLocalPushStatePath,
-  readCodexLocalPushState,
-  writeCodexLocalPushState,
-  type CodexLocalPushState,
-} from "./codex-local-push-state";
+  syncClaudeHistory,
+  type ClaudeHistorySyncProgress,
+  type ClaudeHistorySyncSummary,
+} from "./claude-history-sync";
+import {
+  syncGeminiHistory,
+  type GeminiHistorySyncProgress,
+  type GeminiHistorySyncSummary,
+} from "./gemini-history-sync";
+import {
+  defaultLocalPushState,
+  getLocalPushStatePath,
+  readLocalPushState,
+  writeLocalPushState,
+  type LocalPushState,
+  type LocalPushProviderStats,
+} from "./local-push-state";
 import { syncMubitRemoteActivity, type MubitRemoteSyncSummary } from "./mubit-remote-sync";
 import { getMubitRemoteSyncStatePath, readMubitRemoteSyncState } from "./mubit-remote-sync-state";
+import {
+  AGENT_PROVIDER_ORDER,
+  agentProviderLabel,
+  agentProviderMarkerDir,
+  detectAgentProvidersForRepo,
+  formatAgentProviderList,
+  isAgentProviderId,
+  normalizeAgentProviderList,
+  parseProvidersFlag,
+  type AgentProviderId,
+} from "./lib/agent-providers";
 import {
   addProjectToRegistry,
   loadRegistry,
@@ -62,6 +84,7 @@ import {
   getSyncAutomationLogPath,
   getSyncLockPath,
   installAgentCompleteHookBestEffort,
+  installProviderAgentCompleteHookBestEffort,
   installGitPostCommitHook,
   installGitPostPushHook,
   markPendingSyncTrigger,
@@ -114,17 +137,32 @@ function detectCliVersion(): string {
 
 const CODAPH_CLI_VERSION = detectCliVersion();
 
+type HistorySyncProgressLike = CodexHistorySyncProgress | ClaudeHistorySyncProgress | GeminiHistorySyncProgress;
+type HistorySyncSummaryLike = CodexHistorySyncSummary | ClaudeHistorySyncSummary | GeminiHistorySyncSummary;
+
+interface ProviderImportSummary {
+  scannedFiles: number;
+  matchedFiles: number;
+  importedEvents: number;
+  importedSessions: number;
+  error?: string | null;
+}
+
+type ProviderImportSummaryMap = Partial<Record<AgentProviderId, ProviderImportSummary>>;
+
 interface CodaphProjectFile {
-  schema: "codaph.project.v1";
+  schema: "codaph.project.v2";
   projectPath: string;
   repoId: string;
   projectLabel: string;
   mubitProjectId: string | null;
   mubitRunScope: MubitRunScope;
+  agentProviders: AgentProviderId[];
   syncAutomation: {
     enabled: boolean;
     gitPostCommit: boolean;
     agentComplete: boolean;
+    agentCompleteProviders: AgentProviderId[];
   };
   createdAt: string;
   updatedAt: string;
@@ -134,26 +172,31 @@ function shellQuote(text: string): string {
   return `'${text.replace(/'/g, `'\"'\"'`)}'`;
 }
 
-function hookCommandCandidates(hookName: "post-commit" | "post-push" | "agent-complete"): string[] {
+function hookCommandCandidates(
+  hookName: "post-commit" | "post-push" | "agent-complete",
+  provider?: AgentProviderId,
+): string[] {
   const out: string[] = [];
+  const providerSuffix =
+    hookName === "agent-complete" && provider ? ` --provider ${shellQuote(provider)}` : "";
 
   const scriptPath = process.argv[1];
   const runtimePath = typeof process.execPath === "string" && process.execPath.length > 0 ? process.execPath : null;
   const isLocalSourceEntry = Boolean(scriptPath && /(?:^|\/)(?:src\/index\.ts|dist\/index\.js)$/.test(scriptPath));
   if (runtimePath && scriptPath && isAbsolute(scriptPath)) {
-    out.push(`${shellQuote(runtimePath)} ${shellQuote(scriptPath)} hooks run ${hookName} --quiet`);
+    out.push(`${shellQuote(runtimePath)} ${shellQuote(scriptPath)} hooks run ${hookName}${providerSuffix} --quiet`);
   }
 
   if (isLocalSourceEntry && scriptPath) {
     const codaphRoot = resolve(dirname(scriptPath), "..");
-    out.push(`bun --cwd ${shellQuote(codaphRoot)} run cli hooks run ${hookName} --quiet`);
-    out.push(`codaph hooks run ${hookName} --quiet`);
+    out.push(`bun --cwd ${shellQuote(codaphRoot)} run cli hooks run ${hookName}${providerSuffix} --quiet`);
+    out.push(`codaph hooks run ${hookName}${providerSuffix} --quiet`);
   } else {
-    out.push(`codaph hooks run ${hookName} --quiet`);
+    out.push(`codaph hooks run ${hookName}${providerSuffix} --quiet`);
     try {
       const thisFile = fileURLToPath(import.meta.url);
       const codaphRoot = resolve(dirname(thisFile), "..");
-      out.push(`bun --cwd ${shellQuote(codaphRoot)} run cli hooks run ${hookName} --quiet`);
+      out.push(`bun --cwd ${shellQuote(codaphRoot)} run cli hooks run ${hookName}${providerSuffix} --quiet`);
     } catch {
       // best-effort fallback not available
     }
@@ -219,6 +262,87 @@ function getBooleanFlag(flags: Flags, key: string, fallback: boolean): boolean {
   return fallback;
 }
 
+function parseAgentProvidersFromFlag(raw: string | undefined, allowNone = false): AgentProviderId[] | null {
+  if (typeof raw !== "string") {
+    return null;
+  }
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) {
+    return null;
+  }
+  if (allowNone && trimmed.toLowerCase() === "none") {
+    return [];
+  }
+  const parsed = parseProvidersFlag(trimmed);
+  if (!parsed) {
+    return null;
+  }
+  if (parsed.kind === "all") {
+    return [...AGENT_PROVIDER_ORDER];
+  }
+  if (parsed.kind === "auto") {
+    return null;
+  }
+  if (parsed.kind === "providers") {
+    return parsed.providers;
+  }
+  return [...AGENT_PROVIDER_ORDER];
+}
+
+function providerListFromProjectSettings(
+  settings: CodaphSettings,
+  cwd: string,
+  fallback: AgentProviderId[] = ["codex"],
+): AgentProviderId[] {
+  const project = getProjectSettings(settings, cwd);
+  const normalized = normalizeAgentProviderList(project.agentProviders ?? []);
+  return normalized.length > 0 ? normalized : fallback;
+}
+
+async function detectProvidersForRepo(cwd: string): Promise<AgentProviderId[]> {
+  const repoRoot = resolveGitRepoRootOrCwd(cwd);
+  const detected = await detectAgentProvidersForRepo(repoRoot);
+  return detected.length > 0 ? detected : [];
+}
+
+async function resolveSelectedProvidersForProject(
+  cwd: string,
+  flags: Flags,
+  settings: CodaphSettings,
+  options: { fallbackToCodex?: boolean } = {},
+): Promise<AgentProviderId[]> {
+  const explicit = parseAgentProvidersFromFlag(getStringFlag(flags, "providers"));
+  if (explicit && explicit.length > 0) {
+    return explicit;
+  }
+  const fromSettings = providerListFromProjectSettings(settings, cwd, []);
+  if (fromSettings.length > 0) {
+    return fromSettings;
+  }
+  const detected = await detectProvidersForRepo(cwd);
+  if (detected.length > 0) {
+    return detected;
+  }
+  return options.fallbackToCodex === false ? [] : ["codex"];
+}
+
+function normalizeAgentHookProviderSelection(
+  settings: CodaphSettings,
+  cwd: string,
+  fallbackProviders: AgentProviderId[],
+): AgentProviderId[] {
+  const project = getProjectSettings(settings, cwd);
+  const auto = normalizeSyncAutomationSettings(project.syncAutomation ?? null);
+  if (auto.agentCompleteProviders.length > 0) {
+    return auto.agentCompleteProviders;
+  }
+  return fallbackProviders;
+}
+
+function providerListText(providers: AgentProviderId[]): string {
+  return formatAgentProviderList(providers);
+}
+
 function help(): string {
   return [
     "Codaph CLI/TUI (Mubit-first project memory)",
@@ -230,7 +354,7 @@ function help(): string {
     "",
     "Onboarding:",
     "  codaph setup [--mubit-api-key <key>] [--mubit-actor-id <id>] [--json]",
-    "  codaph init [--cwd <path>] [--yes] [--force] [--no-auto-sync] [--json]",
+    "  codaph init [--cwd <path>] [--yes] [--force] [--no-auto-sync] [--providers <csv|auto>] [--agent-hooks <csv|all|none>] [--json]",
     "",
     "Daily Use:",
     "  codaph pull [--cwd <path>] [--json]           (cloud -> local, daily)",
@@ -239,9 +363,9 @@ function help(): string {
     "  codaph tui [--cwd <path>]",
     "",
     "Push / Backfill:",
-    "  codaph push [--cwd <path>] [--json] [--local-only]",
-    "    Local Codex history -> Codaph + Mubit (incremental; historical backfill path).",
-    "  codaph import [--cwd <path>] [--json] [--local-only]   (compat alias for `codaph push`)",
+    "  codaph push [--cwd <path>] [--json] [--local-only] [--providers <csv|all|auto>]",
+    "    Local agent history (Codex / Claude Code / Gemini CLI) -> Codaph + Mubit (incremental backfill).",
+    "  codaph import [--cwd <path>] [--json] [--local-only] [--providers <csv|all|auto>]   (compat alias for `codaph push`)",
     "  codaph repair cloud [--cwd <path>] [--session <id>] [--json]",
     "    Repair missing cloud sync by replaying local `.codaph` mirror to Mubit, then republishing shared session/diff artifacts.",
     "",
@@ -520,8 +644,8 @@ function createPipeline(
   return { pipeline, memory, mirror };
 }
 
-function formatSummary(summary: CodexHistorySyncSummary): string {
-  return `Synced ${summary.importedEvents} events from ${summary.matchedFiles}/${summary.scannedFiles} Codex session files (sessions: ${summary.importedSessions}).`;
+function formatSummary(summary: HistorySyncSummaryLike): string {
+  return `Synced ${summary.importedEvents} events from ${summary.matchedFiles}/${summary.scannedFiles} agent history files (sessions: ${summary.importedSessions}).`;
 }
 
 function shortenPath(path: string, maxChars = 58): string {
@@ -575,7 +699,7 @@ function formatElapsedMs(startedAtMs: number): string {
 
 function createSyncProgressReporter(prefix: string): {
   start: () => void;
-  onProgress: (progress: CodexHistorySyncProgress) => void;
+  onProgress: (progress: HistorySyncProgressLike) => void;
   finish: () => void;
 } {
   let lastInlineLength = 0;
@@ -583,7 +707,7 @@ function createSyncProgressReporter(prefix: string): {
   let startedAtMs = Date.now();
   let spinnerAt = 0;
   let timer: ReturnType<typeof setInterval> | null = null;
-  let lastProgress: CodexHistorySyncProgress | null = null;
+  let lastProgress: HistorySyncProgressLike | null = null;
   let announced = false;
   const spinnerFrames = ["-", "\\", "|", "/"];
 
@@ -654,6 +778,7 @@ interface SyncPushPhaseResult {
   repoId: string;
   actorId: string | null;
   summary: CodexHistorySyncSummary;
+  providers?: ProviderImportSummaryMap;
   mubitRequested: boolean;
   mubitEnabled: boolean;
 }
@@ -718,7 +843,7 @@ async function runSyncQueuePushPhase(options: {
   if (!localPush?.lastSuccessAt) {
     return {
       skipped: true,
-      reason: "No repo-local push queue. Use `codaph push` once to backfill Codex history into Mubit.",
+      reason: "No repo-local push queue. Use `codaph push` once to backfill local agent history into Mubit.",
     };
   }
   return {
@@ -755,17 +880,20 @@ async function writeLocalProjectConfigSnapshot(cwd: string, flags: Flags, settin
   const projectPath = resolve(cwd);
   const repoId = resolveRepoIdForProject(flags, projectPath, settings);
   const automation = resolveSyncAutomationConfig(settings, projectPath);
+  const agentProviders = providerListFromProjectSettings(settings, projectPath, ["codex"]);
   const payload: CodaphProjectFile = {
-    schema: "codaph.project.v1",
+    schema: "codaph.project.v2",
     projectPath,
     repoId,
     projectLabel: resolveProjectLabel(flags, projectPath, settings),
     mubitProjectId: resolveMubitProjectId(flags, projectPath, settings),
     mubitRunScope: resolveMubitRunScope(flags, projectPath, settings),
+    agentProviders,
     syncAutomation: {
       enabled: automation.enabled,
       gitPostCommit: automation.gitPostCommit,
       agentComplete: automation.agentComplete,
+      agentCompleteProviders: automation.agentCompleteProviders,
     },
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
@@ -778,21 +906,21 @@ async function writeLocalProjectConfigSnapshot(cwd: string, flags: Flags, settin
 }
 
 function resolveLocalPushStatePath(cwd: string, repoId: string): string {
-  return getCodexLocalPushStatePath(resolveMirrorRoot(cwd), repoId);
+  return getLocalPushStatePath(resolveMirrorRoot(cwd), repoId);
 }
 
 async function maybeReadLocalPushStateForProject(cwd: string, repoId: string) {
-  return readCodexLocalPushState(resolveLocalPushStatePath(cwd, repoId));
+  return readLocalPushState(resolveLocalPushStatePath(cwd, repoId));
 }
 
 async function persistLocalPushState(
   cwd: string,
   repoId: string,
-  updater: (current: CodexLocalPushState) => CodexLocalPushState,
+  updater: (current: LocalPushState) => LocalPushState,
 ): Promise<void> {
   const path = resolveLocalPushStatePath(cwd, repoId);
-  const current = await readCodexLocalPushState(path).catch(() => defaultCodexLocalPushState());
-  await writeCodexLocalPushState(path, updater(current));
+  const current = await readLocalPushState(path).catch(() => defaultLocalPushState());
+  await writeLocalPushState(path, updater(current));
 }
 
 async function persistLocalPushSuccessState(
@@ -813,6 +941,23 @@ async function persistLocalPushSuccessState(
     mubitRequested: result.mubitRequested,
     mubitEnabled: result.mubitEnabled,
     lastError: null,
+    providers: {
+      ...(current.providers ?? {}),
+      ...Object.fromEntries(
+        Object.entries(result.providers ?? {}).map(([provider, summary]) => [
+          provider,
+          {
+            scannedFiles: summary.scannedFiles,
+            matchedFiles: summary.matchedFiles,
+            importedEvents: summary.importedEvents,
+            importedSessions: summary.importedSessions,
+            lastError: summary.error ?? null,
+            lastRunAt: now,
+            lastSuccessAt: summary.error ? null : now,
+          } satisfies LocalPushProviderStats,
+        ]),
+      ),
+    },
   }));
 }
 
@@ -951,6 +1096,158 @@ async function promptYesNo(question: string): Promise<boolean> {
   }
 }
 
+interface MultiSelectOption<T extends string> {
+  value: T;
+  label: string;
+}
+
+async function promptMultiSelect<T extends string>(
+  question: string,
+  options: MultiSelectOption<T>[],
+  initialSelected: T[],
+  note?: string,
+): Promise<T[]> {
+  if (!isInteractiveTerminal()) {
+    return options.map((option) => option.value).filter((value) => initialSelected.includes(value));
+  }
+  if (options.length === 0) {
+    return [];
+  }
+
+  const selected = new Set<T>(initialSelected.filter((value) => options.some((option) => option.value === value)));
+  let cursorIndex = 0;
+  let renderedLineCount = 0;
+  let resolved = false;
+
+  const render = () => {
+    const lines: string[] = [];
+    lines.push(`${paint("?", TUI_COLORS.cyan)} ${question}`);
+    if (note) {
+      lines.push(`  ${paint(note, TUI_COLORS.dim)}`);
+    }
+    lines.push("");
+    for (let i = 0; i < options.length; i += 1) {
+      const option = options[i] as MultiSelectOption<T>;
+      const marker = selected.has(option.value) ? "[x]" : "[ ]";
+      const pointer = i === cursorIndex ? ">" : " ";
+      const color = i === cursorIndex ? TUI_COLORS.cyan : undefined;
+      lines.push(`${paint(pointer, color)} ${paint(marker, color)} ${paint(option.label, color)}`);
+    }
+    lines.push("");
+    lines.push(paint("[space] toggle  [a] toggle all  [↑/↓] move  [enter] confirm", TUI_COLORS.dim));
+
+    if (renderedLineCount > 0) {
+      output.write(`\x1b[${renderedLineCount}A`);
+    }
+    for (let i = 0; i < lines.length; i += 1) {
+      clearLine(output, 0);
+      cursorTo(output, 0);
+      output.write(lines[i] ?? "");
+      if (i < lines.length - 1) {
+        output.write("\n");
+      }
+    }
+    renderedLineCount = lines.length;
+  };
+
+  emitKeypressEvents(input);
+  const canSetRaw = typeof (input as NodeJS.ReadStream & { setRawMode?: (mode: boolean) => void }).setRawMode === "function";
+  if (canSetRaw) {
+    (input as NodeJS.ReadStream & { setRawMode: (mode: boolean) => void }).setRawMode(true);
+  }
+  input.resume();
+
+  return await new Promise<T[]>((resolve, reject) => {
+    const cleanup = () => {
+      if (resolved) {
+        return;
+      }
+      resolved = true;
+      input.off("keypress", onKey);
+      if (canSetRaw) {
+        (input as NodeJS.ReadStream & { setRawMode: (mode: boolean) => void }).setRawMode(false);
+      }
+      output.write("\n");
+    };
+
+    const finish = (result: T[]) => {
+      cleanup();
+      resolve(result);
+    };
+
+    const fail = (error: Error) => {
+      cleanup();
+      reject(error);
+    };
+
+    const onKey = (_str: string, key: { name?: string; ctrl?: boolean; meta?: boolean; sequence?: string }) => {
+      if (key.ctrl && key.name === "c") {
+        fail(new Error("Cancelled."));
+        return;
+      }
+      if (key.name === "escape") {
+        fail(new Error("Cancelled."));
+        return;
+      }
+      if (key.name === "up") {
+        cursorIndex = cursorIndex > 0 ? cursorIndex - 1 : options.length - 1;
+        render();
+        return;
+      }
+      if (key.name === "down") {
+        cursorIndex = cursorIndex < options.length - 1 ? cursorIndex + 1 : 0;
+        render();
+        return;
+      }
+      if (key.name === "space") {
+        const current = options[cursorIndex];
+        if (!current) {
+          return;
+        }
+        if (selected.has(current.value)) {
+          selected.delete(current.value);
+        } else {
+          selected.add(current.value);
+        }
+        render();
+        return;
+      }
+      if (key.name === "a") {
+        if (selected.size === options.length) {
+          selected.clear();
+        } else {
+          for (const option of options) {
+            selected.add(option.value);
+          }
+        }
+        render();
+        return;
+      }
+      if (key.name === "return" || key.name === "enter") {
+        finish(options.map((option) => option.value).filter((value) => selected.has(value)));
+      }
+    };
+
+    input.on("keypress", onKey);
+    render();
+  });
+}
+
+function agentProviderPromptOptions(): MultiSelectOption<AgentProviderId>[] {
+  return AGENT_PROVIDER_ORDER.map((provider) => ({
+    value: provider,
+    label: `${agentProviderLabel(provider)} (${agentProviderMarkerDir(provider)})`,
+  }));
+}
+
+async function promptAgentProviders(
+  question: string,
+  initialSelected: AgentProviderId[],
+  note?: string,
+): Promise<AgentProviderId[]> {
+  return promptMultiSelect(question, agentProviderPromptOptions(), initialSelected, note);
+}
+
 async function maybePromptForMubitApiKeyDuringInit(
   cwd: string,
   flags: Flags,
@@ -1022,7 +1319,7 @@ async function runSyncPushPhase(options: {
   cwd: string;
   flags: Flags;
   settings: CodaphSettings;
-  onProgress?: (progress: CodexHistorySyncProgress) => void;
+  onProgress?: (progress: HistorySyncProgressLike) => void;
 }): Promise<SyncPushPhaseResult> {
   const { cwd, flags, settings, onProgress } = options;
   const localOnly = getBooleanFlag(flags, "local-only", false);
@@ -1037,16 +1334,80 @@ async function runSyncPushPhase(options: {
 
   const repoId = resolveRepoIdForProject(syncFlags, cwd, settings);
   const actorId = resolveMubitActorId(syncFlags, cwd, settings);
+  const selectedProviders = await resolveSelectedProvidersForProject(cwd, syncFlags, settings, { fallbackToCodex: true });
   const { pipeline, memory } = createPipeline(cwd, syncFlags, settings, { bulkSync: true });
   let summary: CodexHistorySyncSummary;
+  const providerSummaries: ProviderImportSummaryMap = {};
+  let failedProviders = 0;
   try {
-    summary = await syncCodexHistory({
-      projectPath: cwd,
-      pipeline,
-      repoId,
-      actorId,
-      onProgress,
-    });
+    for (const provider of selectedProviders) {
+      const relayProgress = onProgress
+        ? (progress: HistorySyncProgressLike) =>
+            onProgress({
+              ...progress,
+              currentFile: `[${provider}] ${progress.currentFile}`,
+            } as HistorySyncProgressLike)
+        : undefined;
+
+      try {
+        let providerSummary: HistorySyncSummaryLike;
+        if (provider === "codex") {
+          providerSummary = await syncCodexHistory({
+            projectPath: cwd,
+            pipeline,
+            repoId,
+            actorId,
+            onProgress: relayProgress as ((progress: CodexHistorySyncProgress) => void) | undefined,
+          });
+        } else if (provider === "claude-code") {
+          providerSummary = await syncClaudeHistory({
+            projectPath: cwd,
+            pipeline,
+            repoId,
+            actorId,
+            onProgress: relayProgress as ((progress: ClaudeHistorySyncProgress) => void) | undefined,
+          });
+        } else {
+          providerSummary = await syncGeminiHistory({
+            projectPath: cwd,
+            pipeline,
+            repoId,
+            actorId,
+            onProgress: relayProgress as ((progress: GeminiHistorySyncProgress) => void) | undefined,
+          });
+        }
+        providerSummaries[provider] = {
+          scannedFiles: providerSummary.scannedFiles,
+          matchedFiles: providerSummary.matchedFiles,
+          importedEvents: providerSummary.importedEvents,
+          importedSessions: providerSummary.importedSessions,
+          error: null,
+        };
+      } catch (error) {
+        failedProviders += 1;
+        const message = error instanceof Error ? error.message : String(error);
+        providerSummaries[provider] = {
+          scannedFiles: 0,
+          matchedFiles: 0,
+          importedEvents: 0,
+          importedSessions: 0,
+          error: message,
+        };
+        console.warn(`${agentProviderLabel(provider)} history import failed: ${message}`);
+      }
+    }
+
+    if (selectedProviders.length > 0 && failedProviders >= selectedProviders.length) {
+      throw new Error("All selected provider history imports failed.");
+    }
+
+    const aggregate = Object.values(providerSummaries);
+    summary = {
+      scannedFiles: aggregate.reduce((sum, item) => sum + (item?.scannedFiles ?? 0), 0),
+      matchedFiles: aggregate.reduce((sum, item) => sum + (item?.matchedFiles ?? 0), 0),
+      importedEvents: aggregate.reduce((sum, item) => sum + (item?.importedEvents ?? 0), 0),
+      importedSessions: aggregate.reduce((sum, item) => sum + (item?.importedSessions ?? 0), 0),
+    };
   } finally {
     await pipeline.flush();
   }
@@ -1064,6 +1425,7 @@ async function runSyncPushPhase(options: {
     repoId,
     actorId,
     summary,
+    providers: providerSummaries,
     mubitRequested: shouldEnableMubit(syncFlags, settings),
     mubitEnabled: Boolean(memory?.isEnabled()),
   };
@@ -1126,18 +1488,43 @@ async function runSyncPullPhase(options: {
 function formatPushPhaseLine(result: SyncPushPhaseResult | { skipped: true; reason: string }): string {
   if (isSyncPushPhaseSkipped(result)) {
     if (result.reason.includes("No repo-local push queue")) {
-      return `Push (local->cloud): no queued local uploads (fast path). Use \`codaph push\` for Codex history backfill.`;
+      return `Push (local->cloud): no queued local uploads (fast path). Use \`codaph push\` for agent history backfill.`;
     }
     return `Push (local->cloud): skipped (${result.reason})`;
   }
   const { summary } = result;
   if (summary.matchedFiles === 0) {
-    return `Push (local->cloud): No Codex history for this repo (matched 0 of ${summary.scannedFiles} local Codex session files).`;
+    return `Push (local->cloud): No agent history for this repo (matched 0 of ${summary.scannedFiles} local agent history files).`;
   }
   if (summary.importedEvents === 0) {
-    return `Push (local->cloud): no new local events for this repo (matched files=${summary.matchedFiles}/${summary.scannedFiles}, sessions=${summary.importedSessions}).`;
+    return `Push (local->cloud): no new local events for this repo (matched files=${summary.matchedFiles}/${summary.scannedFiles}, sessions=${summary.importedSessions}).${formatPushProviderBreakdown(result.providers)}`;
   }
-  return `Push (local->cloud): local events imported=${summary.importedEvents}, files=${summary.matchedFiles}/${summary.scannedFiles}, sessions=${summary.importedSessions}, Mubit=${result.mubitEnabled ? "on" : result.mubitRequested ? "requested-unavailable" : "off"}`;
+  return `Push (local->cloud): local events imported=${summary.importedEvents}, files=${summary.matchedFiles}/${summary.scannedFiles}, sessions=${summary.importedSessions}, Mubit=${result.mubitEnabled ? "on" : result.mubitRequested ? "requested-unavailable" : "off"}${formatPushProviderBreakdown(result.providers)}`;
+}
+
+function formatPushProviderBreakdown(providers?: ProviderImportSummaryMap): string {
+  if (!providers) {
+    return "";
+  }
+  const entries = Object.entries(providers) as Array<[AgentProviderId, ProviderImportSummary]>;
+  if (entries.length <= 1) {
+    const only = entries[0];
+    if (!only || !only[1]?.error) {
+      return "";
+    }
+  }
+  if (entries.length === 0) {
+    return "";
+  }
+  const formatted = entries
+    .map(([provider, summary]) => {
+      if (summary.error) {
+        return `${agentProviderLabel(provider)}:error`;
+      }
+      return `${agentProviderLabel(provider)}:e${summary.importedEvents}/f${summary.matchedFiles}`;
+    })
+    .join(", ");
+  return ` | providers=${formatted}`;
 }
 
 function formatPullPhaseLine(result: SyncPullPhaseOutcome): string {
@@ -1193,7 +1580,7 @@ function formatTuiSyncFooterSummary(raw: string, width: number): string | null {
     const noOp =
       lower.includes("no queued local uploads") ||
       lower.includes("no new local events");
-    const noHistory = lower.includes("no codex history");
+    const noHistory = lower.includes("no codex history") || lower.includes("no agent history");
     const skipped = lower.startsWith("skipped");
     const tone = importedMatch ? "ok" : noHistory ? "warn" : skipped ? "warn" : noOp ? "dim" : "info";
     const pushBits: string[] = [tuiStatusBadge("↑", "Push", cliToneColor(tone) ?? TUI_COLORS.cyan)];
@@ -1448,11 +1835,16 @@ async function diff(rest: string[]): Promise<void> {
   }
 }
 
-async function enableSyncAutomationForProject(cwd: string, settings: CodaphSettings): Promise<{
+async function enableSyncAutomationForProject(
+  cwd: string,
+  settings: CodaphSettings,
+  selectedAgentHookProviders?: AgentProviderId[],
+): Promise<{
   settings: CodaphSettings;
   installed: {
     gitPostCommit: boolean;
     agentComplete: boolean;
+    agentCompleteProviders: AgentProviderId[];
     partial: boolean;
     warnings: string[];
     manualSteps: string[];
@@ -1483,22 +1875,40 @@ async function enableSyncAutomationForProject(cwd: string, settings: CodaphSetti
     warnings.push(`Git post-push hook automation was not installed: ${gitPostPush.warning ?? "unknown error"}`);
   }
 
-  const agentCompleteCommands = hookCommandCandidates("agent-complete");
-  const agentComplete = await installAgentCompleteHookBestEffort(repoRoot, agentCompleteCommands);
-  if (!agentComplete.ok) {
-    warnings.push(agentComplete.warning ?? "Agent-complete hook auto-install was not possible.");
-    manualSteps.push(`Attach this command to your agent-complete hook: ${agentComplete.manualSnippet}`);
-  }
-
   const currentProject = getProjectSettings(settings, cwd);
   const mergedAutomation = normalizeSyncAutomationSettings(currentProject.syncAutomation ?? null);
+  const projectProviders = providerListFromProjectSettings(settings, cwd, ["codex"]);
+  const agentHookProviders = normalizeAgentProviderList(
+    selectedAgentHookProviders ?? mergedAutomation.agentCompleteProviders ?? projectProviders,
+  );
+
+  let agentCompleteOk = true;
+  const installedAgentHookProviders: AgentProviderId[] = [];
+  for (const provider of agentHookProviders) {
+    const agentCompleteCommands = hookCommandCandidates("agent-complete", provider);
+    const result = await installProviderAgentCompleteHookBestEffort(provider, repoRoot, agentCompleteCommands);
+    if (!result.ok) {
+      agentCompleteOk = false;
+      warnings.push(result.warning ?? `${agentProviderLabel(provider)} agent-complete hook auto-install was not possible.`);
+      manualSteps.push(
+        `Attach this command to your ${agentProviderLabel(provider)} agent-complete hook: ${result.manualSnippet}`,
+      );
+      continue;
+    }
+    installedAgentHookProviders.push(provider);
+  }
+  if (agentHookProviders.length === 0) {
+    agentCompleteOk = false;
+  }
+
   const nextSettings = updateProjectSettings(settings, cwd, {
     ...currentProject,
     syncAutomation: {
       ...mergedAutomation,
       enabled: true,
       gitPostCommit: gitPostCommit.ok,
-      agentComplete: agentComplete.ok,
+      agentComplete: installedAgentHookProviders.length > 0 && agentCompleteOk,
+      agentCompleteProviders: installedAgentHookProviders,
       autoPullOnSync: mergedAutomation.autoPullOnSync,
       autoWarmTuiOnOpen: mergedAutomation.autoWarmTuiOnOpen,
       remotePullCooldownSec: mergedAutomation.remotePullCooldownSec,
@@ -1511,8 +1921,9 @@ async function enableSyncAutomationForProject(cwd: string, settings: CodaphSetti
     settings: nextSettings,
     installed: {
       gitPostCommit: gitPostCommit.ok,
-      agentComplete: agentComplete.ok,
-      partial: !gitPostCommit.ok || !agentComplete.ok,
+      agentComplete: installedAgentHookProviders.length > 0 && agentCompleteOk,
+      agentCompleteProviders: installedAgentHookProviders,
+      partial: !gitPostCommit.ok || !gitPostPush.ok || !(installedAgentHookProviders.length > 0 && agentCompleteOk),
       warnings,
       manualSteps,
     },
@@ -1563,11 +1974,28 @@ async function maybeOfferSyncAutomationSetup(
     return;
   }
 
-  const result = await enableSyncAutomationForProject(cwd, settings);
+  const projectProviders = await resolveSelectedProvidersForProject(cwd, flags, settings, { fallbackToCodex: true });
+  const explicitAgentHooks = parseAgentProvidersFromFlag(getStringFlag(flags, "agent-hooks"), true);
+  let selectedAgentHookProviders = explicitAgentHooks;
+  if (selectedAgentHookProviders === null) {
+    const defaults = normalizeAgentHookProviderSelection(settings, cwd, projectProviders);
+    if (isInteractiveTerminal() && !getBooleanFlag(flags, "yes", false)) {
+      selectedAgentHookProviders = await promptAgentProviders(
+        "Install agent-complete hooks for",
+        defaults,
+        "Recognized providers are preselected. Leave empty to skip agent-complete hooks.",
+      );
+    } else {
+      selectedAgentHookProviders = defaults;
+    }
+  }
+
+  const result = await enableSyncAutomationForProject(cwd, settings, selectedAgentHookProviders);
   await writeLocalProjectConfigSnapshot(cwd, flags, result.settings).catch(() => {});
   console.log(
     `${paint("Updated auto-sync:", TUI_COLORS.dim)} ${cliStatusWord("enabled", "ok")} (${paint("post-commit", TUI_COLORS.dim)}:${result.installed.gitPostCommit ? cliStatusWord("installed", "ok") : cliStatusWord("unavailable", "warn")}, ${paint("agent-complete", TUI_COLORS.dim)}:${result.installed.agentComplete ? cliStatusWord("installed", "ok") : cliStatusWord("partial", "warn")})`,
   );
+  console.log(`${paint("Agent hooks:", TUI_COLORS.dim)} ${providerListText(result.installed.agentCompleteProviders)}`);
   for (const warning of result.installed.warnings) {
     console.log(`${cliStatusWord("Warning:", "warn")} ${warning}`);
   }
@@ -1585,7 +2013,7 @@ async function runSyncWorkflow(options: {
   triggerSource: SyncTriggerSource;
   hookMode?: boolean;
   quiet?: boolean;
-  onPushProgress?: (progress: CodexHistorySyncProgress) => void;
+  onPushProgress?: (progress: HistorySyncProgressLike) => void;
   onPullProgress?: (progress: { current: number; total: number; imported: number; deduplicated: number; skipped: number }) => void;
 }): Promise<SyncWorkflowSummary> {
   const startedAt = new Date().toISOString();
@@ -1748,7 +2176,7 @@ function printSyncWorkflowSummary(summary: SyncWorkflowSummary): void {
   const pushNoQueue =
     isSyncPushPhaseSkipped(summary.push) && summary.push.reason.includes("No repo-local push queue");
   if (summary.mode === "all" && pushNoQueue) {
-    console.log("Fast sync: Mubit-first remote pull + repo-local queue (no global Codex history replay).");
+    console.log("Fast sync: Mubit-first remote pull + repo-local queue (no global agent history replay).");
     console.log("Backfill history: run `codaph push` (one-time/occasional).");
   }
   if (!summary.automation.enabled) {
@@ -1760,7 +2188,7 @@ async function importCommand(rest: string[]): Promise<void> {
   const { flags } = parseArgs(rest);
   const cwd = resolve(getStringFlag(flags, "cwd") ?? process.cwd());
   const settings = loadCodaphSettings();
-  const reporter = createSyncProgressReporter("Scanning Codex history");
+  const reporter = createSyncProgressReporter("Scanning agent history");
   if (flags.json !== true) {
     reporter.start();
   }
@@ -1785,17 +2213,17 @@ async function importCommand(rest: string[]): Promise<void> {
   }
 
   if (flags.json === true) {
-    console.log(JSON.stringify(result.summary, null, 2));
+    console.log(JSON.stringify({ ...result.summary, providers: result.providers ?? {} }, null, 2));
     return;
   }
   console.log(formatPushPhaseLine(result));
-  console.log("Push complete. Daily `codaph pull` does not replay Codex history.");
+  console.log("Push complete. Daily `codaph pull` does not replay local agent history.");
 }
 
 async function syncPushCommand(rest: string[]): Promise<void> {
   const { flags } = parseArgs(rest);
   if (flags.json !== true) {
-    console.log("Note: `codaph sync push` is a compatibility alias for `codaph push` (Codex history -> Mubit).");
+    console.log("Note: `codaph sync push` is a compatibility alias for `codaph push` (agent history -> Mubit).");
   }
   await importCommand(rest);
 }
@@ -1855,11 +2283,13 @@ async function syncStatus(rest: string[]): Promise<void> {
   const settings = loadCodaphSettings();
   const repoId = resolveRepoIdForProject(flags, cwd, settings);
   const automation = resolveSyncAutomationConfig(settings, cwd);
+  const agentProviders = providerListFromProjectSettings(settings, cwd, ["codex"]);
   const localPushState = await maybeReadLocalPushStateForProject(cwd, repoId).catch(() => null);
   const remoteState = await maybeReadRemoteSyncStateForProject(cwd, repoId).catch(() => null);
   const payload = {
     cwd,
     repoId,
+    agentProviders,
     automation,
     localPush: localPushState,
     remote: remoteState,
@@ -1871,7 +2301,9 @@ async function syncStatus(rest: string[]): Promise<void> {
   }
 
   console.log(`Repo: ${repoId}`);
+  console.log(`${paint("Agents:", TUI_COLORS.dim)} ${providerListText(agentProviders)}`);
   console.log(formatAutoSyncSummaryLine("Auto-sync:", automation));
+  console.log(`${paint("Agent hooks:", TUI_COLORS.dim)} ${providerListText(automation.agentCompleteProviders)}`);
   if (!automation.enabled) {
     console.log("Onboarding: run `codaph sync setup` to install auto-sync hooks for this repo.");
   }
@@ -1887,13 +2319,21 @@ async function syncStatus(rest: string[]): Promise<void> {
     if (localPushState.lastError) {
       console.log(`Local push last error: ${localPushState.lastError}`);
     }
+    const providerStats = Object.entries(localPushState.providers ?? {}).filter(([, stats]) => stats);
+    if (providerStats.length > 0) {
+      console.log(
+        `Local push providers: ${providerStats
+          .map(([provider, stats]) => `${agentProviderLabel(provider as AgentProviderId)} e:${stats?.importedEvents ?? 0} f:${stats?.matchedFiles ?? 0}/${stats?.scannedFiles ?? 0}`)
+          .join(" | ")}`,
+      );
+    }
     if (!localPushState.lastSuccessAt) {
-      console.log("Backfill: run `codaph push` if you want historical Codex sessions in Mubit.");
+      console.log("Backfill: run `codaph push` if you want historical agent sessions in Mubit.");
     }
   }
   if (!remoteState) {
     console.log("Remote sync state: none");
-    console.log("Fast sync note: `codaph pull` skips Codex history replay; use `codaph push` for backfill.");
+    console.log("Fast sync note: `codaph pull` skips local agent history replay; use `codaph push` for backfill.");
     return;
   }
   console.log(
@@ -2008,20 +2448,49 @@ async function initCommand(rest: string[]): Promise<void> {
   let settings = loadCodaphSettings();
   settings = await maybePromptForMubitApiKeyDuringInit(cwd, flags, settings);
   const detected = detectGitHubDefaults(cwd);
+  const recognizedAgentProviders = await detectProvidersForRepo(cwd);
   const currentProject = getProjectSettings(settings, cwd);
   const explicitName = getStringFlag(flags, "name");
   const explicitProjectId = getStringFlag(flags, "mubit-project-id");
   const explicitRunScopeRaw = getStringFlag(flags, "mubit-run-scope");
   const explicitRunScope = explicitRunScopeRaw === "project" || explicitRunScopeRaw === "session" ? explicitRunScopeRaw : null;
+  const explicitProviders = parseAgentProvidersFromFlag(getStringFlag(flags, "providers"));
 
   const inferredProjectId = explicitProjectId ?? currentProject.mubitProjectId ?? detected.projectId ?? null;
   const inferredRunScope: MubitRunScope =
     explicitRunScope ?? currentProject.mubitRunScope ?? (inferredProjectId ? "project" : "session");
 
+  const currentSavedProviders = normalizeAgentProviderList(currentProject.agentProviders ?? []);
+  let selectedAgentProviders: AgentProviderId[];
+  if (explicitProviders && explicitProviders.length > 0) {
+    selectedAgentProviders = explicitProviders;
+  } else {
+    const defaults: AgentProviderId[] =
+      recognizedAgentProviders.length > 0
+        ? recognizedAgentProviders
+        : currentSavedProviders.length > 0
+          ? currentSavedProviders
+          : ["codex"];
+    const noRecognizedNote =
+      recognizedAgentProviders.length === 0
+        ? "No recognized provider folders found (.codex/.claude/.gemini). Codex is preselected as a safe default."
+        : "Recognized provider folders are preselected.";
+    if (!getBooleanFlag(flags, "yes", false) && flags.json !== true && isInteractiveTerminal()) {
+      selectedAgentProviders = await promptAgentProviders(
+        "Select agent integrations for this repo",
+        defaults,
+        noRecognizedNote,
+      );
+    } else {
+      selectedAgentProviders = defaults;
+    }
+  }
+
   settings = updateProjectSettings(settings, cwd, {
     projectName: explicitName ?? currentProject.projectName ?? basename(cwd),
     mubitProjectId: inferredProjectId,
     mubitRunScope: inferredRunScope,
+    agentProviders: selectedAgentProviders,
     syncAutomation: currentProject.syncAutomation ?? null,
   });
   if (!settings.mubitActorId && detected.actorId) {
@@ -2035,6 +2504,7 @@ async function initCommand(rest: string[]): Promise<void> {
     | {
       gitPostCommit: boolean;
       agentComplete: boolean;
+      agentCompleteProviders: AgentProviderId[];
       partial: boolean;
       warnings: string[];
       manualSteps: string[];
@@ -2043,8 +2513,24 @@ async function initCommand(rest: string[]): Promise<void> {
   const noAutoSync = getBooleanFlag(flags, "no-auto-sync", false);
   const force = getBooleanFlag(flags, "force", false);
   const auto = resolveSyncAutomationConfig(settings, cwd);
+  const explicitAgentHooks = parseAgentProvidersFromFlag(getStringFlag(flags, "agent-hooks"), true);
+  let selectedAgentHookProvidersForInit: AgentProviderId[] | undefined;
   if (!noAutoSync && (!auto.enabled || force)) {
-    const enabled = await enableSyncAutomationForProject(cwd, settings);
+    const defaults = explicitAgentHooks ?? normalizeAgentHookProviderSelection(settings, cwd, selectedAgentProviders);
+    if (explicitAgentHooks !== null) {
+      selectedAgentHookProvidersForInit = explicitAgentHooks;
+    } else if (!getBooleanFlag(flags, "yes", false) && flags.json !== true && isInteractiveTerminal()) {
+      selectedAgentHookProvidersForInit = await promptAgentProviders(
+        "Install agent-complete hooks for",
+        defaults,
+        "Recognized providers are preselected. Leave empty to skip agent-complete hooks.",
+      );
+    } else {
+      selectedAgentHookProvidersForInit = defaults;
+    }
+  }
+  if (!noAutoSync && (!auto.enabled || force)) {
+    const enabled = await enableSyncAutomationForProject(cwd, settings, selectedAgentHookProvidersForInit);
     settings = enabled.settings;
     automationInstalled = enabled.installed;
   }
@@ -2058,11 +2544,13 @@ async function initCommand(rest: string[]): Promise<void> {
     mubitConfigured: resolveMubitApiKey(flags, settings) !== null,
     mubitProjectId: resolveMubitProjectId(flags, cwd, settings),
     mubitRunScope: resolveMubitRunScope(flags, cwd, settings),
+    recognizedAgentProviders,
+    agentProviders: providerListFromProjectSettings(settings, cwd, ["codex"]),
     automation: resolveSyncAutomationConfig(settings, cwd),
     automationInstall: automationInstalled,
     recommendedNext: [
       "codaph pull",
-      "codaph push (optional one-time Codex history backfill)",
+      "codaph push (optional one-time agent history backfill)",
       "codaph tui",
     ],
   };
@@ -2082,11 +2570,15 @@ async function initCommand(rest: string[]): Promise<void> {
   console.log(
     `${paint("Mubit project:", TUI_COLORS.dim)} ${paint(payload.mubitProjectId ?? "(auto-detect unavailable)", payload.mubitProjectId ? TUI_COLORS.cyan : TUI_COLORS.yellow)} ${paint("|", TUI_COLORS.dim)} ${paint("run scope", TUI_COLORS.dim)}: ${paint(String(payload.mubitRunScope), TUI_COLORS.cyan)}`,
   );
+  console.log(
+    `${paint("Agents:", TUI_COLORS.dim)} ${providerListText(payload.agentProviders)} ${paint("|", TUI_COLORS.dim)} ${paint("recognized", TUI_COLORS.dim)}=${providerListText(payload.recognizedAgentProviders)}`,
+  );
   console.log(cliLabelValue("Local project config:", projectConfigPath, "dim"));
   const autoAfter = resolveSyncAutomationConfig(settings, cwd);
   console.log(
     formatAutoSyncSummaryLine("Auto-sync:", autoAfter),
   );
+  console.log(`${paint("Agent hooks:", TUI_COLORS.dim)} ${providerListText(autoAfter.agentCompleteProviders)}`);
   if (automationInstalled) {
     for (const warning of automationInstalled.warnings) {
       console.log(`${cliBadge("Warning", "warn")} ${warning}`);
@@ -2099,7 +2591,7 @@ async function initCommand(rest: string[]): Promise<void> {
   }
   console.log(cliBadge("Next", "info"));
   console.log(`  1. ${paint("codaph pull", TUI_COLORS.cyan)} ${paint("(cloud -> local, daily)", TUI_COLORS.dim)}`);
-  console.log(`  2. ${paint("codaph push", TUI_COLORS.cyan)} ${paint("(optional one-time Codex history backfill)", TUI_COLORS.dim)}`);
+  console.log(`  2. ${paint("codaph push", TUI_COLORS.cyan)} ${paint("(optional one-time agent history backfill)", TUI_COLORS.dim)}`);
   console.log(`  3. ${paint("codaph tui", TUI_COLORS.cyan)}`);
 }
 
@@ -2115,7 +2607,7 @@ async function syncCommand(rest: string[]): Promise<void> {
   const mode: "all" | "push" = forcePushOnly ? "push" : "all";
   const pushMode: SyncPushMode = forcePushOnly ? "history" : "queue";
 
-  const pushReporter = createSyncProgressReporter("Scanning Codex history");
+  const pushReporter = createSyncProgressReporter("Scanning agent history");
   const pullReporter = createSyncProgressReporter("Syncing Mubit remote");
   let pullReporterStarted = false;
   const usePushReporter = pushMode === "history";
@@ -2236,6 +2728,19 @@ function cwdFromHookPayload(payload: Record<string, unknown> | null): string | n
       return value.trim();
     }
   }
+  const nestedCandidates = [payload.workspace, payload.project, payload.session, payload.metadata];
+  for (const candidate of nestedCandidates) {
+    if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) {
+      continue;
+    }
+    const record = candidate as Record<string, unknown>;
+    for (const key of ["cwd", "root", "path", "project_root", "projectPath"]) {
+      const value = record[key];
+      if (typeof value === "string" && value.trim().length > 0) {
+        return value.trim();
+      }
+    }
+  }
   return null;
 }
 
@@ -2245,6 +2750,10 @@ async function hooksRun(rest: string[]): Promise<void> {
     throw new Error("Hook name is required (post-commit | post-push | agent-complete)");
   }
   const { flags } = parseArgs(args);
+  const providerFlag = getStringFlag(flags, "provider");
+  if (providerFlag && !getStringFlag(flags, "providers")) {
+    flags.providers = providerFlag;
+  }
   const payload = await readOptionalStdinJson();
   const requestedCwd = resolve(getStringFlag(flags, "cwd") ?? cwdFromHookPayload(payload) ?? process.cwd());
   const cwd = hookName === "post-commit" || hookName === "post-push" ? resolveGitRepoRootOrCwd(requestedCwd) : requestedCwd;
@@ -2264,7 +2773,7 @@ async function hooksRun(rest: string[]): Promise<void> {
   } else if (hookName === "agent-complete") {
     mode = "all";
     // Until the repo-local queue capture path is implemented, agent completion needs
-    // the Codex history ingest path to publish newly finished prompts/thoughts.
+    // the local agent history ingest path to publish newly finished prompts/thoughts.
     pushMode = "history";
     triggerSource = "hook-agent-complete";
   } else {

@@ -1,6 +1,7 @@
 import { open, readFile, writeFile, mkdir, appendFile, chmod, stat, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { normalizeAgentProviderList, type AgentProviderId } from "./lib/agent-providers";
 import {
   readMubitRemoteSyncState,
   writeMubitRemoteSyncState,
@@ -26,6 +27,7 @@ export interface SyncAutomationSettingsResolved {
   enabled: boolean;
   gitPostCommit: boolean;
   agentComplete: boolean;
+  agentCompleteProviders: AgentProviderId[];
   remotePullCooldownSec: number;
   autoPullOnSync: boolean;
   autoWarmTuiOnOpen: boolean;
@@ -50,6 +52,7 @@ export function defaultSyncAutomationSettings(): SyncAutomationSettingsResolved 
     enabled: false,
     gitPostCommit: false,
     agentComplete: false,
+    agentCompleteProviders: [],
     remotePullCooldownSec: 45,
     autoPullOnSync: true,
     autoWarmTuiOnOpen: true,
@@ -62,6 +65,7 @@ export function normalizeSyncAutomationSettings(
     enabled?: boolean | null;
     gitPostCommit?: boolean | null;
     agentComplete?: boolean | null;
+    agentCompleteProviders?: AgentProviderId[] | string[] | null;
     remotePullCooldownSec?: number | null;
     autoPullOnSync?: boolean | null;
     autoWarmTuiOnOpen?: boolean | null;
@@ -74,10 +78,20 @@ export function normalizeSyncAutomationSettings(
     typeof cooldownRaw === "number" && Number.isFinite(cooldownRaw) && cooldownRaw >= 0
       ? Math.trunc(cooldownRaw)
       : defaults.remotePullCooldownSec;
+  const normalizedProviderList = Array.isArray(raw?.agentCompleteProviders)
+    ? normalizeAgentProviderList(raw.agentCompleteProviders)
+    : [];
+  const legacyAgentComplete = typeof raw?.agentComplete === "boolean" ? raw.agentComplete : defaults.agentComplete;
+  const agentCompleteProviders: AgentProviderId[] = normalizedProviderList.length > 0
+    ? normalizedProviderList
+    : legacyAgentComplete
+      ? (["codex"] as AgentProviderId[])
+      : [];
   return {
     enabled: typeof raw?.enabled === "boolean" ? raw.enabled : defaults.enabled,
     gitPostCommit: typeof raw?.gitPostCommit === "boolean" ? raw.gitPostCommit : defaults.gitPostCommit,
-    agentComplete: typeof raw?.agentComplete === "boolean" ? raw.agentComplete : defaults.agentComplete,
+    agentComplete: agentCompleteProviders.length > 0,
+    agentCompleteProviders,
     remotePullCooldownSec: cooldown,
     autoPullOnSync: typeof raw?.autoPullOnSync === "boolean" ? raw.autoPullOnSync : defaults.autoPullOnSync,
     autoWarmTuiOnOpen: typeof raw?.autoWarmTuiOnOpen === "boolean" ? raw.autoWarmTuiOnOpen : defaults.autoWarmTuiOnOpen,
@@ -215,6 +229,10 @@ async function readTextFile(path: string): Promise<string | null> {
   } catch {
     return null;
   }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function isLikelyTextFile(content: string): boolean {
@@ -397,6 +415,182 @@ export async function installAgentCompleteHookBestEffort(
     };
   }
   return { ok: true, installedPath: hookPath, manualSnippet };
+}
+
+function firstCommandSnippet(commandLine: string | string[]): string {
+  return Array.isArray(commandLine) ? (commandLine[0] ?? "") : commandLine;
+}
+
+async function writeJsonFile(path: string, payload: unknown): Promise<void> {
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+}
+
+async function readJsonObjectOrDefault(
+  path: string,
+): Promise<{ ok: true; value: Record<string, unknown> } | { ok: false; reason: string }> {
+  const raw = await readTextFile(path);
+  if (raw == null || raw.trim().length === 0) {
+    return { ok: true, value: {} };
+  }
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!isRecord(parsed)) {
+      return { ok: false, reason: "settings file is not a JSON object" };
+    }
+    return { ok: true, value: parsed };
+  } catch {
+    return { ok: false, reason: "settings file contains invalid JSON" };
+  }
+}
+
+function commandHookExistsInClaudeStopEntry(value: unknown, command: string): boolean {
+  if (!isRecord(value)) {
+    return false;
+  }
+  const hooks = value.hooks;
+  if (!Array.isArray(hooks)) {
+    return false;
+  }
+  for (const hook of hooks) {
+    if (!isRecord(hook)) {
+      continue;
+    }
+    if (hook.type === "command" && typeof hook.command === "string" && hook.command.trim() === command.trim()) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export async function installClaudeCodeAgentCompleteHookBestEffort(
+  repoRoot: string,
+  commandLine: string | string[] = "codaph hooks run agent-complete --provider claude-code --quiet",
+): Promise<{ ok: boolean; installedPath?: string; warning?: string; manualSnippet: string }> {
+  const settingsPath = join(repoRoot, ".claude", "settings.json");
+  const manualSnippet = firstCommandSnippet(commandLine) || "codaph hooks run agent-complete --provider claude-code --quiet";
+  const existing = await readJsonObjectOrDefault(settingsPath);
+  if (!existing.ok) {
+    return {
+      ok: false,
+      warning: `Claude Code settings update failed: ${existing.reason}`,
+      manualSnippet,
+    };
+  }
+
+  const next = { ...existing.value };
+  const hooks = isRecord(next.hooks) ? { ...next.hooks } : {};
+  const stopRaw = hooks.Stop;
+  const stopEntries: unknown[] = Array.isArray(stopRaw) ? [...stopRaw] : isRecord(stopRaw) ? [stopRaw] : [];
+  const alreadyPresent = stopEntries.some((entry) => commandHookExistsInClaudeStopEntry(entry, manualSnippet));
+  if (!alreadyPresent) {
+    stopEntries.push({
+      matcher: "*",
+      hooks: [
+        {
+          type: "command",
+          command: manualSnippet,
+        },
+      ],
+    });
+  }
+  hooks.Stop = stopEntries;
+  next.hooks = hooks;
+
+  try {
+    await writeJsonFile(settingsPath, next);
+    return { ok: true, installedPath: settingsPath, manualSnippet };
+  } catch (error) {
+    return {
+      ok: false,
+      warning: `unable to update Claude Code settings: ${error instanceof Error ? error.message : String(error)}`,
+      manualSnippet,
+    };
+  }
+}
+
+function geminiHookCommandExists(value: unknown, command: string): boolean {
+  if (typeof value === "string") {
+    return value.trim() === command.trim();
+  }
+  if (isRecord(value) && typeof value.command === "string") {
+    return value.command.trim() === command.trim();
+  }
+  if (Array.isArray(value)) {
+    return value.some((entry) => geminiHookCommandExists(entry, command));
+  }
+  return false;
+}
+
+function appendGeminiHookValue(value: unknown, command: string): unknown {
+  if (value == null) {
+    return [command];
+  }
+  if (typeof value === "string") {
+    if (value.trim() === command.trim()) {
+      return value;
+    }
+    return [value, command];
+  }
+  if (isRecord(value)) {
+    if (typeof value.command === "string" && value.command.trim() === command.trim()) {
+      return value;
+    }
+    return [value, command];
+  }
+  if (Array.isArray(value)) {
+    if (value.some((entry) => geminiHookCommandExists(entry, command))) {
+      return value;
+    }
+    return [...value, command];
+  }
+  return [command];
+}
+
+export async function installGeminiCliAgentCompleteHookBestEffort(
+  repoRoot: string,
+  commandLine: string | string[] = "codaph hooks run agent-complete --provider gemini-cli --quiet",
+): Promise<{ ok: boolean; installedPath?: string; warning?: string; manualSnippet: string }> {
+  const settingsPath = join(repoRoot, ".gemini", "settings.json");
+  const manualSnippet = firstCommandSnippet(commandLine) || "codaph hooks run agent-complete --provider gemini-cli --quiet";
+  const existing = await readJsonObjectOrDefault(settingsPath);
+  if (!existing.ok) {
+    return {
+      ok: false,
+      warning: `Gemini CLI settings update failed: ${existing.reason}`,
+      manualSnippet,
+    };
+  }
+
+  const next = { ...existing.value };
+  const hooks = isRecord(next.hooks) ? { ...next.hooks } : {};
+  hooks.AfterAgent = appendGeminiHookValue(hooks.AfterAgent, manualSnippet);
+  next.hooks = hooks;
+
+  try {
+    await writeJsonFile(settingsPath, next);
+    return { ok: true, installedPath: settingsPath, manualSnippet };
+  } catch (error) {
+    return {
+      ok: false,
+      warning: `unable to update Gemini CLI settings: ${error instanceof Error ? error.message : String(error)}`,
+      manualSnippet,
+    };
+  }
+}
+
+export async function installProviderAgentCompleteHookBestEffort(
+  provider: AgentProviderId,
+  repoRoot: string,
+  commandLine: string | string[],
+): Promise<{ ok: boolean; installedPath?: string; warning?: string; manualSnippet: string }> {
+  if (provider === "codex") {
+    return installAgentCompleteHookBestEffort(repoRoot, commandLine);
+  }
+  if (provider === "claude-code") {
+    return installClaudeCodeAgentCompleteHookBestEffort(repoRoot, commandLine);
+  }
+  return installGeminiCliAgentCompleteHookBestEffort(repoRoot, commandLine);
 }
 
 export async function detectHookManagerWarnings(repoRoot: string): Promise<string[]> {

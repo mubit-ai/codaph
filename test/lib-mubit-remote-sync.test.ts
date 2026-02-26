@@ -288,4 +288,59 @@ describe("mubit-remote-sync", () => {
       "shared prompt via compact stream",
     );
   });
+
+  it("preserves provider history sources when replaying compact events", async () => {
+    const timeline = [
+      {
+        id: "claude-1",
+        created_at: "2026-02-23T10:00:00.000Z",
+        payload: JSON.stringify({
+          schema: "codaph_event.v2",
+          event: {
+            eventId: "evt-claude-1",
+            source: "claude_code_history",
+            repoId: "repo-x",
+            actorId: "friend",
+            sessionId: "sess-claude-1",
+            threadId: "thread-claude-1",
+            ts: "2026-02-23T10:00:00.000Z",
+            eventType: "item.completed",
+            payload: { item: { type: "agent_message", text: "hello from claude" } },
+            reasoningAvailability: "unavailable",
+          },
+        }),
+      },
+    ];
+
+    const appended: CapturedEventEnvelope[] = [];
+    const mirror = {
+      async appendEvent(event: CapturedEventEnvelope): Promise<MirrorAppendResult> {
+        appended.push(event);
+        return {
+          segment: "seg",
+          offset: appended.length,
+          checksum: `sum-${appended.length}`,
+          deduplicated: false,
+        };
+      },
+      async appendRawLine(): Promise<void> {},
+    };
+
+    const memory = {
+      async fetchContextSnapshot(): Promise<Record<string, unknown>> {
+        return { timeline };
+      },
+    } as unknown as MubitMemoryEngine;
+
+    const summary = await syncMubitRemoteActivity({
+      mirror,
+      memory,
+      runId: "codaph:repo-x",
+      repoId: "repo-x",
+    });
+
+    expect(summary.imported).toBe(1);
+    expect(appended).toHaveLength(1);
+    expect(appended[0]?.source).toBe("claude_code_history");
+  });
 });

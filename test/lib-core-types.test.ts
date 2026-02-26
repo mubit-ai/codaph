@@ -42,6 +42,22 @@ describe("core-types", () => {
     expect(ev.eventId).toHaveLength(24);
   });
 
+  it("accepts provider history sources beyond Codex", () => {
+    const ev = createCapturedEvent({
+      source: "claude_code_history",
+      repoId: "abc",
+      actorId: null,
+      sessionId: "s2",
+      threadId: "s2",
+      ts: "2026-02-21T20:10:05Z",
+      sequence: 2,
+      eventType: "item.completed",
+      payload: { item: { type: "agent_message", text: "hi" } },
+    });
+
+    expect(ev.source).toBe("claude_code_history");
+  });
+
   it("derives stable repo ids from path", () => {
     const a = repoIdFromPath("/tmp/repo-a");
     const b = repoIdFromPath("/tmp/repo-a");

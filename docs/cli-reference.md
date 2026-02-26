@@ -26,7 +26,7 @@ Primary commands:
 - `init` (repo setup + onboarding)
 - `sync` (fast daily sync)
 - `status` (repo sync + automation status)
-- `import` (historical Codex backfill)
+- `import` (historical agent backfill)
 - `tui` (terminal UI)
 
 Advanced commands are available but not required for normal usage.
@@ -67,6 +67,7 @@ What it does:
 - detects or stores repo identity (`owner/repo` when available)
 - creates `.codaph/project.json`
 - prompts for Mubit API key if missing
+- detects `.codex`, `.claude`, and `.gemini` folders and lets you multi-select agent integrations (preselected when recognized)
 - installs repo-scoped auto-sync hooks (best effort)
 
 Useful flags:
@@ -75,6 +76,8 @@ Useful flags:
 - `--force` reinstall/reapply setup behavior
 - `--no-auto-sync` skip hook install
 - `--cwd <path>` run init for another repo
+- `--providers <csv|auto>` set repo agent integrations without prompting
+- `--agent-hooks <csv|all|none>` choose agent-complete hooks to install without prompting
 
 ## `codaph sync`
 
@@ -89,7 +92,7 @@ Behavior:
 - fast Mubit-first sync path
 - cloud pull into local mirror
 - repo-local automation/status integration
-- no global Codex history replay by default
+- no global agent history replay by default (fast daily sync stays Mubit-first)
 
 Useful flags (most users do not need these):
 
@@ -116,7 +119,7 @@ Compatibility aliases are still supported:
 
 ## `codaph import`
 
-Use this command for historical backfill from local Codex session files.
+Use this command for historical backfill from local agent session history (Codex / Claude Code / Gemini CLI).
 
 ```bash
 codaph import
@@ -125,21 +128,23 @@ codaph import
 Behavior:
 
 - scans `~/.codex/sessions`
-- imports only sessions that match the current repo path
+- also scans local Claude Code / Gemini CLI transcript locations when enabled
+- imports only sessions/transcripts that match the current repo path
 - writes to local `.codaph` mirror
 - writes to Mubit when enabled
 
 Use this command:
 
 - once after onboarding
-- after long periods of running Codex outside Codaph hooks
-- when rebuilding a local mirror from your machine's Codex history
+- after long periods of running agents outside Codaph hooks
+- when rebuilding a local mirror from your machine's local agent history
 
 Useful flags:
 
 - `--cwd <path>`
 - `--json`
 - `--local-only` (compat alias to disable Mubit writes)
+- `--providers <csv|all|auto>` choose which agent histories to backfill
 - `--mubit-write-timeout-ms <ms>`
 
 ## `codaph status`
@@ -154,6 +159,7 @@ It shows:
 
 - repo id
 - auto-sync settings
+- configured agent integrations + agent-complete hook providers
 - local push timestamps/counters
 - remote pull timestamps/counters
 - snapshot fingerprint and cap diagnostics

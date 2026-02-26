@@ -12,7 +12,7 @@ This quickstart gets a new project working in a few minutes, including Mubit set
 Required:
 
 - A repository you want to inspect
-- Codex CLI installed and authenticated
+- A coding agent CLI you use (Codex, Claude Code, or Gemini CLI)
 - A Mubit API key (you can create one in [console.mubit.ai](https://console.mubit.ai))
 
 Only needed for source/development install:
@@ -116,6 +116,7 @@ What `codaph init` does:
 
 - creates repo-local `.codaph/project.json`
 - prompts for a Mubit API key if one is not configured yet
+- detects `.codex`, `.claude`, `.gemini` folders and lets you multi-select agent integrations (recognized providers are preselected)
 - enables repo-scoped auto-sync hooks (post-commit, and agent-complete when detectable)
 - stores repo sync settings
 
@@ -134,7 +135,7 @@ What `codaph sync` does:
 - runs the fast Mubit-first sync path
 - pulls cloud activity into your local `.codaph` mirror
 - uses repo-local sync state and automation settings
-- does not replay global Codex history by default
+- does not replay global agent history by default (Codex / Claude Code / Gemini CLI)
 
 Use this command for normal day-to-day usage.
 
@@ -167,15 +168,16 @@ Use `--agent` or `--no-agent` to control OpenAI-assisted behavior for a specific
 
 In the TUI, press `m` to open the Mubit chat panel. OpenAI-assisted chat is optional and uses the same key/model settings when enabled.
 
-## Backfill Historical Codex Sessions (Optional)
+## Backfill Historical Agent Sessions (Optional)
 
-If you want older Codex sessions from `~/.codex/sessions` to appear in Codaph and Mubit, run:
+If you want older local agent sessions (Codex / Claude Code / Gemini CLI) to appear in Codaph and Mubit, run:
 
 ```bash
 codaph import
 ```
 
 Use `codaph import` once (or occasionally). It is not part of the default daily `sync` path.
+Use `--providers <csv|all|auto>` if you want to limit the backfill to specific agents.
 
 ## Check Status
 
@@ -199,7 +201,7 @@ For a team using the same repo:
 1. Everyone runs `codaph init` in the repo.
 2. Everyone uses the same Mubit backend key and project id.
 3. Each person has a unique actor id (auto-detected in most cases).
-4. One or more contributors run `codaph import` to backfill local Codex history.
+4. One or more contributors run `codaph import` to backfill local agent history.
 5. Everyone runs `codaph sync` and opens `codaph tui`.
 
 Read [Mubit Collaboration](./collaboration-mubit.md) for details and current limits.

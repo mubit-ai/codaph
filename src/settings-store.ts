@@ -2,6 +2,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { execFileSync } from "node:child_process";
+import { normalizeAgentProviderList, type AgentProviderId } from "./lib/agent-providers";
 
 export type MubitRunScope = "session" | "project";
 
@@ -9,6 +10,7 @@ export interface SyncAutomationSettings {
   enabled?: boolean | null;
   gitPostCommit?: boolean | null;
   agentComplete?: boolean | null;
+  agentCompleteProviders?: AgentProviderId[] | null;
   remotePullCooldownSec?: number | null;
   autoPullOnSync?: boolean | null;
   autoWarmTuiOnOpen?: boolean | null;
@@ -19,6 +21,7 @@ export interface ProjectSettings {
   projectName?: string | null;
   mubitProjectId?: string | null;
   mubitRunScope?: MubitRunScope | null;
+  agentProviders?: AgentProviderId[] | null;
   syncAutomation?: SyncAutomationSettings | null;
 }
 
@@ -60,6 +63,21 @@ function asInteger(value: unknown): number | null {
   return Math.trunc(value);
 }
 
+function normalizeAgentProviders(value: unknown): AgentProviderId[] | null {
+  if (value == null) {
+    return null;
+  }
+  if (Array.isArray(value)) {
+    const normalized = normalizeAgentProviderList(value);
+    return normalized.length > 0 ? normalized : [];
+  }
+  if (typeof value === "string") {
+    const normalized = normalizeAgentProviderList(value.split(","));
+    return normalized.length > 0 ? normalized : [];
+  }
+  return null;
+}
+
 function normalizeSyncAutomation(value: unknown): SyncAutomationSettings | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return null;
@@ -69,6 +87,7 @@ function normalizeSyncAutomation(value: unknown): SyncAutomationSettings | null 
     enabled: asBoolean(record.enabled),
     gitPostCommit: asBoolean(record.gitPostCommit),
     agentComplete: asBoolean(record.agentComplete),
+    agentCompleteProviders: normalizeAgentProviders(record.agentCompleteProviders),
     remotePullCooldownSec: asInteger(record.remotePullCooldownSec),
     autoPullOnSync: asBoolean(record.autoPullOnSync),
     autoWarmTuiOnOpen: asBoolean(record.autoWarmTuiOnOpen),
@@ -86,6 +105,7 @@ function normalizeProjectSettings(value: unknown): ProjectSettings | null {
     projectName: asString(record.projectName),
     mubitProjectId: asString(record.mubitProjectId),
     mubitRunScope: normalizeRunScope(record.mubitRunScope),
+    agentProviders: normalizeAgentProviders(record.agentProviders),
     syncAutomation: normalizeSyncAutomation(record.syncAutomation),
   };
 }

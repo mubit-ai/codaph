@@ -28,7 +28,7 @@ Symptoms:
 
 What is usually happening:
 
-- `codaph import` is scanning local Codex history and writing to Mubit
+- `codaph import` is scanning local agent history (Codex / Claude Code / Gemini CLI) and writing to Mubit
 - Mubit writes are slow or timing out
 - some events may still succeed, so the run is partial rather than fully broken
 
@@ -95,21 +95,21 @@ What to do:
 
 Read [Mubit Collaboration](./collaboration-mubit.md) for the full explanation.
 
-## `codaph sync` Does Not Show Historical Codex Sessions
+## `codaph sync` Does Not Show Historical Agent Sessions
 
 Symptoms:
 
-- `codaph sync` runs quickly but old Codex sessions do not appear
+- `codaph sync` runs quickly but old local agent sessions do not appear
 
 This is expected.
 
-`codaph sync` is the fast daily sync path. Historical Codex replay moved to:
+`codaph sync` is the fast daily sync path. Historical agent replay moved to:
 
 ```bash
 codaph import
 ```
 
-Use `codaph import` once (or occasionally) when you need backfill from `~/.codex/sessions`.
+Use `codaph import` once (or occasionally) when you need local history backfill.
 
 ## Mubit Shows Disabled (`Mubit:off`)
 
@@ -169,22 +169,23 @@ What to do:
 - wait a few seconds and retry
 - rerun `codaph sync` (Codaph now attempts to reclaim stale locks automatically)
 
-## No Codex History for This Repo
+## No Agent History for This Repo
 
 Symptoms:
 
-- push/import output says `No Codex history for this repo`
+- push/import output says `No agent history for this repo`
 
 What it means:
 
-- Codaph scanned `~/.codex/sessions`
-- no session files matched the current repository path
+- Codaph scanned local agent history/transcript locations
+- no session/transcript files matched the current repository path
 
 What to do:
 
 - confirm you are in the correct repo root
-- confirm the Codex sessions you expect were created in this repo path
+- confirm the agent sessions/transcripts you expect were created in this repo path
 - run `codaph import --cwd /absolute/path/to/repo` if you are invoking from another directory
+- try `codaph import --providers codex` (or `claude-code` / `gemini-cli`) to isolate one provider during debugging
 
 ## Mubit Query Returns Weak Results
 

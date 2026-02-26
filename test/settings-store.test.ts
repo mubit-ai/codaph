@@ -1,6 +1,6 @@
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
-import { removeProjectSettings, type CodaphSettings } from "../src/settings-store";
+import { getProjectSettings, removeProjectSettings, type CodaphSettings, updateProjectSettings } from "../src/settings-store";
 
 describe("settings-store", () => {
   it("removes a project settings entry using a normalized path key", () => {
@@ -45,5 +45,21 @@ describe("settings-store", () => {
     expect(next.openAiApiKey).toBe("openai-key");
     expect(next.mubitActorId).toBe("anil");
     expect(next.projects).toEqual({});
+  });
+
+  it("stores project provider preferences and agent hook providers", () => {
+    const path = resolve("/tmp/provider-project");
+    const next = updateProjectSettings({ projects: {} }, path, {
+      projectName: "Provider Project",
+      agentProviders: ["codex", "claude-code"],
+      syncAutomation: {
+        enabled: true,
+        agentCompleteProviders: ["claude-code", "gemini-cli"],
+      },
+    });
+
+    const project = getProjectSettings(next, path);
+    expect(project.agentProviders).toEqual(["codex", "claude-code"]);
+    expect(project.syncAutomation?.agentCompleteProviders).toEqual(["claude-code", "gemini-cli"]);
   });
 });

@@ -1,7 +1,12 @@
 import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 
-export type AgentSource = "codex_sdk" | "codex_exec";
+export type AgentSource =
+  | "codex_sdk"
+  | "codex_exec"
+  | "codex_history"
+  | "claude_code_history"
+  | "gemini_cli_history";
 
 export type ReasoningAvailability = "full" | "partial" | "unavailable";
 

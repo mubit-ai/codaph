@@ -16,9 +16,9 @@ Codaph is the result of a confusion - who prompted _(this)_? during our dev cycl
 - [ ] Dependencies map and upgrade sync in Mubit
 - [ ] Plugin for coding agents
 - [ ] Add support for
-  - [ ] Claude Code
+  - [x] Claude Code
   - [ ] OpenCode
-  - [ ] Gemini
+  - [x] Gemini
   - [ ] Cursor
   - [x] Codex
 
@@ -72,7 +72,7 @@ Run Codaph from the project root you want to inspect.
 # one-time key setup (recommended; can also use env vars)
 codaph setup --mubit-api-key <your-mubit-key>
 
-# one-time repo setup (wizard)
+# one-time repo setup (wizard; detects .codex/.claude/.gemini and lets you multi-select)
 codaph init
 
 # daily sync (fast, Mubit-first)
@@ -81,7 +81,7 @@ codaph sync
 # open terminal UI
 codaph tui
 
-# optional historical backfill from ~/.codex/sessions
+# optional historical backfill from local agent history (Codex / Claude Code / Gemini CLI)
 codaph import
 
 # inspect sync and automation state
