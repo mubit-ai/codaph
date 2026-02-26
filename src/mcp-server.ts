@@ -528,6 +528,9 @@ export class CodaphMcpServer {
   private readonly ctx: ToolCallContext;
   private readBuffer = Buffer.alloc(0);
   private closed = false;
+  private sawInput = false;
+  private sawParsedRequest = false;
+  private ioMode: "auto" | "framed" | "plain" = "auto";
 
   constructor(options: McpServerOptions = {}) {
     this.ctx = { defaultCwd: resolve(options.defaultCwd ?? process.cwd()) };
@@ -535,8 +538,22 @@ export class CodaphMcpServer {
 
   start(): Promise<void> {
     return new Promise((resolveDone) => {
+      logDebug("stdio server started", { cwd: this.ctx.defaultCwd, pid: process.pid });
+      const noInputTimer = setTimeout(() => {
+        if (!this.sawInput) {
+          logDebug("no stdin bytes received after 5s");
+        }
+      }, 5000);
+
       const onData = (chunk: Buffer | string) => {
         const asBuffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        if (!this.sawInput) {
+          this.sawInput = true;
+          logDebug("received first stdin chunk", {
+            bytes: asBuffer.length,
+            preview: asBuffer.toString("utf8", 0, Math.min(asBuffer.length, 120)).replace(/\r/g, "\\r").replace(/\n/g, "\\n"),
+          });
+        }
         this.readBuffer = Buffer.concat([this.readBuffer, asBuffer]);
         this.drainBuffer();
       };
@@ -557,6 +574,7 @@ export class CodaphMcpServer {
           return;
         }
         this.closed = true;
+        clearTimeout(noInputTimer);
         input.off("data", onData);
         input.off("end", onEnd);
         input.off("error", onError);
@@ -573,7 +591,10 @@ export class CodaphMcpServer {
     for (;;) {
       const headerEnd = findHeaderEnd(this.readBuffer);
       if (!headerEnd) {
-        return;
+        if (!this.drainPlainJsonBuffer()) {
+          return;
+        }
+        continue;
       }
       const headerText = this.readBuffer.slice(0, headerEnd.index).toString("utf8");
       let contentLength: number;
@@ -593,8 +614,55 @@ export class CodaphMcpServer {
 
       const body = this.readBuffer.slice(messageStart, messageEnd).toString("utf8");
       this.readBuffer = this.readBuffer.slice(messageEnd);
+      if (this.ioMode === "auto") {
+        this.ioMode = "framed";
+        logDebug("detected stdio mode", { mode: this.ioMode });
+      }
       void this.handleRawMessage(body);
     }
+  }
+
+  private drainPlainJsonBuffer(): boolean {
+    if (this.readBuffer.length === 0) {
+      return false;
+    }
+
+    const text = this.readBuffer.toString("utf8");
+    const trimmed = text.trimStart();
+    if (!(trimmed.startsWith("{") || trimmed.startsWith("["))) {
+      return false;
+    }
+
+    // First try line-delimited JSON (common stdio MCP variant used by some clients).
+    const newlineIndex = text.indexOf("\n");
+    if (newlineIndex >= 0) {
+      const line = text.slice(0, newlineIndex).trim();
+      this.readBuffer = Buffer.from(text.slice(newlineIndex + 1), "utf8");
+      if (line.length === 0) {
+        return true;
+      }
+      if (this.ioMode === "auto") {
+        this.ioMode = "plain";
+        logDebug("detected stdio mode", { mode: this.ioMode });
+      }
+      void this.handleRawMessage(line);
+      return true;
+    }
+
+    // If there is no newline delimiter, try parsing the entire buffer as one JSON message.
+    // If parsing fails, assume the message is incomplete and wait for more bytes.
+    try {
+      JSON.parse(text);
+    } catch {
+      return false;
+    }
+    if (this.ioMode === "auto") {
+      this.ioMode = "plain";
+      logDebug("detected stdio mode", { mode: this.ioMode });
+    }
+    this.readBuffer = Buffer.alloc(0);
+    void this.handleRawMessage(text);
+    return true;
   }
 
   private async handleRawMessage(raw: string): Promise<void> {
@@ -628,6 +696,10 @@ export class CodaphMcpServer {
         this.sendJsonRpcError(request.id ?? null, jsonRpcError(-32600, "Invalid Request: method must be a string"));
       }
       return;
+    }
+    if (!this.sawParsedRequest) {
+      this.sawParsedRequest = true;
+      logDebug("parsed first request", { method });
     }
 
     try {
@@ -765,6 +837,9 @@ export class CodaphMcpServer {
   }
 
   private sendJsonRpcResult(id: unknown, result: unknown): void {
+    if (id !== undefined && id !== null) {
+      logDebug("sending jsonrpc result", { id });
+    }
     this.writeMessage({
       jsonrpc: "2.0",
       id,
@@ -782,7 +857,14 @@ export class CodaphMcpServer {
 
   private writeMessage(message: unknown): void {
     const body = Buffer.from(JSON.stringify(message), "utf8");
-    const header = Buffer.from(`Content-Length: ${body.length}\r\nContent-Type: application/json\r\n\r\n`, "utf8");
+    if (this.ioMode === "plain") {
+      output.write(body);
+      output.write("\n");
+      return;
+    }
+    // Use the minimal MCP stdio framing. Some clients are stricter than others
+    // about extra headers and may hang instead of surfacing a parse error.
+    const header = Buffer.from(`Content-Length: ${body.length}\r\n\r\n`, "utf8");
     output.write(header);
     output.write(body);
   }
@@ -792,4 +874,3 @@ export async function startCodaphMcpServer(options: McpServerOptions = {}): Prom
   const server = new CodaphMcpServer(options);
   await server.start();
 }
-
