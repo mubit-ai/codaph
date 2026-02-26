@@ -1032,3 +1032,13 @@ Do not rewrite history; append a new snapshot each run.
 - unstaged: 0
 - untracked: 0
 - files: src/mcp-server.ts
+
+## Status Snapshot — 2026-02-26T13:29:36.942Z
+- source: pre-commit
+- repo: /Users/anilp/Code/codaph
+- branch: agent/mcp
+- head: a641743
+- staged: 1
+- unstaged: 0
+- untracked: 0
+- files: package.json
