@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { clearLine, createInterface, cursorTo, emitKeypressEvents } from "node:readline";
+import { clearLine, clearScreenDown, createInterface, cursorTo, emitKeypressEvents } from "node:readline";
 import { stdin as input, stdout as output } from "node:process";
 import { readFileSync } from "node:fs";
 import { mkdir, readdir, stat, writeFile } from "node:fs/promises";
@@ -1151,7 +1151,7 @@ async function promptMultiSelect<T extends string>(
 
   const selected = new Set<T>(initialSelected.filter((value) => options.some((option) => option.value === value)));
   let cursorIndex = 0;
-  let renderedLineCount = 0;
+  let renderedScreenRows = 0;
   let resolved = false;
 
   const render = () => {
@@ -1171,18 +1171,38 @@ async function promptMultiSelect<T extends string>(
     lines.push("");
     lines.push(paint("[space] toggle  [a] toggle all  [↑/↓] move  [enter] confirm", TUI_COLORS.dim));
 
-    if (renderedLineCount > 0) {
-      output.write(`\x1b[${renderedLineCount}A`);
+    if (renderedScreenRows > 0) {
+      const rowsUp = Math.max(0, renderedScreenRows - 1);
+      if (rowsUp > 0) {
+        output.write(`\x1b[${rowsUp}A`);
+      }
+      cursorTo(output, 0);
+      clearScreenDown(output);
     }
+
+    const terminalColumns =
+      typeof (output as NodeJS.WriteStream).columns === "number" && (output as NodeJS.WriteStream).columns! > 0
+        ? (output as NodeJS.WriteStream).columns!
+        : 80;
+    const ansiRegex = /\x1B\[[0-?]*[ -/]*[@-~]/g;
+    const visibleRowsForLine = (line: string): number => {
+      const plain = line.replace(ansiRegex, "");
+      const width = Math.max(0, Array.from(plain).length);
+      return Math.max(1, Math.ceil(width / terminalColumns));
+    };
+
+    let nextRenderedScreenRows = 0;
     for (let i = 0; i < lines.length; i += 1) {
       clearLine(output, 0);
       cursorTo(output, 0);
-      output.write(lines[i] ?? "");
+      const line = lines[i] ?? "";
+      output.write(line);
+      nextRenderedScreenRows += visibleRowsForLine(line);
       if (i < lines.length - 1) {
         output.write("\n");
       }
     }
-    renderedLineCount = lines.length;
+    renderedScreenRows = nextRenderedScreenRows;
   };
 
   emitKeypressEvents(input);
@@ -6838,10 +6858,17 @@ async function tui(rest: string[]): Promise<void> {
     if (state.busy) {
       return;
     }
+    const previousStatusLine = state.statusLine;
     state.busy = true;
     state.statusLine = label;
     render();
     void task()
+      .then(() => {
+        // If the task didn't set a more specific status, restore the prior line.
+        if (state.statusLine === label) {
+          state.statusLine = previousStatusLine;
+        }
+      })
       .catch((error) => {
         const message = error instanceof Error ? error.message : String(error);
         state.statusLine = `Error: ${message}`;

@@ -1,6 +1,6 @@
 {
   "name": "@codaph/codaph",
-  "version": "0.1.12",
+  "version": "0.1.13",
   "description": "Codex-first CLI/TUI for prompts, thoughts, diffs, and collaborative MuBit memory.",
   "license": "MIT OR Apache-2.0",
   "type": "module",

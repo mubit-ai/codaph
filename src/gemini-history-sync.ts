@@ -5,6 +5,8 @@ import { homedir } from "node:os";
 import { repoIdFromPath } from "./lib/core-types";
 import { IngestPipeline } from "./lib/ingest-pipeline";
 
+type PatchChangeKind = "add" | "delete" | "update";
+
 interface GeminiHistoryFileCursor {
   entryCount: number;
   sequence: number;
@@ -58,10 +60,15 @@ interface GeminiEntry {
   ts?: string;
   sessionId?: string | null;
   cwd?: string | null;
+  fileChanges?: Array<{ path: string; kind: PatchChangeKind }>;
 }
 
 function getGeminiHistoryRoot(): string {
   return join(homedir(), ".gemini", "history");
+}
+
+function getGeminiTmpRoot(): string {
+  return join(homedir(), ".gemini", "tmp");
 }
 
 function normalizeProjectPath(projectPath: string): string {
@@ -133,6 +140,85 @@ function extractText(value: unknown): string | null {
     }
   }
   return null;
+}
+
+function dedupePatchChanges(
+  changes: Array<{ path: string; kind: PatchChangeKind }>,
+): Array<{ path: string; kind: PatchChangeKind }> {
+  const unique = new Map<string, { path: string; kind: PatchChangeKind }>();
+  for (const change of changes) {
+    if (!change.path) {
+      continue;
+    }
+    unique.set(`${change.kind}:${change.path}`, change);
+  }
+  return [...unique.values()];
+}
+
+function inferGeminiToolChangeKind(
+  toolName: string | null,
+  fileDiff: Record<string, unknown> | null,
+): PatchChangeKind | null {
+  const lowerName = (toolName ?? "").toLowerCase();
+  if (fileDiff) {
+    const hasOriginal = typeof fileDiff.originalContent === "string";
+    const hasNew = typeof fileDiff.newContent === "string";
+    const originalContent = hasOriginal ? (fileDiff.originalContent as string) : null;
+    const newContent = hasNew ? (fileDiff.newContent as string) : null;
+    if (hasOriginal && hasNew) {
+      const originalEmpty = originalContent?.length === 0;
+      const newEmpty = newContent?.length === 0;
+      if (originalEmpty && !newEmpty) {
+        return "add";
+      }
+      if (!originalEmpty && newEmpty) {
+        return "delete";
+      }
+      return "update";
+    }
+  }
+  if (/(delete|remove)/.test(lowerName)) {
+    return "delete";
+  }
+  if (/(create|write)/.test(lowerName)) {
+    return "add";
+  }
+  if (/(edit|patch|replace|append|prepend|move|rename)/.test(lowerName)) {
+    return "update";
+  }
+  return null;
+}
+
+function extractGeminiToolFileChanges(record: Record<string, unknown>): Array<{ path: string; kind: PatchChangeKind }> {
+  if (!Array.isArray(record.toolCalls)) {
+    return [];
+  }
+  const changes: Array<{ path: string; kind: PatchChangeKind }> = [];
+
+  for (const rawCall of record.toolCalls) {
+    if (!isRecord(rawCall)) {
+      continue;
+    }
+    const toolName = asString(rawCall.name);
+    const args = isRecord(rawCall.args) ? rawCall.args : null;
+    const resultDisplay = isRecord(rawCall.resultDisplay) ? rawCall.resultDisplay : null;
+    const fileDiff = resultDisplay && isRecord(resultDisplay.fileDiff) ? resultDisplay.fileDiff : null;
+
+    const path =
+      (fileDiff ? asString(fileDiff.filePath) : null) ??
+      (args ? asString(args.file_path) ?? asString(args.path) ?? asString(args.target) : null);
+    if (!path) {
+      continue;
+    }
+
+    const kind = inferGeminiToolChangeKind(toolName, fileDiff);
+    if (!kind) {
+      continue;
+    }
+    changes.push({ path, kind });
+  }
+
+  return dedupePatchChanges(changes);
 }
 
 function extractRole(record: Record<string, unknown>): string | null {
@@ -211,11 +297,12 @@ function toGeminiEntry(record: Record<string, unknown>): GeminiEntry | null {
     asString(record.conversationId) ??
     asString(record.conversation_id);
   const cwd = extractCwd(record);
+  const fileChanges = extractGeminiToolFileChanges(record);
 
-  if (!role && !text) {
+  if (!role && !text && fileChanges.length === 0) {
     return null;
   }
-  return { role, text, ts: ts ?? undefined, sessionId, cwd };
+  return { role, text, ts: ts ?? undefined, sessionId, cwd, fileChanges };
 }
 
 function projectGeminiEntry(entry: GeminiEntry): ProjectedEvent[] {
@@ -236,7 +323,13 @@ function projectGeminiEntry(entry: GeminiEntry): ProjectedEvent[] {
       payload: { item: { type: "agent_message", text: entry.text } },
       ts,
     });
-    return events;
+  }
+  if (entry.fileChanges && entry.fileChanges.length > 0) {
+    events.push({
+      eventType: "item.completed",
+      payload: { item: { type: "file_change", changes: entry.fileChanges } },
+      ts,
+    });
   }
   return events;
 }
@@ -298,6 +391,10 @@ async function listTranscriptFiles(rootDir: string): Promise<string[]> {
       if (entry.name === ".project_root") {
         continue;
       }
+      // Gemini CLI logs.json is a prompt summary and duplicates chat transcript data.
+      if (entry.name === "logs.json") {
+        continue;
+      }
       if (entry.name.endsWith(".jsonl") || entry.name.endsWith(".json")) {
         output.push(abs);
       }
@@ -350,7 +447,22 @@ async function readGeminiFileEntries(
     return { rawEntries: [], parsedEntries: [] };
   }
   const candidates = collectCandidateRecordsFromJson(parsedJson);
-  const parsedEntries = candidates.map(toGeminiEntry);
+  const rootSessionId = isRecord(parsedJson)
+    ? (
+        asString(parsedJson.sessionId) ??
+        asString(parsedJson.session_id) ??
+        asString(parsedJson.chatId) ??
+        asString(parsedJson.chat_id) ??
+        asString(parsedJson.conversationId) ??
+        asString(parsedJson.conversation_id)
+      )
+    : null;
+  const parsedEntries = candidates.map((candidate) => {
+    if (!rootSessionId || candidate.sessionId != null || candidate.session_id != null) {
+      return toGeminiEntry(candidate);
+    }
+    return toGeminiEntry({ ...candidate, sessionId: rootSessionId });
+  });
   const rawEntries = candidates.map((entry) => JSON.stringify(entry));
   return { rawEntries, parsedEntries };
 }
@@ -361,11 +473,16 @@ export async function syncGeminiHistory(options: SyncGeminiHistoryOptions): Prom
   const mirrorRoot = resolve(options.mirrorRoot ?? join(normalizedProject, ".codaph"));
   const actorId = options.actorId ?? null;
   const historyRoot = resolve(options.geminiHistoryRoot ?? getGeminiHistoryRoot());
+  const fallbackTmpRoot = resolve(getGeminiTmpRoot());
 
   const statePath = getStatePath(normalizedProject, mirrorRoot);
   const state = await readJsonOrDefault<GeminiHistorySyncState>(statePath, { files: {} });
-  const projectDirs = await listGeminiProjectDirs(historyRoot);
-  const matchingDirs = projectDirs.filter(
+  const projectDirLists = await Promise.all([
+    listGeminiProjectDirs(historyRoot),
+    historyRoot === fallbackTmpRoot ? Promise.resolve<GeminiProjectDir[]>([]) : listGeminiProjectDirs(fallbackTmpRoot),
+  ]);
+  const allProjectDirs = projectDirLists.flat();
+  const matchingDirs = allProjectDirs.filter(
     (entry) => entry.projectRoot && projectOwnsPath(normalizedProject, entry.projectRoot),
   );
   const fileLists = await Promise.all(matchingDirs.map((entry) => listTranscriptFiles(entry.dirPath)));

@@ -61,6 +61,7 @@ interface ClaudeHistoryLine {
   cwd?: string;
   agentId?: string;
   message?: Record<string, unknown>;
+  toolUseResult?: Record<string, unknown>;
 }
 
 function getClaudeProjectsRoot(): string {
@@ -156,6 +157,76 @@ function parsePatchChanges(rawText: string): Array<{ path: string; kind: PatchCh
     unique.set(`${change.kind}:${change.path}`, change);
   }
   return [...unique.values()];
+}
+
+function dedupePatchChanges(
+  changes: Array<{ path: string; kind: PatchChangeKind }>,
+): Array<{ path: string; kind: PatchChangeKind }> {
+  const unique = new Map<string, { path: string; kind: PatchChangeKind }>();
+  for (const change of changes) {
+    if (!change.path) {
+      continue;
+    }
+    unique.set(`${change.kind}:${change.path}`, change);
+  }
+  return [...unique.values()];
+}
+
+function inferClaudeToolUseResultChangeKind(result: Record<string, unknown>): PatchChangeKind | null {
+  const type = (asString(result.type) ?? "").toLowerCase();
+  if (type === "create") {
+    return "add";
+  }
+  if (type === "delete" || type === "remove") {
+    return "delete";
+  }
+  if (type === "edit" || type === "update" || type === "modify" || type === "rename" || type === "move") {
+    return "update";
+  }
+  if (Array.isArray(result.structuredPatch)) {
+    return "update";
+  }
+  if (typeof result.oldString === "string" || typeof result.newString === "string") {
+    return "update";
+  }
+  if (isRecord(result.fileDiff)) {
+    const fileDiff = result.fileDiff;
+    const hasOriginal = typeof fileDiff.originalContent === "string";
+    const hasNew = typeof fileDiff.newContent === "string";
+    const originalContent = hasOriginal ? (fileDiff.originalContent as string) : null;
+    const newContent = hasNew ? (fileDiff.newContent as string) : null;
+    if (hasOriginal && hasNew) {
+      if ((originalContent?.length ?? 0) === 0 && (newContent?.length ?? 0) > 0) {
+        return "add";
+      }
+      if ((originalContent?.length ?? 0) > 0 && (newContent?.length ?? 0) === 0) {
+        return "delete";
+      }
+      return "update";
+    }
+  }
+  return null;
+}
+
+function extractClaudeToolUseResultFileChanges(
+  toolUseResult: Record<string, unknown> | undefined,
+): Array<{ path: string; kind: PatchChangeKind }> {
+  if (!toolUseResult) {
+    return [];
+  }
+  const fileDiff = isRecord(toolUseResult.fileDiff) ? toolUseResult.fileDiff : null;
+  const path =
+    (fileDiff ? asString(fileDiff.filePath) : null) ??
+    asString(toolUseResult.filePath) ??
+    (isRecord(toolUseResult.file) ? asString(toolUseResult.file.filePath) ?? asString(toolUseResult.file.path) : null);
+  if (!path) {
+    return [];
+  }
+  const kind = inferClaudeToolUseResultChangeKind(toolUseResult);
+  if (!kind) {
+    return [];
+  }
+  return dedupePatchChanges([{ path, kind }]);
 }
 
 function extractClaudeAssistantTextAndReasoning(message: Record<string, unknown> | undefined): {
@@ -335,6 +406,7 @@ function parseClaudeHistoryLine(rawLine: string): ClaudeHistoryLine | null {
       cwd: asString(parsed.cwd) ?? undefined,
       agentId: asString(parsed.agentId) ?? undefined,
       message: isRecord(parsed.message) ? parsed.message : undefined,
+      toolUseResult: isRecord(parsed.toolUseResult) ? parsed.toolUseResult : undefined,
     };
   } catch {
     return null;
@@ -359,6 +431,14 @@ function projectClaudeLine(line: ClaudeHistoryLine): ProjectedEvent[] {
       projected.push({
         eventType: "item.completed",
         payload: { item: { type: "reasoning", subtype: "tool_protocol", text: toolText } },
+        ts,
+      });
+    }
+    const fileChanges = extractClaudeToolUseResultFileChanges(line.toolUseResult);
+    if (fileChanges.length > 0) {
+      projected.push({
+        eventType: "item.completed",
+        payload: { item: { type: "file_change", changes: fileChanges } },
         ts,
       });
     }
