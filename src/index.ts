@@ -1756,10 +1756,92 @@ function formatTuiProgressStatus(raw: string, width: number): string | null {
   return null;
 }
 
-function renderTuiStatusLine(statusLine: string, busy: boolean, width: number): string {
+const TUI_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const;
+
+function tuiSpinnerFrame(): string {
+  const at = Math.floor(Date.now() / 110);
+  return TUI_SPINNER_FRAMES[at % TUI_SPINNER_FRAMES.length] ?? "*";
+}
+
+function parseTuiTaskProgress(statusLine: string): { label: string; current: number; total: number } | null {
+  const raw = statusLine.trim();
+  if (!raw) {
+    return null;
+  }
+
+  let match = /^(Push|Pull|Remote sync)\s+(\d+)\/(\d+)/.exec(raw);
+  if (match) {
+    const current = Number(match[2] ?? "0");
+    const total = Number(match[3] ?? "0");
+    return {
+      label: match[1] ?? "Task",
+      current: Number.isFinite(current) ? current : 0,
+      total: Number.isFinite(total) ? total : 0,
+    };
+  }
+
+  match = /^(.+?)\s+\((\d+)\/(\d+)\)$/.exec(raw);
+  if (match) {
+    const current = Number(match[2] ?? "0");
+    const total = Number(match[3] ?? "0");
+    return {
+      label: (match[1] ?? "Task").trim(),
+      current: Number.isFinite(current) ? current : 0,
+      total: Number.isFinite(total) ? total : 0,
+    };
+  }
+
+  return null;
+}
+
+function renderBusyProgressBar(current: number, total: number, width: number): string {
+  const inner = Math.max(6, width - 2);
+  const safeTotal = Math.max(0, total);
+  const safeCurrent = Math.max(0, Math.min(current, safeTotal));
+  if (safeTotal <= 0) {
+    const head = Math.floor(Date.now() / 120) % inner;
+    const trail = (head - 1 + inner) % inner;
+    const cells: string[] = [];
+    for (let i = 0; i < inner; i += 1) {
+      if (i === head) {
+        cells.push(paint("█", TUI_COLORS.yellow));
+      } else if (i === trail) {
+        cells.push(paint("▓", TUI_COLORS.yellow));
+      } else {
+        cells.push(paint("·", TUI_COLORS.rule));
+      }
+    }
+    return `${paint("[", TUI_COLORS.rule)}${cells.join("")}${paint("]", TUI_COLORS.rule)}`;
+  }
+
+  const filled = Math.max(0, Math.min(inner, Math.round((safeCurrent / safeTotal) * inner)));
+  return `${paint("[", TUI_COLORS.rule)}${paint("█".repeat(filled), TUI_COLORS.yellow)}${paint("·".repeat(Math.max(0, inner - filled)), TUI_COLORS.rule)}${paint("]", TUI_COLORS.rule)}`;
+}
+
+function renderTuiBusyRail(statusLine: string, busy: boolean, busySinceMs: number, width: number): string | null {
+  if (!busy) {
+    return null;
+  }
+
+  const progress = parseTuiTaskProgress(statusLine);
+  const spinner = tuiSpinnerFrame();
+  const left = `${paint(spinner, TUI_COLORS.yellow)} ${paint("RUNNING", TUI_COLORS.yellow)} ${renderBusyProgressBar(progress?.current ?? 0, progress?.total ?? 0, Math.max(10, Math.min(34, Math.floor(width * 0.3))))}`;
+  const elapsed = busySinceMs > 0 ? formatElapsedMs(busySinceMs) : null;
+  const meta = progress
+    ? `${progress.label} ${progress.current}/${progress.total}${progress.total > 0 ? ` (${Math.round((progress.current / progress.total) * 100)}%)` : ""}${elapsed ? ` · ${elapsed}` : ""}`
+    : `${statusLine.trim() || "Working..."}${elapsed ? ` · ${elapsed}` : ""}`;
+  const right = paint(clipPlain(meta, Math.max(10, width - visibleLength(left) - 2)), TUI_COLORS.panelTitleInactive);
+  return headerLine(left, right, width);
+}
+
+function renderTuiStatusLine(statusLine: string, busy: boolean, busySinceMs: number, width: number): string {
   const raw = statusLine.trim();
   if (raw.length === 0) {
-    return "";
+    if (!busy) {
+      return "";
+    }
+    const elapsed = busySinceMs > 0 ? ` · ${formatElapsedMs(busySinceMs)}` : "";
+    return `${paint(tuiSpinnerFrame(), TUI_COLORS.yellow)} ${paint(clipPlain(`Working...${elapsed}`, Math.max(1, width - 2)), TUI_COLORS.muted)}`;
   }
   const syncSummary = formatTuiSyncFooterSummary(raw, width);
   if (syncSummary) {
@@ -4045,6 +4127,7 @@ interface TuiState {
   selectedProjectPickerIndex: number;
   projectPickerShowHidden: boolean;
   busy: boolean;
+  busySinceMs: number;
   statusLine: string;
   actorFilter: string | null;
   inputMode: InputMode;
@@ -5683,6 +5766,7 @@ function renderBrowseView(
     `${paint("mubit", TUI_COLORS.muted)}:${paint(mubitEnabled ? "on" : "off", mubitTone)}  ${paint("[o] settings  [?] help", TUI_COLORS.dim)}`;
   const header = headerLine(leftHeader, visibleLength(rightHeader) < Math.floor(width * 0.7) ? rightHeader : fallbackRightHeader, width);
   const headerRule = horizontalRule(width);
+  const busyRail = renderTuiBusyRail(state.statusLine, state.busy, state.busySinceMs, width);
 
   const tableHeight = Math.max(10, height - 6);
   const bodyRows = Math.max(3, tableHeight - 4);
@@ -5729,7 +5813,7 @@ function renderBrowseView(
   const sessionsBox = boxLines(`Sessions  group:${groupingLabel}`, width, tableHeight, sessionLines, true);
   const footer =
     "[↑/↓] sessions  [enter] inspect  [g] group  [s] sync  [r] pull  [p] next project  [P] projects  [a] add  [o] settings  [q] quit";
-  return [header, headerRule, ...sessionsBox, "", paint(clipPlain(footer, width), TUI_COLORS.dim)].join("\n");
+  return [header, headerRule, ...(busyRail ? [busyRail] : []), ...sessionsBox, "", paint(clipPlain(footer, width), TUI_COLORS.dim)].join("\n");
 }
 
 function renderDiffOverlay(
@@ -5758,6 +5842,7 @@ function renderDiffOverlay(
     width,
   );
   const topRule = horizontalRule(width);
+  const busyRail = renderTuiBusyRail(state.statusLine, state.busy, state.busySinceMs, width);
   const box = boxLines(
     fullDiff.title,
     width,
@@ -5768,6 +5853,7 @@ function renderDiffOverlay(
   return [
     top,
     topRule,
+    ...(busyRail ? [busyRail] : []),
     ...box,
     "",
     paint(`[up/down] scroll (${scroll}/${maxScroll})`, TUI_COLORS.dim),
@@ -5807,6 +5893,7 @@ function renderInspectView(
     width,
   );
   const topRule = horizontalRule(width);
+  const busyRail = renderTuiBusyRail(state.statusLine, state.busy, state.busySinceMs, width);
 
   if (threePaneMode && state.inspectPane === "files") {
     state.inspectPane = "thoughts";
@@ -5894,7 +5981,7 @@ function renderInspectView(
     return scrolled.lines;
   };
 
-  const composed: string[] = [topHeader, topRule];
+  const composed: string[] = [topHeader, topRule, ...(busyRail ? [busyRail] : [])];
   if (threePaneMode) {
     const minPane = 22;
     const innerWidth = width - 4;
@@ -6506,6 +6593,7 @@ async function tui(rest: string[]): Promise<void> {
     selectedProjectPickerIndex: 0,
     projectPickerShowHidden: false,
     busy: false,
+    busySinceMs: 0,
     statusLine: "",
     actorFilter: null,
     inputMode: null,
@@ -6526,6 +6614,7 @@ async function tui(rest: string[]): Promise<void> {
   const gitAuthorCache = new Map<string, string | null>();
   let screenReady = false;
   let lastRenderedFrame = "";
+  let busyAnimationTimer: ReturnType<typeof setInterval> | null = null;
 
   const getSize = (): { width: number; height: number } => ({
     width: Math.max(20, (output.columns ?? 120) - 1),
@@ -6750,7 +6839,7 @@ async function tui(rest: string[]): Promise<void> {
       }
     }
 
-    const status = renderTuiStatusLine(state.statusLine, state.busy, width);
+    const status = renderTuiStatusLine(state.statusLine, state.busy, state.busySinceMs, width);
 
     const bodyHeight = Math.max(1, height - 1);
     const frameLines = screen.split("\n").slice(0, bodyHeight);
@@ -6773,6 +6862,26 @@ async function tui(rest: string[]): Promise<void> {
         output.write("\n");
       }
     }
+  };
+
+  const startBusyAnimation = (): void => {
+    if (busyAnimationTimer || !output.isTTY) {
+      return;
+    }
+    busyAnimationTimer = setInterval(() => {
+      if (!state.busy || !screenReady) {
+        return;
+      }
+      render();
+    }, 120);
+  };
+
+  const stopBusyAnimation = (): void => {
+    if (!busyAnimationTimer) {
+      return;
+    }
+    clearInterval(busyAnimationTimer);
+    busyAnimationTimer = null;
   };
 
   const ensureAnalysis = async (session: QuerySessionSummary): Promise<SessionAnalysis> => {
@@ -6883,7 +6992,9 @@ async function tui(rest: string[]): Promise<void> {
     }
     const previousStatusLine = state.statusLine;
     state.busy = true;
+    state.busySinceMs = Date.now();
     state.statusLine = label;
+    startBusyAnimation();
     render();
     void task()
       .then(() => {
@@ -6898,6 +7009,8 @@ async function tui(rest: string[]): Promise<void> {
       })
       .finally(() => {
         state.busy = false;
+        state.busySinceMs = 0;
+        stopBusyAnimation();
         render();
       });
   };
@@ -7248,6 +7361,7 @@ async function tui(rest: string[]): Promise<void> {
     output.write("\u001b[?25h");
     output.write("\u001b[?7h");
     output.write("\u001b[?1049l");
+    stopBusyAnimation();
     if (resolveDone) {
       resolveDone();
     }
