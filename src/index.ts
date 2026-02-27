@@ -4059,16 +4059,20 @@ interface TuiState {
 
 const ANSI_ESCAPE_REGEX = /\u001b\[[0-9;]*m/g;
 const TUI_COLORS = {
-  brand: "38;2;122;162;247",
-  activeBorder: "97",
-  inactiveBorder: "90",
-  selected: "48;2;122;162;247;30",
+  brand: "1;38;2;235;151;82",
+  activeBorder: "38;2;170;115;74",
+  inactiveBorder: "38;2;74;74;74",
+  selected: "48;2;55;45;36;38;2;246;208;168;1",
   dim: "2",
-  muted: "90",
-  cyan: "36",
-  yellow: "33",
-  green: "32",
-  red: "31",
+  muted: "38;2;122;122;122",
+  cyan: "38;2;115;167;198",
+  yellow: "38;2;231;162;90",
+  green: "38;2;122;184;130",
+  red: "38;2;213;108;108",
+  panelTitleActive: "1;38;2;245;177;110",
+  panelTitleInactive: "38;2;151;151;151",
+  rule: "38;2;58;58;58",
+  accentDot: "38;2;243;138;68",
 } as const;
 
 function paint(text: string, colorCode?: string): string {
@@ -4255,11 +4259,14 @@ function boxLines(
   const innerWidth = safeWidth - 2;
   const bodyHeight = Math.max(1, height - 2);
   const borderColor = active ? TUI_COLORS.activeBorder : TUI_COLORS.inactiveBorder;
+  const titleColor = active ? TUI_COLORS.panelTitleActive : TUI_COLORS.panelTitleInactive;
 
-  const cleanTitle = clipPlain(title, Math.max(1, innerWidth - 3));
-  const topPadding = Math.max(0, innerWidth - (visibleLength(cleanTitle) + 2));
-  const top = paint(`+ ${cleanTitle} ${"-".repeat(topPadding)}+`, borderColor);
-  const bottom = paint(`+${"-".repeat(innerWidth)}+`, borderColor);
+  const cleanTitle = clipPlain(title, Math.max(1, innerWidth - 2));
+  const titleLabel = ` ${cleanTitle} `;
+  const topPadding = Math.max(0, innerWidth - visibleLength(titleLabel));
+  const top =
+    `${paint("┌", borderColor)}${paint(titleLabel, titleColor)}${paint("─".repeat(topPadding), borderColor)}${paint("┐", borderColor)}`;
+  const bottom = `${paint("└", borderColor)}${paint("─".repeat(innerWidth), borderColor)}${paint("┘", borderColor)}`;
 
   const body: string[] = [];
   for (let i = 0; i < bodyHeight; i += 1) {
@@ -4272,7 +4279,7 @@ function boxLines(
     } else if (line.color) {
       rendered = paint(rendered, line.color);
     }
-    body.push(`${paint("|", borderColor)}${rendered}${paint("|", borderColor)}`);
+    body.push(`${paint("│", borderColor)}${rendered}${paint("│", borderColor)}`);
   }
 
   return [top, ...body, bottom];
@@ -4411,15 +4418,15 @@ function providerFromEventSource(source: string | null | undefined): AgentProvid
 
 function providerTag(provider: AgentProviderId | null | undefined): string {
   if (provider === "codex") {
-    return "[Codex]";
+    return "codex";
   }
   if (provider === "claude-code") {
-    return "[Claude]";
+    return "claude";
   }
   if (provider === "gemini-cli") {
-    return "[Gemini]";
+    return "gemini";
   }
-  return "[unknown]";
+  return "unknown";
 }
 
 function providerRowSummary(providers: AgentProviderId[] | null | undefined): string {
@@ -5356,7 +5363,7 @@ function diffLineColor(line: string): string | undefined {
     return TUI_COLORS.cyan;
   }
   if (line.startsWith("FILE ") || line.startsWith("index ")) {
-    return TUI_COLORS.muted;
+    return TUI_COLORS.panelTitleInactive;
   }
   if (line.startsWith("+")) {
     return TUI_COLORS.green;
@@ -5364,8 +5371,10 @@ function diffLineColor(line: string): string | undefined {
   if (line.startsWith("-")) {
     return TUI_COLORS.red;
   }
+  if (line.startsWith("@@")) {
+    return TUI_COLORS.yellow;
+  }
   if (
-    line.startsWith("@@") ||
     line.startsWith("---") ||
     line.startsWith("+++") ||
     line.startsWith("diff --git ")
@@ -5591,6 +5600,10 @@ function headerLine(left: string, right: string, width: number): string {
   return `${left}${" ".repeat(gap)}${right}`;
 }
 
+function horizontalRule(width: number): string {
+  return paint("─".repeat(Math.max(1, width)), TUI_COLORS.rule);
+}
+
 function buildFullDiffOverlayData(
   state: TuiState,
   selectedSession: SessionBrowseRow,
@@ -5659,11 +5672,17 @@ function renderBrowseView(
   width: number,
   height: number,
 ): string {
-  const leftHeader = `${paint("codaph", TUI_COLORS.brand)}  >  ${projectLabel}`;
-  const syncBits = `AutoSync:${state.autoSyncEnabled ? "on" : "off"}  Cloud:${state.autoSyncCloudStatus}${state.autoSyncPending ? "*" : ""}  Push:${formatTimeAgo(state.lastLocalSyncAt) ?? "never"}  Pull:${state.autoSyncLastPullAgo ?? "never"}`;
-  const rightHeader = `${paint(mubitEnabled ? "Mubit:on" : "Mubit:off", mubitEnabled ? TUI_COLORS.cyan : TUI_COLORS.yellow)}   ${paint(syncBits, TUI_COLORS.dim)}`;
-  const fallbackRightHeader = `${paint(mubitEnabled ? "Mubit:on" : "Mubit:off", mubitEnabled ? TUI_COLORS.cyan : TUI_COLORS.yellow)}   ${paint("[o] settings  [?] help", TUI_COLORS.dim)}`;
+  const mubitTone = mubitEnabled ? TUI_COLORS.green : TUI_COLORS.yellow;
+  const leftHeader =
+    `${paint("●", TUI_COLORS.accentDot)} ${paint("codaph", TUI_COLORS.brand)} ${paint("::", TUI_COLORS.muted)} ${paint(projectLabel, TUI_COLORS.panelTitleInactive)}`;
+  const syncBits =
+    `autosync:${state.autoSyncEnabled ? "on" : "off"} · cloud:${state.autoSyncCloudStatus}${state.autoSyncPending ? "*" : ""} · push:${formatTimeAgo(state.lastLocalSyncAt) ?? "never"} · pull:${state.autoSyncLastPullAgo ?? "never"}`;
+  const rightHeader =
+    `${paint("mubit", TUI_COLORS.muted)}:${paint(mubitEnabled ? "on" : "off", mubitTone)}  ${paint(syncBits, TUI_COLORS.dim)}`;
+  const fallbackRightHeader =
+    `${paint("mubit", TUI_COLORS.muted)}:${paint(mubitEnabled ? "on" : "off", mubitTone)}  ${paint("[o] settings  [?] help", TUI_COLORS.dim)}`;
   const header = headerLine(leftHeader, visibleLength(rightHeader) < Math.floor(width * 0.7) ? rightHeader : fallbackRightHeader, width);
+  const headerRule = horizontalRule(width);
 
   const tableHeight = Math.max(10, height - 6);
   const bodyRows = Math.max(3, tableHeight - 4);
@@ -5672,8 +5691,8 @@ function renderBrowseView(
   const groupingLabel = state.browseGrouping === "day" ? "day" : "session";
 
   const sessionLines: PaneLine[] = [
-    { text: "  #   Date              Prompts   Files Changed   Tokens   Agent        Status", color: TUI_COLORS.muted },
-    { text: " --------------------------------------------------------------------------------", color: TUI_COLORS.muted },
+    { text: "  #  Timestamp         Pmts  Files  Tokens  Agent        State", color: TUI_COLORS.panelTitleInactive },
+    { text: "  ───────────────────────────────────────────────────────────────", color: TUI_COLORS.rule },
   ];
 
   if (rows.length === 0) {
@@ -5682,7 +5701,7 @@ function renderBrowseView(
     for (let i = 0; i < rows.length; i += 1) {
       const absoluteIndex = start + i;
       const row = rows[i] as SessionBrowseRow;
-      const marker = absoluteIndex === state.selectedSessionIndex ? ">" : " ";
+      const marker = absoluteIndex === state.selectedSessionIndex ? "▸" : " ";
       const idx = String(absoluteIndex + 1).padStart(2, " ");
       const dateText =
         row.kind === "day"
@@ -5697,19 +5716,20 @@ function renderBrowseView(
         row.kind === "day"
           ? ` (${row.memberSessionCount ?? row.memberSessionIds?.length ?? 0}s)`
           : "";
-      const statusText = (row.status === "synced" ? "ok synced" : "! no files") + sessionCountSuffix;
+      const statusText = `${row.status === "synced" ? "● synced" : "○ no-files"}${sessionCountSuffix}`;
 
       sessionLines.push({
-        text: `${marker} ${idx}  ${dateCell}    ${prompts}         ${files}         ${tokens}  ${agentCell} ${statusText}`,
+        text: `${marker} ${idx}  ${dateCell}  ${prompts}   ${files}   ${tokens}  ${agentCell}  ${statusText}`,
         color: row.status === "no_files" ? TUI_COLORS.yellow : undefined,
         highlight: absoluteIndex === state.selectedSessionIndex,
       });
     }
   }
 
-  const sessionsBox = boxLines(`Sessions (group:${groupingLabel})`, width, tableHeight, sessionLines, true);
-  const footer = "[up/down] navigate   [enter] inspect   [g] group   [s] sync now   [r] pull cloud   [p] next project   [P] projects   [a] add project   [o] settings   [q] quit";
-  return [header, "", ...sessionsBox, "", paint(clipPlain(footer, width), TUI_COLORS.dim)].join("\n");
+  const sessionsBox = boxLines(`Sessions  group:${groupingLabel}`, width, tableHeight, sessionLines, true);
+  const footer =
+    "[↑/↓] sessions  [enter] inspect  [g] group  [s] sync  [r] pull  [p] next project  [P] projects  [a] add  [o] settings  [q] quit";
+  return [header, headerRule, ...sessionsBox, "", paint(clipPlain(footer, width), TUI_COLORS.dim)].join("\n");
 }
 
 function renderDiffOverlay(
@@ -5733,10 +5753,11 @@ function renderDiffOverlay(
   }));
 
   const top = headerLine(
-    `${paint("codaph", TUI_COLORS.brand)}  >  ${projectLabel}  >  Full Diff`,
+    `${paint("●", TUI_COLORS.accentDot)} ${paint("codaph", TUI_COLORS.brand)} ${paint("::", TUI_COLORS.muted)} ${paint(projectLabel, TUI_COLORS.panelTitleInactive)} ${paint("::", TUI_COLORS.muted)} ${paint("full diff", TUI_COLORS.panelTitleInactive)}`,
     paint("[d/esc] close", TUI_COLORS.dim),
     width,
   );
+  const topRule = horizontalRule(width);
   const box = boxLines(
     fullDiff.title,
     width,
@@ -5746,7 +5767,7 @@ function renderDiffOverlay(
   );
   return [
     top,
-    "",
+    topRule,
     ...box,
     "",
     paint(`[up/down] scroll (${scroll}/${maxScroll})`, TUI_COLORS.dim),
@@ -5776,14 +5797,16 @@ function renderInspectView(
   const baseHeight = Math.max(14, height - 4 - (state.chatOpen ? chatHeight + 1 : 0));
 
   const inspectRightText = clipPlain(
-    `AutoSync:${state.autoSyncEnabled ? "on" : "off"} Cloud:${state.autoSyncCloudStatus}${state.autoSyncPending ? "*" : ""} Push:${formatTimeAgo(state.lastLocalSyncAt) ?? "never"} Pull:${state.autoSyncLastPullAgo ?? "never"}  [f] actor:${state.actorFilter ?? "all"}  [c] contributors  [esc] back  [?] help`,
+    `autosync:${state.autoSyncEnabled ? "on" : "off"} · cloud:${state.autoSyncCloudStatus}${state.autoSyncPending ? "*" : ""} · push:${formatTimeAgo(state.lastLocalSyncAt) ?? "never"} · pull:${state.autoSyncLastPullAgo ?? "never"} · [f] actor:${state.actorFilter ?? "all"} · [c] contributors · [esc] back · [?] help`,
     Math.max(18, Math.floor(width * 0.58)),
   );
+  const mubitTone = mubitEnabled ? TUI_COLORS.green : TUI_COLORS.yellow;
   const topHeader = headerLine(
-    `${paint("codaph", TUI_COLORS.brand)}  >  ${projectLabel}  >  ${browseRowTitle(selectedSession)}`,
-    `${paint(mubitEnabled ? "Mubit:on" : "Mubit:off", mubitEnabled ? TUI_COLORS.cyan : TUI_COLORS.yellow)}   ${paint(inspectRightText, TUI_COLORS.dim)}`,
+    `${paint("●", TUI_COLORS.accentDot)} ${paint("codaph", TUI_COLORS.brand)} ${paint("::", TUI_COLORS.muted)} ${paint(projectLabel, TUI_COLORS.panelTitleInactive)} ${paint("::", TUI_COLORS.muted)} ${paint(browseRowTitle(selectedSession), TUI_COLORS.panelTitleInactive)}`,
+    `${paint("mubit", TUI_COLORS.muted)}:${paint(mubitEnabled ? "on" : "off", mubitTone)}  ${paint(inspectRightText, TUI_COLORS.dim)}`,
     width,
   );
+  const topRule = horizontalRule(width);
 
   if (threePaneMode && state.inspectPane === "files") {
     state.inspectPane = "thoughts";
@@ -5805,7 +5828,7 @@ function renderInspectView(
       const actorBadge = actorLabel(row.actorId);
       const providerBadge = providerTag(row.provider);
       lines.push({
-        text: `${absoluteIndex === state.selectedPromptIndex ? ">" : " "} ${row.id.toString().padStart(2, " ")}  [${actorBadge}] ${providerBadge} ${promptPreview(row.prompt, Math.max(10, paneWidth - 28))}`,
+        text: `${absoluteIndex === state.selectedPromptIndex ? "▸" : " "} ${row.id.toString().padStart(2, " ")}  [${actorBadge}] ${providerBadge} ${promptPreview(row.prompt, Math.max(10, paneWidth - 28))}`,
         highlight: absoluteIndex === state.selectedPromptIndex,
       });
     }
@@ -5823,7 +5846,7 @@ function renderInspectView(
       const actorBadge = actorLabel(row.actorId);
       const providerBadge = providerTag(row.provider);
       lines.push({
-        text: `${absoluteIndex === state.selectedThoughtIndex ? ">" : " "} ${row.id.toString().padStart(2, " ")}  [${actorBadge}] ${providerBadge} ${promptPreview(row.text, Math.max(10, paneWidth - 28))}`,
+        text: `${absoluteIndex === state.selectedThoughtIndex ? "▸" : " "} ${row.id.toString().padStart(2, " ")}  [${actorBadge}] ${providerBadge} ${promptPreview(row.text, Math.max(10, paneWidth - 28))}`,
         highlight: absoluteIndex === state.selectedThoughtIndex,
       });
     }
@@ -5871,7 +5894,7 @@ function renderInspectView(
     return scrolled.lines;
   };
 
-  const composed: string[] = [topHeader, ""];
+  const composed: string[] = [topHeader, topRule];
   if (threePaneMode) {
     const minPane = 22;
     const innerWidth = width - 4;
@@ -6030,10 +6053,10 @@ function renderInspectView(
   }
 
   const footer = state.chatOpen
-    ? "[tab/left/right] focus pane   [esc] close chat   [up/down] navigate/scroll"
+    ? "[tab/←/→] focus pane   [esc] close chat   [↑/↓] navigate/scroll"
     : threePaneMode
-      ? "[enter] prompt -> thoughts   [up/down] select/scroll   [tab/left/right] focus pane   [d] full diff   [m] Mubit chat   [f] actor filter   [c] contributors   [o] settings   [esc] back"
-      : "[up/down] prompts/scroll pane   [tab/left/right] focus pane   [d] full diff   [m] Mubit chat   [f] actor filter   [c] contributors   [o] settings   [esc] back";
+      ? "[enter] prompt -> thoughts   [↑/↓] select/scroll   [tab/←/→] focus pane   [d] full diff   [m] Mubit chat   [f] actor filter   [c] contributors   [o] settings   [esc] back"
+      : "[↑/↓] prompts/scroll pane   [tab/←/→] focus pane   [d] full diff   [m] Mubit chat   [f] actor filter   [c] contributors   [o] settings   [esc] back";
 
   composed.push("");
   composed.push(paint(clipPlain(footer, width), TUI_COLORS.dim));
@@ -6051,7 +6074,7 @@ function renderHelpOverlay(width: number, height: number): string {
     { text: "a       add/switch project path" },
     { text: "" },
     { text: "Browse", color: TUI_COLORS.muted },
-    { text: "up/down navigate sessions" },
+    { text: "up/down (or arrows) navigate sessions" },
     { text: "enter   open session inspect view" },
     { text: "g       toggle browse grouping (session/day)" },
     { text: "s       sync now (local->cloud, then cloud->local when available)" },
@@ -6059,7 +6082,7 @@ function renderHelpOverlay(width: number, height: number): string {
     { text: "" },
     { text: "Inspect", color: TUI_COLORS.muted },
     { text: "enter   from prompts -> focus thoughts" },
-    { text: "up/down navigate prompts/thoughts or scroll pane" },
+    { text: "up/down (or arrows) navigate prompts/thoughts or scroll pane" },
     { text: "tab     cycle pane focus" },
     { text: "d       toggle full diff overlay" },
     { text: "m       toggle Mubit chat" },
@@ -6104,7 +6127,7 @@ function renderProjectManagerOverlay(state: TuiState, width: number, height: num
   if (projects.length === 0) {
     lines.push({ text: "No saved projects in registry. Press [a] to add one.", color: TUI_COLORS.muted });
   } else {
-    lines.push({ text: "Legend: > selected   * current project", color: TUI_COLORS.muted });
+    lines.push({ text: "Legend: ▸ selected   * current project", color: TUI_COLORS.muted });
     if (state.projectManagerRemoveTargetPath) {
       lines.push({
         text: `Pending remove: ${shortenPath(state.projectManagerRemoveTargetPath, Math.max(24, overlayWidth - 22))}`,
@@ -6119,7 +6142,7 @@ function renderProjectManagerOverlay(state: TuiState, width: number, height: num
 
     for (let i = start; i < end; i += 1) {
       const project = projects[i] as string;
-      const marker = i === selected ? ">" : " ";
+      const marker = i === selected ? "▸" : " ";
       const current = resolve(project) === resolve(state.projectPath) ? "*" : " ";
       const prefix = `${marker}${current} `;
       const maxPathWidth = Math.max(8, overlayWidth - 2 - visibleLength(prefix));
@@ -6135,7 +6158,7 @@ function renderProjectManagerOverlay(state: TuiState, width: number, height: num
   const topPad = Math.max(0, Math.floor((height - overlayHeight) / 2) - 1);
   const footer = state.projectManagerRemoveTargetPath
     ? "Remove selected project? [1] registry only  [2] +settings  [esc] cancel"
-    : "[up/down] select  [enter] switch  [x] remove  [a] add  [esc/P] close";
+    : "[↑/↓] select  [enter] switch  [x] remove  [a] add  [esc/P] close";
 
   return [
     ...Array.from({ length: topPad }, () => ""),
@@ -6221,7 +6244,7 @@ function renderProjectPickerOverlay(state: TuiState, width: number, height: numb
     const end = Math.min(state.projectPickerEntries.length, start + visibleRows);
     for (let i = start; i < end; i += 1) {
       const entry = state.projectPickerEntries[i] as ProjectPickerEntry;
-      const marker = i === state.selectedProjectPickerIndex ? ">" : " ";
+      const marker = i === state.selectedProjectPickerIndex ? "▸" : " ";
       const kind = entry.kind === "parent" ? "[..]" : entry.isGitRepo ? "[repo]" : "[dir]";
       const tracked = entry.tracked ? " [tracked]" : "";
       const maxLabel = Math.max(8, overlayWidth - 20);
@@ -6236,7 +6259,7 @@ function renderProjectPickerOverlay(state: TuiState, width: number, height: numb
   const leftPad = Math.max(0, Math.floor((width - overlayWidth) / 2));
   const topPad = Math.max(0, Math.floor((height - overlayHeight) / 2) - 1);
   const footer =
-    "[up/down] navigate  [enter] open/add repo  [right] open dir  [.] add current  [/] type path  [h] hidden  [esc/a] close";
+    "[↑/↓] navigate  [enter] open/add repo  [→] open dir  [.] add current  [/] type path  [h] hidden  [esc/a] close";
   return [
     ...Array.from({ length: topPad }, () => ""),
     ...box.map((line) => `${" ".repeat(leftPad)}${line}`),
@@ -6297,7 +6320,7 @@ function renderContributorOverlay(
   for (let i = 0; i < contributors.length; i += 1) {
     const contributor = contributors[i] as ContributorSlice;
     leftLines.push({
-      text: `${i === selected ? ">" : " "} ${contributor.actorId}  p:${contributor.promptCount}  t:${contributor.thoughtCount}  f:${contributor.fileCount}`,
+      text: `${i === selected ? "▸" : " "} ${contributor.actorId}  p:${contributor.promptCount}  t:${contributor.thoughtCount}  f:${contributor.fileCount}`,
       highlight: i === selected,
     });
   }
@@ -6350,7 +6373,7 @@ function renderContributorOverlay(
     ...Array.from({ length: topPad }, () => ""),
     ...joined.map((line) => `${" ".repeat(leftPad)}${line}`),
     "",
-    `${" ".repeat(leftPad)}${paint("[up/down] select contributor  [enter] filter prompts  [esc/c] close", TUI_COLORS.dim)}`,
+    `${" ".repeat(leftPad)}${paint("[↑/↓] select contributor  [enter] filter prompts  [esc/c] close", TUI_COLORS.dim)}`,
   ].join("\n");
 }
 
