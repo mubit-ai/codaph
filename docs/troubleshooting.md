@@ -225,13 +225,14 @@ Symptoms:
 What it means:
 
 - Codaph scanned local agent history/transcript locations
-- no session/transcript files matched the current repository path
+- no session/transcript files matched the current repository path (or linked Git worktree paths)
 
 What to do:
 
 - confirm you are in the correct repo root
-- confirm the agent sessions/transcripts you expect were created in this repo path
+- confirm the agent sessions/transcripts you expect were created in this repo path or linked worktree paths
 - run `codaph import --cwd /absolute/path/to/repo` if you are invoking from another directory
+- if you intentionally want only the current path, use `codaph import --no-worktrees`
 - try `codaph import --providers codex` (or `claude-code` / `gemini-cli`) to isolate one provider during debugging
 
 ## Mubit Query Returns Weak Results

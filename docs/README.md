@@ -41,7 +41,7 @@ Codaph has two sync paths on purpose:
 - `codaph sync` is the fast daily path.
   It focuses on Mubit-first synchronization and repo-local state.
 - `codaph import` is the historical backfill path.
-  It scans `~/.codex/sessions` and imports matching sessions for the current repo.
+  It scans `~/.codex/sessions` and imports matching sessions for the current repo path (and linked Git worktree paths by default).
 
 This split keeps daily sync fast and makes history replay explicit.
 

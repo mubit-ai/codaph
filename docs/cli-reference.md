@@ -131,7 +131,7 @@ Behavior:
 
 - scans `~/.codex/sessions`
 - also scans local Claude Code / Gemini CLI transcript locations when enabled
-- imports only sessions/transcripts that match the current repo path
+- imports sessions/transcripts that match the current repo path and linked Git worktree paths by default
 - writes to local `.codaph` mirror
 - writes to Mubit when enabled
 
@@ -147,6 +147,7 @@ Useful flags:
 - `--json`
 - `--local-only` (compat alias to disable Mubit writes)
 - `--providers <csv|all|auto>` choose which agent histories to backfill
+- `--no-worktrees` limit matching to the current path only (skip linked Git worktree paths)
 - `--mubit-write-timeout-ms <ms>`
 
 ## `codaph status`

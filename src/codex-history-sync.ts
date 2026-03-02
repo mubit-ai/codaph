@@ -1,9 +1,10 @@
 import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import type { Dirent } from "node:fs";
-import { dirname, join, resolve, sep } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { repoIdFromPath } from "./lib/core-types";
 import { IngestPipeline } from "./lib/ingest-pipeline";
+import { createProjectRootMatcher, normalizeProjectPath } from "./lib/project-roots";
 
 type PatchChangeKind = "add" | "delete" | "update";
 
@@ -24,6 +25,7 @@ interface CodexHistoryFileCursor {
   sequence: number;
   sessionId: string | null;
   cwd: string | null;
+  projectRootsKey?: string;
   updatedAt: string;
   sizeBytes?: number;
   mtimeMs?: number;
@@ -52,6 +54,7 @@ export interface CodexHistorySyncProgress {
 
 export interface SyncCodexHistoryOptions {
   projectPath: string;
+  projectPaths?: string[];
   pipeline: IngestPipeline;
   repoId?: string;
   actorId?: string | null;
@@ -62,21 +65,6 @@ export interface SyncCodexHistoryOptions {
 
 function getCodexSessionsRoot(): string {
   return join(homedir(), ".codex", "sessions");
-}
-
-function normalizeProjectPath(projectPath: string): string {
-  return resolve(projectPath);
-}
-
-function projectOwnsPath(projectPath: string, candidatePath: string): boolean {
-  const normalizedProject = normalizeProjectPath(projectPath);
-  const normalizedCandidate = normalizeProjectPath(candidatePath);
-
-  if (normalizedCandidate === normalizedProject) {
-    return true;
-  }
-
-  return normalizedCandidate.startsWith(`${normalizedProject}${sep}`);
 }
 
 function getHistorySyncStatePath(projectPath: string, mirrorRoot: string): string {
@@ -553,6 +541,7 @@ async function writeJson(path: string, data: unknown): Promise<void> {
 
 export async function syncCodexHistory(options: SyncCodexHistoryOptions): Promise<CodexHistorySyncSummary> {
   const normalizedProject = normalizeProjectPath(options.projectPath);
+  const projectRootMatcher = createProjectRootMatcher(normalizedProject, options.projectPaths);
   const repoId = options.repoId ?? repoIdFromPath(normalizedProject);
   const mirrorRoot = resolve(options.mirrorRoot ?? join(normalizedProject, ".codaph"));
   const actorId = options.actorId ?? null;
@@ -605,7 +594,11 @@ export async function syncCodexHistory(options: SyncCodexHistoryOptions): Promis
     }
 
     const existing = state.files[filePath];
-    if (existing?.cwd && !projectOwnsPath(normalizedProject, existing.cwd)) {
+    if (
+      existing?.cwd &&
+      !projectRootMatcher.ownsPath(existing.cwd) &&
+      existing.projectRootsKey === projectRootMatcher.projectRootsKey
+    ) {
       continue;
     }
 
@@ -613,6 +606,7 @@ export async function syncCodexHistory(options: SyncCodexHistoryOptions): Promis
       existing &&
       existing.sessionId &&
       existing.cwd &&
+      existing.projectRootsKey === projectRootMatcher.projectRootsKey &&
       typeof existing.sizeBytes === "number" &&
       typeof existing.mtimeMs === "number" &&
       existing.sizeBytes === fileInfo.size &&
@@ -667,6 +661,7 @@ export async function syncCodexHistory(options: SyncCodexHistoryOptions): Promis
         ...cursor,
         sessionId: sessionId ?? null,
         cwd: sessionCwd ?? null,
+        projectRootsKey: projectRootMatcher.projectRootsKey,
         updatedAt: new Date().toISOString(),
         sizeBytes: fileInfo.size,
         mtimeMs: fileInfo.mtimeMs,
@@ -680,11 +675,12 @@ export async function syncCodexHistory(options: SyncCodexHistoryOptions): Promis
     }
 
     const normalizedSessionCwd = normalizeProjectPath(sessionCwd);
-    if (!projectOwnsPath(normalizedProject, normalizedSessionCwd)) {
+    if (!projectRootMatcher.ownsPath(normalizedSessionCwd)) {
       state.files[filePath] = {
         ...cursor,
         sessionId,
         cwd: normalizedSessionCwd,
+        projectRootsKey: projectRootMatcher.projectRootsKey,
         lineCount: lines.length,
         updatedAt: new Date().toISOString(),
         sizeBytes: fileInfo.size,
@@ -772,6 +768,7 @@ export async function syncCodexHistory(options: SyncCodexHistoryOptions): Promis
       sequence,
       sessionId,
       cwd: normalizedSessionCwd,
+      projectRootsKey: projectRootMatcher.projectRootsKey,
       updatedAt: new Date().toISOString(),
       sizeBytes: fileInfo.size,
       mtimeMs: fileInfo.mtimeMs,

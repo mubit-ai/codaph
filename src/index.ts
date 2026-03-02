@@ -15,6 +15,7 @@ import { IngestPipeline } from "./lib/ingest-pipeline";
 import { CodexSdkAdapter } from "./lib/adapter-codex-sdk";
 import { CodexExecAdapter } from "./lib/adapter-codex-exec";
 import { QueryService } from "./lib/query-service";
+import { resolveScopedProjectPathsForWorktrees } from "./lib/git-worktrees";
 import {
   MubitMemoryEngine,
   mubitDiffRunIdForProject,
@@ -365,9 +366,9 @@ function help(): string {
     "  codaph tui [--cwd <path>]",
     "",
     "Push / Backfill:",
-    "  codaph push [--cwd <path>] [--json] [--local-only] [--providers <csv|all|auto>]",
+    "  codaph push [--cwd <path>] [--json] [--local-only] [--providers <csv|all|auto>] [--no-worktrees]",
     "    Local agent history (Codex / Claude Code / Gemini CLI) -> Codaph + Mubit (incremental backfill).",
-    "  codaph import [--cwd <path>] [--json] [--local-only] [--providers <csv|all|auto>]   (compat alias for `codaph push`)",
+    "  codaph import [--cwd <path>] [--json] [--local-only] [--providers <csv|all|auto>] [--no-worktrees]   (compat alias for `codaph push`)",
     "  codaph repair cloud [--cwd <path>] [--session <id>] [--json]",
     "    Repair missing cloud sync by replaying local `.codaph` mirror to Mubit, then republishing shared session/diff artifacts.",
     "",
@@ -1380,6 +1381,7 @@ async function runSyncPushPhase(options: {
 }): Promise<SyncPushPhaseResult> {
   const { cwd, flags, settings, onProgress } = options;
   const localOnly = getBooleanFlag(flags, "local-only", false);
+  const useWorktrees = getBooleanFlag(flags, "worktrees", true);
   const legacySyncMubit = getBooleanFlag(flags, "sync-mubit", false);
   const syncFlags: Flags = { ...flags };
   if (legacySyncMubit) {
@@ -1392,6 +1394,7 @@ async function runSyncPushPhase(options: {
   const repoId = resolveRepoIdForProject(syncFlags, cwd, settings);
   const actorId = resolveMubitActorId(syncFlags, cwd, settings);
   const selectedProviders = await resolveSelectedProvidersForProject(cwd, syncFlags, settings, { fallbackToCodex: true });
+  const projectPaths = useWorktrees ? resolveScopedProjectPathsForWorktrees(cwd) : [resolve(cwd)];
   const { pipeline, memory } = createPipeline(cwd, syncFlags, settings, { bulkSync: true });
   let summary: CodexHistorySyncSummary;
   const providerSummaries: ProviderImportSummaryMap = {};
@@ -1411,6 +1414,7 @@ async function runSyncPushPhase(options: {
         if (provider === "codex") {
           providerSummary = await syncCodexHistory({
             projectPath: cwd,
+            projectPaths,
             pipeline,
             repoId,
             actorId,
@@ -1419,6 +1423,7 @@ async function runSyncPushPhase(options: {
         } else if (provider === "claude-code") {
           providerSummary = await syncClaudeHistory({
             projectPath: cwd,
+            projectPaths,
             pipeline,
             repoId,
             actorId,
@@ -1427,6 +1432,7 @@ async function runSyncPushPhase(options: {
         } else {
           providerSummary = await syncGeminiHistory({
             projectPath: cwd,
+            projectPaths,
             pipeline,
             repoId,
             actorId,

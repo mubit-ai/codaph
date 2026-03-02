@@ -4,6 +4,7 @@ import { dirname, join, resolve, sep } from "node:path";
 import { homedir } from "node:os";
 import { repoIdFromPath } from "./lib/core-types";
 import { IngestPipeline } from "./lib/ingest-pipeline";
+import { createProjectRootMatcher, normalizeProjectPath } from "./lib/project-roots";
 
 type PatchChangeKind = "add" | "delete" | "update";
 
@@ -12,6 +13,7 @@ interface GeminiHistoryFileCursor {
   sequence: number;
   sessionId: string | null;
   cwd: string | null;
+  projectRootsKey?: string;
   updatedAt: string;
   sizeBytes?: number;
   mtimeMs?: number;
@@ -40,6 +42,7 @@ export interface GeminiHistorySyncProgress {
 
 export interface SyncGeminiHistoryOptions {
   projectPath: string;
+  projectPaths?: string[];
   pipeline: IngestPipeline;
   repoId?: string;
   actorId?: string | null;
@@ -69,19 +72,6 @@ function getGeminiHistoryRoot(): string {
 
 function getGeminiTmpRoot(): string {
   return join(homedir(), ".gemini", "tmp");
-}
-
-function normalizeProjectPath(projectPath: string): string {
-  return resolve(projectPath);
-}
-
-function projectOwnsPath(projectPath: string, candidatePath: string): boolean {
-  const normalizedProject = normalizeProjectPath(projectPath);
-  const normalizedCandidate = normalizeProjectPath(candidatePath);
-  if (normalizedCandidate === normalizedProject) {
-    return true;
-  }
-  return normalizedCandidate.startsWith(`${normalizedProject}${sep}`);
 }
 
 function getStatePath(projectPath: string, mirrorRoot: string): string {
@@ -469,6 +459,7 @@ async function readGeminiFileEntries(
 
 export async function syncGeminiHistory(options: SyncGeminiHistoryOptions): Promise<GeminiHistorySyncSummary> {
   const normalizedProject = normalizeProjectPath(options.projectPath);
+  const projectRootMatcher = createProjectRootMatcher(normalizedProject, options.projectPaths);
   const repoId = options.repoId ?? repoIdFromPath(normalizedProject);
   const mirrorRoot = resolve(options.mirrorRoot ?? join(normalizedProject, ".codaph"));
   const actorId = options.actorId ?? null;
@@ -483,7 +474,7 @@ export async function syncGeminiHistory(options: SyncGeminiHistoryOptions): Prom
   ]);
   const allProjectDirs = projectDirLists.flat();
   const matchingDirs = allProjectDirs.filter(
-    (entry) => entry.projectRoot && projectOwnsPath(normalizedProject, entry.projectRoot),
+    (entry) => entry.projectRoot && projectRootMatcher.ownsPath(entry.projectRoot),
   );
   const fileLists = await Promise.all(matchingDirs.map((entry) => listTranscriptFiles(entry.dirPath)));
   const files = fileLists.flat();
@@ -533,7 +524,15 @@ export async function syncGeminiHistory(options: SyncGeminiHistoryOptions): Prom
     }
     const existing = state.files[filePath];
     if (
+      existing?.cwd &&
+      !projectRootMatcher.ownsPath(existing.cwd) &&
+      existing.projectRootsKey === projectRootMatcher.projectRootsKey
+    ) {
+      continue;
+    }
+    if (
       existing &&
+      existing.projectRootsKey === projectRootMatcher.projectRootsKey &&
       typeof existing.sizeBytes === "number" &&
       typeof existing.mtimeMs === "number" &&
       existing.sizeBytes === fileInfo.size &&
@@ -595,6 +594,7 @@ export async function syncGeminiHistory(options: SyncGeminiHistoryOptions): Prom
         ...cursor,
         sessionId,
         cwd: null,
+        projectRootsKey: projectRootMatcher.projectRootsKey,
         entryCount: rawEntries.length,
         updatedAt: new Date().toISOString(),
         sizeBytes: fileInfo.size,
@@ -605,11 +605,12 @@ export async function syncGeminiHistory(options: SyncGeminiHistoryOptions): Prom
     }
 
     const normalizedSessionCwd = normalizeProjectPath(sessionCwd);
-    if (!projectOwnsPath(normalizedProject, normalizedSessionCwd)) {
+    if (!projectRootMatcher.ownsPath(normalizedSessionCwd)) {
       state.files[filePath] = {
         ...cursor,
         sessionId,
         cwd: normalizedSessionCwd,
+        projectRootsKey: projectRootMatcher.projectRootsKey,
         entryCount: rawEntries.length,
         updatedAt: new Date().toISOString(),
         sizeBytes: fileInfo.size,
@@ -690,6 +691,7 @@ export async function syncGeminiHistory(options: SyncGeminiHistoryOptions): Prom
       sequence,
       sessionId,
       cwd: normalizedSessionCwd,
+      projectRootsKey: projectRootMatcher.projectRootsKey,
       updatedAt: new Date().toISOString(),
       sizeBytes: fileInfo.size,
       mtimeMs: fileInfo.mtimeMs,

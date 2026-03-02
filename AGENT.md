@@ -1102,3 +1102,13 @@ Do not rewrite history; append a new snapshot each run.
 - unstaged: 0
 - untracked: 0
 - files: package.json
+
+## Status Snapshot — 2026-03-02T15:55:50.737Z
+- source: pre-commit
+- repo: /Users/anilp/Code/codaph
+- branch: core/tree
+- head: 779c347
+- staged: 13
+- unstaged: 0
+- untracked: 0
+- files: docs/README.md, docs/cli-reference.md, docs/troubleshooting.md, package.json, src/claude-history-sync.ts, src/codex-history-sync.ts, src/gemini-history-sync.ts, src/index.ts, src/lib/git-worktrees.ts, src/lib/project-roots.ts, test/history-worktrees.test.ts, test/lib-git-worktrees.test.ts, test/lib-project-roots.test.ts
