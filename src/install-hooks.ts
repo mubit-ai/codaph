@@ -1,6 +1,7 @@
 import { chmod, mkdir, writeFile } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
+import { resolveGitHooksDir } from "./lib/git-paths";
 
 function gitRoot(): string {
   return execFileSync("git", ["rev-parse", "--show-toplevel"], {
@@ -10,7 +11,7 @@ function gitRoot(): string {
 
 async function main(): Promise<void> {
   const root = gitRoot();
-  const hooksDir = join(root, ".git", "hooks");
+  const hooksDir = resolveGitHooksDir(root);
   const hookPath = join(hooksDir, "pre-commit");
 
   await mkdir(hooksDir, { recursive: true });

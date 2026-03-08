@@ -1112,3 +1112,13 @@ Do not rewrite history; append a new snapshot each run.
 - unstaged: 0
 - untracked: 0
 - files: docs/README.md, docs/cli-reference.md, docs/troubleshooting.md, package.json, src/claude-history-sync.ts, src/codex-history-sync.ts, src/gemini-history-sync.ts, src/index.ts, src/lib/git-worktrees.ts, src/lib/project-roots.ts, test/history-worktrees.test.ts, test/lib-git-worktrees.test.ts, test/lib-project-roots.test.ts
+
+## Status Snapshot — 2026-03-08T13:43:59.322Z
+- source: pre-commit
+- repo: /Users/anilp/Code/codaph
+- branch: core/tree
+- head: 12f69db
+- staged: 14
+- unstaged: 0
+- untracked: 0
+- files: src/artifact-publication-state.ts, src/claude-history-sync.ts, src/codex-history-sync.ts, src/gemini-history-sync.ts, src/index.ts, src/install-hooks.ts, src/lib/git-paths.ts, src/lib/mirror-jsonl.ts, src/mubit-remote-sync.ts, src/sync-automation.ts, test/history-worktrees.test.ts, test/lib-git-paths.test.ts, test/lib-mirror-jsonl.test.ts, test/lib-mubit-remote-sync.test.ts

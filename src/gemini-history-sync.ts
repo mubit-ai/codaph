@@ -532,6 +532,8 @@ export async function syncGeminiHistory(options: SyncGeminiHistoryOptions): Prom
     }
     if (
       existing &&
+      existing.sessionId &&
+      existing.cwd &&
       existing.projectRootsKey === projectRootMatcher.projectRootsKey &&
       typeof existing.sizeBytes === "number" &&
       typeof existing.mtimeMs === "number" &&
@@ -621,6 +623,14 @@ export async function syncGeminiHistory(options: SyncGeminiHistoryOptions): Prom
     }
 
     summary.matchedFiles += 1;
+
+    if (cursor.sequence === 0 && cursor.entryCount > 0) {
+      cursor = {
+        ...cursor,
+        entryCount: 0,
+      };
+    }
+
     let sequence = cursor.sequence;
     let importedForFile = 0;
     let threadStartedEmitted = sequence > 0;

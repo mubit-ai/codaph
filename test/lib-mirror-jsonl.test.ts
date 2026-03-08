@@ -78,4 +78,35 @@ describe("jsonl mirror", () => {
 
     await rm(root, { recursive: true, force: true });
   });
+
+  it("flushes batch indexes when a segment buffer crosses the size threshold", async () => {
+    const mirror = new JsonlMirror(root, {
+      indexWriteMode: "batch",
+      autoFlushEveryEvents: 0,
+    });
+    const event: CapturedEventEnvelope = {
+      eventId: "large-event",
+      source: "codex_sdk",
+      repoId: "repo-large",
+      actorId: "anil",
+      sessionId: "s-large",
+      threadId: "t-large",
+      ts: "2026-02-21T20:10:05Z",
+      eventType: "prompt.submitted",
+      payload: { prompt: "x".repeat(300_000) },
+      reasoningAvailability: "unavailable",
+    };
+
+    await mirror.appendEvent(event);
+
+    const manifest = await readManifest(root, "repo-large");
+    const eventIds = await readEventIdIndex(root, "repo-large");
+    const segment = Object.values(manifest.segments)[0];
+
+    expect(segment).toBeDefined();
+    expect(eventIds.events["large-event"]?.segment).toBe(segment?.relativePath);
+
+    const raw = await readFile(join(root, segment!.relativePath), "utf8");
+    expect(raw).toContain('"eventId":"large-event"');
+  });
 });

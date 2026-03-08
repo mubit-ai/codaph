@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile, appendFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, join, sep } from "node:path";
 import type { CapturedEventEnvelope, MirrorAppendResult, MirrorAppender } from "./core-types";
 
 export interface SegmentMeta {
@@ -130,26 +130,42 @@ export async function readEventsFromSegments(
   rootDir: string,
   segmentPaths: string[],
 ): Promise<CapturedEventEnvelope[]> {
-  const events: CapturedEventEnvelope[] = [];
-  for (const rel of segmentPaths) {
-    const abs = join(rootDir, rel);
-    let raw = "";
-    try {
-      raw = await readFile(abs, "utf8");
-    } catch {
-      continue;
-    }
+  const results: CapturedEventEnvelope[][] = Array.from({ length: segmentPaths.length }, () => []);
+  let nextIndex = 0;
+  const concurrency = Math.min(8, Math.max(1, segmentPaths.length));
 
-    const lines = raw.split("\n").filter(Boolean);
-    for (const line of lines) {
-      try {
-        events.push(JSON.parse(line) as CapturedEventEnvelope);
-      } catch {
-        // ignore bad line for now
+  const workers = Array.from({ length: concurrency }, async () => {
+    while (nextIndex < segmentPaths.length) {
+      const currentIndex = nextIndex;
+      nextIndex += 1;
+      const rel = segmentPaths[currentIndex];
+      if (!rel) {
+        continue;
       }
+
+      const abs = join(rootDir, rel);
+      let raw = "";
+      try {
+        raw = await readFile(abs, "utf8");
+      } catch {
+        continue;
+      }
+
+      const parsed: CapturedEventEnvelope[] = [];
+      const lines = raw.split("\n").filter(Boolean);
+      for (const line of lines) {
+        try {
+          parsed.push(JSON.parse(line) as CapturedEventEnvelope);
+        } catch {
+          // ignore bad line for now
+        }
+      }
+      results[currentIndex] = parsed;
     }
-  }
-  return events;
+  });
+
+  await Promise.all(workers);
+  return results.flat();
 }
 
 export class JsonlMirror implements MirrorAppender {
@@ -186,17 +202,26 @@ export class JsonlMirror implements MirrorAppender {
     bufferMap: Map<string, BufferedTextAppend>,
     absPath: string,
     text: string,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const entry = bufferMap.get(absPath) ?? { chunks: [], bytes: 0 };
     entry.chunks.push(text);
     entry.bytes += Buffer.byteLength(text, "utf8");
     bufferMap.set(absPath, entry);
 
-    if (entry.bytes >= this.bufferFlushBytes) {
-      await appendFile(absPath, entry.chunks.join(""), "utf8");
-      entry.chunks = [];
-      entry.bytes = 0;
+    return entry.bytes >= this.bufferFlushBytes;
+  }
+
+  private async flushBufferedPath(
+    bufferMap: Map<string, BufferedTextAppend>,
+    absPath: string,
+  ): Promise<void> {
+    const entry = bufferMap.get(absPath);
+    if (!entry || entry.chunks.length === 0) {
+      return;
     }
+    await appendFile(absPath, entry.chunks.join(""), "utf8");
+    entry.chunks = [];
+    entry.bytes = 0;
   }
 
   private async flushBufferedMap(bufferMap: Map<string, BufferedTextAppend>): Promise<void> {
@@ -248,6 +273,16 @@ export class JsonlMirror implements MirrorAppender {
     entry.dirtyEventCount = 0;
   }
 
+  private async flushRepo(repoId: string): Promise<void> {
+    const repoPrefix = `${join(this.rootDir, "events", repoId)}${sep}`;
+    for (const absPath of this.segmentBuffers.keys()) {
+      if (absPath.startsWith(repoPrefix)) {
+        await this.flushBufferedPath(this.segmentBuffers, absPath);
+      }
+    }
+    await this.flushRepoIndexCache(repoId);
+  }
+
   async flush(): Promise<void> {
     await this.flushBufferedMap(this.segmentBuffers);
     await this.flushBufferedMap(this.rawLineBuffers);
@@ -285,8 +320,9 @@ export class JsonlMirror implements MirrorAppender {
     }
 
     const line = JSON.stringify(event);
+    let shouldFlushRepo = false;
     if (this.indexWriteMode === "batch") {
-      await this.appendBuffered(this.segmentBuffers, abs, `${line}\n`);
+      shouldFlushRepo = await this.appendBuffered(this.segmentBuffers, abs, `${line}\n`);
     } else {
       await appendFile(abs, `${line}\n`, "utf8");
     }
@@ -394,9 +430,10 @@ export class JsonlMirror implements MirrorAppender {
     cache.dirtyEventCount += 1;
     if (
       this.indexWriteMode === "immediate" ||
+      shouldFlushRepo ||
       (this.autoFlushEveryEvents > 0 && cache.dirtyEventCount >= this.autoFlushEveryEvents)
     ) {
-      await this.flushRepoIndexCache(event.repoId);
+      await this.flushRepo(event.repoId);
     }
 
     return {
@@ -411,7 +448,10 @@ export class JsonlMirror implements MirrorAppender {
     const path = join(this.rootDir, "runs", sessionId, "raw-codex.ndjson");
     await this.ensureDir(dirname(path));
     if (this.indexWriteMode === "batch") {
-      await this.appendBuffered(this.rawLineBuffers, path, `${line}\n`);
+      const shouldFlush = await this.appendBuffered(this.rawLineBuffers, path, `${line}\n`);
+      if (shouldFlush) {
+        await this.flushBufferedPath(this.rawLineBuffers, path);
+      }
       return;
     }
     await appendFile(path, `${line}\n`, "utf8");

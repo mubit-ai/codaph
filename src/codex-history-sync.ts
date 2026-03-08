@@ -739,7 +739,7 @@ export async function syncCodexHistory(options: SyncCodexHistoryOptions): Promis
       for (const event of projected) {
         sequence += 1;
         await options.pipeline.ingest(event.eventType, event.payload, {
-          source: "codex_exec",
+          source: "codex_history",
           repoId,
           actorId,
           sessionId,

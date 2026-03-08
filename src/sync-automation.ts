@@ -2,6 +2,7 @@ import { open, readFile, writeFile, mkdir, appendFile, chmod, stat, rm } from "n
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { normalizeAgentProviderList, type AgentProviderId } from "./lib/agent-providers";
+import { resolveGitHooksDir } from "./lib/git-paths";
 import {
   readMubitRemoteSyncState,
   writeMubitRemoteSyncState,
@@ -330,7 +331,7 @@ export async function installGitPostCommitHook(
   repoRoot: string,
   commandLine: string | string[] = "codaph hooks run post-commit --quiet",
 ): Promise<{ ok: boolean; warning?: string }> {
-  const hookPath = join(repoRoot, ".git", "hooks", "post-commit");
+  const hookPath = join(resolveGitHooksDir(repoRoot), "post-commit");
   const result = await upsertManagedShellHook(hookPath, commandLine, { background: true });
   if (!result.updated) {
     return { ok: false, warning: result.reason ?? "unable to update post-commit hook" };
@@ -342,7 +343,7 @@ export async function installGitPostPushHook(
   repoRoot: string,
   commandLine: string | string[] = "codaph hooks run post-push --quiet",
 ): Promise<{ ok: boolean; warning?: string }> {
-  const hookPath = join(repoRoot, ".git", "hooks", "post-push");
+  const hookPath = join(resolveGitHooksDir(repoRoot), "post-push");
   const result = await upsertManagedShellHook(hookPath, commandLine, { background: true });
   if (!result.updated) {
     return { ok: false, warning: result.reason ?? "unable to update post-push hook" };

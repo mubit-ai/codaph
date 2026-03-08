@@ -48,6 +48,12 @@ import {
   type LocalPushState,
   type LocalPushProviderStats,
 } from "./local-push-state";
+import {
+  getArtifactPublicationStatePath,
+  readArtifactPublicationState,
+  shouldRepublishSessionArtifacts,
+  writeArtifactPublicationState,
+} from "./artifact-publication-state";
 import { syncMubitRemoteActivity, type MubitRemoteSyncSummary } from "./mubit-remote-sync";
 import { getMubitRemoteSyncStatePath, readMubitRemoteSyncState } from "./mubit-remote-sync-state";
 import {
@@ -4518,6 +4524,18 @@ function providerTag(provider: AgentProviderId | null | undefined): string {
   return "unknown";
 }
 
+function inspectActorProviderBadges(
+  actorId: string | null | undefined,
+  provider: AgentProviderId | null | undefined,
+): string {
+  const badges = [`[${actorLabel(actorId)}]`];
+  const providerBadge = providerTag(provider);
+  if (providerBadge !== "unknown") {
+    badges.push(`[${providerBadge}]`);
+  }
+  return badges.join(" ");
+}
+
 function providerRowSummary(providers: AgentProviderId[] | null | undefined): string {
   const list = normalizeAgentProviderList(providers ?? []);
   if (list.length === 0) {
@@ -5329,25 +5347,57 @@ async function publishSharedSessionArtifacts(
     return { sessionsPublished: 0, artifactEvents: 0 };
   }
 
+  const mirrorRoot = resolve(cwd, ".codaph");
+  const statePath = getArtifactPublicationStatePath(mirrorRoot, repoId);
+  const publicationState = await readArtifactPublicationState(statePath);
+  const forceSessionId = options.sessionId ?? null;
+  const sessionsToPublish = forceSessionId
+    ? sessions
+    : sessions.filter((session) =>
+        shouldRepublishSessionArtifacts(publicationState, {
+          sessionId: session.sessionId,
+          to: session.to,
+          eventCount: session.eventCount,
+        })
+      );
+  if (sessionsToPublish.length === 0) {
+    return { sessionsPublished: 0, artifactEvents: 0 };
+  }
+
   const artifactEvents: CapturedEventEnvelope[] = [];
+  const artifactEventCountBySession = new Map<string, number>();
   let sessionsPublished = 0;
-  for (const session of sessions) {
+  const publishedSessions: QuerySessionSummary[] = [];
+  for (const session of sessionsToPublish) {
     const events = await query.getTimeline({ repoId, sessionId: session.sessionId });
     if (events.length === 0) {
       continue;
     }
     sessionsPublished += 1;
+    publishedSessions.push(session);
     const analysis = buildSessionAnalysis(session.sessionId, events);
-    artifactEvents.push(buildSyntheticSessionSummaryEvent(repoId, actorId, session, analysis));
+    const sessionArtifacts = [buildSyntheticSessionSummaryEvent(repoId, actorId, session, analysis)];
     for (const prompt of analysis.prompts) {
-      artifactEvents.push(...buildSyntheticPromptDiffPartEvents(repoId, actorId, session.sessionId, prompt));
+      sessionArtifacts.push(...buildSyntheticPromptDiffPartEvents(repoId, actorId, session.sessionId, prompt));
     }
+    artifactEvents.push(...sessionArtifacts);
+    artifactEventCountBySession.set(session.sessionId, sessionArtifacts.length);
   }
 
   if (artifactEvents.length === 0) {
     return { sessionsPublished: 0, artifactEvents: 0 };
   }
   await memory.writeEventsBatch(artifactEvents);
+  const publishedAt = new Date().toISOString();
+  for (const session of publishedSessions) {
+    publicationState.sessions[session.sessionId] = {
+      to: session.to,
+      eventCount: session.eventCount,
+      artifactEventCount: artifactEventCountBySession.get(session.sessionId) ?? 0,
+      publishedAt,
+    };
+  }
+  await writeArtifactPublicationState(statePath, publicationState);
   return { sessionsPublished, artifactEvents: artifactEvents.length };
 }
 
@@ -5918,10 +5968,10 @@ function renderInspectView(
     for (let i = 0; i < visibleIndices.length; i += 1) {
       const absoluteIndex = visibleIndices[i] as number;
       const row = analysis.prompts[absoluteIndex] as PromptSlice;
-      const actorBadge = actorLabel(row.actorId);
-      const providerBadge = providerTag(row.provider);
+      const metadataBadges = inspectActorProviderBadges(row.actorId, row.provider);
+      const rowPrefix = `${absoluteIndex === state.selectedPromptIndex ? "▸" : " "} ${row.id.toString().padStart(2, " ")}  ${metadataBadges} `;
       lines.push({
-        text: `${absoluteIndex === state.selectedPromptIndex ? "▸" : " "} ${row.id.toString().padStart(2, " ")}  [${actorBadge}] ${providerBadge} ${promptPreview(row.prompt, Math.max(10, paneWidth - 28))}`,
+        text: `${rowPrefix}${promptPreview(row.prompt, Math.max(10, paneWidth - rowPrefix.length))}`,
         highlight: absoluteIndex === state.selectedPromptIndex,
       });
     }
@@ -5936,10 +5986,10 @@ function renderInspectView(
     for (let i = 0; i < visibleThoughts.length; i += 1) {
       const absoluteIndex = thoughtStart + i;
       const row = visibleThoughts[i] as ThoughtSlice;
-      const actorBadge = actorLabel(row.actorId);
-      const providerBadge = providerTag(row.provider);
+      const metadataBadges = inspectActorProviderBadges(row.actorId, row.provider);
+      const rowPrefix = `${absoluteIndex === state.selectedThoughtIndex ? "▸" : " "} ${row.id.toString().padStart(2, " ")}  ${metadataBadges} `;
       lines.push({
-        text: `${absoluteIndex === state.selectedThoughtIndex ? "▸" : " "} ${row.id.toString().padStart(2, " ")}  [${actorBadge}] ${providerBadge} ${promptPreview(row.text, Math.max(10, paneWidth - 28))}`,
+        text: `${rowPrefix}${promptPreview(row.text, Math.max(10, paneWidth - rowPrefix.length))}`,
         highlight: absoluteIndex === state.selectedThoughtIndex,
       });
     }

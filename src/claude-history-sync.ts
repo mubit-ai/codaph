@@ -567,6 +567,8 @@ export async function syncClaudeHistory(options: SyncClaudeHistoryOptions): Prom
     }
     if (
       existing &&
+      existing.sessionId &&
+      existing.cwd &&
       existing.projectRootsKey === projectRootMatcher.projectRootsKey &&
       typeof existing.sizeBytes === "number" &&
       typeof existing.mtimeMs === "number" &&
@@ -653,6 +655,13 @@ export async function syncClaudeHistory(options: SyncClaudeHistoryOptions): Prom
     }
 
     summary.matchedFiles += 1;
+
+    if (cursor.sequence === 0 && cursor.lineCount > 0) {
+      cursor = {
+        ...cursor,
+        lineCount: 0,
+      };
+    }
 
     let sequence = cursor.sequence;
     let importedForFile = 0;

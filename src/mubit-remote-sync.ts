@@ -216,7 +216,7 @@ function parseTimelineEntry(
     asString(activityRecord.input_ref) ??
     asString(rawTimeline.id) ??
     "remote-session";
-  const threadId = asString(nested.threadId) ?? sessionId;
+  const threadId = asString(nested.threadId);
   const tsCandidate =
     asString(nested.ts) ??
     asString(activityRecord.ts) ??
@@ -328,52 +328,85 @@ export async function syncMubitRemoteActivity(options: MubitRemoteSyncOptions): 
 
   timeline = Array.isArray(snapshot.timeline) ? snapshot.timeline : [];
 
+  const optionalSnapshots = await Promise.all([
+    (async () => {
+      if (!options.promptRunId || options.promptRunId === options.runId) {
+        return { kind: "prompt" as const, timeline: [] as unknown[], fingerprint: null as string | null };
+      }
+      try {
+        const promptSnapshot = await options.memory.fetchContextSnapshot({
+          runId: options.promptRunId,
+          timelineLimit: requestedTimelineLimit,
+          refresh,
+        });
+        const nextTimeline = Array.isArray(promptSnapshot.timeline) ? promptSnapshot.timeline : [];
+        return {
+          kind: "prompt" as const,
+          timeline: nextTimeline,
+          fingerprint: summarizeTimelineFingerprint(nextTimeline),
+        };
+      } catch {
+        return { kind: "prompt" as const, timeline: [] as unknown[], fingerprint: null as string | null };
+      }
+    })(),
+    (async () => {
+      if (!options.sessionSummaryRunId || options.sessionSummaryRunId === options.runId) {
+        return { kind: "session" as const, timeline: [] as unknown[], fingerprint: null as string | null };
+      }
+      try {
+        const summarySnapshot = await options.memory.fetchContextSnapshot({
+          runId: options.sessionSummaryRunId,
+          timelineLimit: requestedTimelineLimit,
+          refresh,
+        });
+        const nextTimeline = Array.isArray(summarySnapshot.timeline) ? summarySnapshot.timeline : [];
+        return {
+          kind: "session" as const,
+          timeline: nextTimeline,
+          fingerprint: summarizeTimelineFingerprint(nextTimeline),
+        };
+      } catch {
+        return { kind: "session" as const, timeline: [] as unknown[], fingerprint: null as string | null };
+      }
+    })(),
+    (async () => {
+      if (!options.diffRunId || options.diffRunId === options.runId) {
+        return { kind: "diff" as const, timeline: [] as unknown[], fingerprint: null as string | null };
+      }
+      try {
+        const diffSnapshot = await options.memory.fetchContextSnapshot({
+          runId: options.diffRunId,
+          timelineLimit: requestedTimelineLimit,
+          refresh,
+        });
+        const nextTimeline = Array.isArray(diffSnapshot.timeline) ? diffSnapshot.timeline : [];
+        return {
+          kind: "diff" as const,
+          timeline: nextTimeline,
+          fingerprint: summarizeTimelineFingerprint(nextTimeline),
+        };
+      } catch {
+        return { kind: "diff" as const, timeline: [] as unknown[], fingerprint: null as string | null };
+      }
+    })(),
+  ]);
+
   let promptSnapshotFingerprint: string | null = null;
-  if (options.promptRunId && options.promptRunId !== options.runId) {
-    try {
-      const promptSnapshot = await options.memory.fetchContextSnapshot({
-        runId: options.promptRunId,
-        timelineLimit: requestedTimelineLimit,
-        refresh,
-      });
-      promptTimeline = Array.isArray(promptSnapshot.timeline) ? promptSnapshot.timeline : [];
-      promptSnapshotFingerprint = summarizeTimelineFingerprint(promptTimeline);
-    } catch {
-      promptTimeline = [];
-      promptSnapshotFingerprint = null;
-    }
-  }
-
   let sessionSummarySnapshotFingerprint: string | null = null;
-  if (options.sessionSummaryRunId && options.sessionSummaryRunId !== options.runId) {
-    try {
-      const summarySnapshot = await options.memory.fetchContextSnapshot({
-        runId: options.sessionSummaryRunId,
-        timelineLimit: requestedTimelineLimit,
-        refresh,
-      });
-      sessionSummaryTimeline = Array.isArray(summarySnapshot.timeline) ? summarySnapshot.timeline : [];
-      sessionSummarySnapshotFingerprint = summarizeTimelineFingerprint(sessionSummaryTimeline);
-    } catch {
-      sessionSummaryTimeline = [];
-      sessionSummarySnapshotFingerprint = null;
-    }
-  }
-
   let diffSnapshotFingerprint: string | null = null;
-  if (options.diffRunId && options.diffRunId !== options.runId) {
-    try {
-      const diffSnapshot = await options.memory.fetchContextSnapshot({
-        runId: options.diffRunId,
-        timelineLimit: requestedTimelineLimit,
-        refresh,
-      });
-      diffTimeline = Array.isArray(diffSnapshot.timeline) ? diffSnapshot.timeline : [];
-      diffSnapshotFingerprint = summarizeTimelineFingerprint(diffTimeline);
-    } catch {
-      diffTimeline = [];
-      diffSnapshotFingerprint = null;
+  for (const snapshotResult of optionalSnapshots) {
+    if (snapshotResult.kind === "prompt") {
+      promptTimeline = snapshotResult.timeline;
+      promptSnapshotFingerprint = snapshotResult.fingerprint;
+      continue;
     }
+    if (snapshotResult.kind === "session") {
+      sessionSummaryTimeline = snapshotResult.timeline;
+      sessionSummarySnapshotFingerprint = snapshotResult.fingerprint;
+      continue;
+    }
+    diffTimeline = snapshotResult.timeline;
+    diffSnapshotFingerprint = snapshotResult.fingerprint;
   }
 
   const mainFingerprint = summarizeTimelineFingerprint(timeline);

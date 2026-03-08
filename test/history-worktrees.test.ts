@@ -1,12 +1,15 @@
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { syncCodexHistory } from "../src/codex-history-sync";
 import { syncClaudeHistory } from "../src/claude-history-sync";
 import { syncGeminiHistory } from "../src/gemini-history-sync";
+import { repoIdFromPath } from "../src/lib/core-types";
 import { JsonlMirror } from "../src/lib/mirror-jsonl";
 import { IngestPipeline } from "../src/lib/ingest-pipeline";
+import { createProjectRootMatcher } from "../src/lib/project-roots";
+import { QueryService } from "../src/lib/query-service";
 
 function createPipeline(mirrorRoot: string): IngestPipeline {
   return new IngestPipeline(new JsonlMirror(mirrorRoot));
@@ -194,6 +197,175 @@ describe("history sync worktrees", () => {
       });
       expect(secondRun.matchedFiles).toBe(1);
       expect(secondRun.importedEvents).toBeGreaterThan(0);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("stores imported codex history events with the codex_history source", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codaph-codex-source-"));
+    const projectPath = join(root, "repo-main");
+    const codexSessionsRoot = join(root, "codex-sessions");
+    const mirrorRoot = join(root, "mirror");
+    const codexSessionFile = join(codexSessionsRoot, "2026", "03", "session-source.jsonl");
+
+    try {
+      await mkdir(projectPath, { recursive: true });
+      await writeJsonl(codexSessionFile, [
+        JSON.stringify({
+          timestamp: "2026-03-01T10:00:00.000Z",
+          type: "session_meta",
+          payload: { id: "codex-session-source", cwd: projectPath },
+        }),
+        JSON.stringify({
+          timestamp: "2026-03-01T10:00:01.000Z",
+          type: "event_msg",
+          payload: { type: "user_message", text: "hello from codex history" },
+        }),
+      ]);
+
+      const summary = await syncCodexHistory({
+        projectPath,
+        codexSessionsRoot,
+        mirrorRoot,
+        pipeline: createPipeline(mirrorRoot),
+      });
+      expect(summary.importedEvents).toBeGreaterThan(0);
+
+      const query = new QueryService(mirrorRoot);
+      const events = await query.getTimeline({
+        repoId: repoIdFromPath(projectPath),
+        sessionId: "codex-session-source",
+      });
+
+      expect(events.some((event) => event.eventType === "prompt.submitted" && event.source === "codex_history")).toBe(
+        true,
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("re-reads unchanged Claude files when the saved cursor lacks session metadata", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codaph-claude-stale-cursor-"));
+    const projectPath = join(root, "repo-main");
+    const claudeProjectsRoot = join(root, "claude-projects");
+    const mirrorRoot = join(root, "mirror");
+    const claudeFile = join(claudeProjectsRoot, "session-stale.jsonl");
+
+    try {
+      await mkdir(projectPath, { recursive: true });
+      await writeJsonl(claudeFile, [
+        JSON.stringify({
+          type: "user",
+          timestamp: "2026-03-01T10:00:00.000Z",
+          sessionId: "claude-session-stale",
+          cwd: projectPath,
+          message: {
+            content: [{ type: "text", text: "hello from claude" }],
+          },
+        }),
+      ]);
+
+      const fileInfo = await stat(claudeFile);
+      const repoId = repoIdFromPath(projectPath);
+      const statePath = join(mirrorRoot, "index", repoId, "claude-history-sync.json");
+      await mkdir(dirname(statePath), { recursive: true });
+      await writeFile(
+        statePath,
+        `${JSON.stringify(
+          {
+            files: {
+              [claudeFile]: {
+                lineCount: 1,
+                sequence: 0,
+                sessionId: null,
+                cwd: null,
+                projectRootsKey: createProjectRootMatcher(projectPath).projectRootsKey,
+                updatedAt: "2026-03-01T10:01:00.000Z",
+                sizeBytes: fileInfo.size,
+                mtimeMs: fileInfo.mtimeMs,
+              },
+            },
+          },
+          null,
+          2,
+        )}\n`,
+        "utf8",
+      );
+
+      const summary = await syncClaudeHistory({
+        projectPath,
+        claudeProjectsRoot,
+        mirrorRoot,
+        pipeline: createPipeline(mirrorRoot),
+      });
+
+      expect(summary.matchedFiles).toBe(1);
+      expect(summary.importedEvents).toBeGreaterThan(0);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("re-reads unchanged Gemini files when the saved cursor lacks session metadata", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codaph-gemini-stale-cursor-"));
+    const projectPath = join(root, "repo-main");
+    const geminiHistoryRoot = join(root, "gemini-history");
+    const mirrorRoot = join(root, "mirror");
+    const projectDir = join(geminiHistoryRoot, "project-1");
+    const transcriptFile = join(projectDir, "session-stale.jsonl");
+
+    try {
+      await mkdir(projectPath, { recursive: true });
+      await mkdir(projectDir, { recursive: true });
+      await writeFile(join(projectDir, ".project_root"), `${projectPath}\n`, "utf8");
+      await writeJsonl(transcriptFile, [
+        JSON.stringify({
+          role: "user",
+          text: "hello from gemini",
+          sessionId: "gemini-session-stale",
+          cwd: projectPath,
+          timestamp: "2026-03-01T10:00:00.000Z",
+        }),
+      ]);
+
+      const fileInfo = await stat(transcriptFile);
+      const repoId = repoIdFromPath(projectPath);
+      const statePath = join(mirrorRoot, "index", repoId, "gemini-history-sync.json");
+      await mkdir(dirname(statePath), { recursive: true });
+      await writeFile(
+        statePath,
+        `${JSON.stringify(
+          {
+            files: {
+              [transcriptFile]: {
+                entryCount: 1,
+                sequence: 0,
+                sessionId: null,
+                cwd: null,
+                projectRootsKey: createProjectRootMatcher(projectPath).projectRootsKey,
+                updatedAt: "2026-03-01T10:01:00.000Z",
+                sizeBytes: fileInfo.size,
+                mtimeMs: fileInfo.mtimeMs,
+              },
+            },
+          },
+          null,
+          2,
+        )}\n`,
+        "utf8",
+      );
+
+      const summary = await syncGeminiHistory({
+        projectPath,
+        geminiHistoryRoot,
+        mirrorRoot,
+        pipeline: createPipeline(mirrorRoot),
+      });
+
+      expect(summary.matchedFiles).toBe(1);
+      expect(summary.importedEvents).toBeGreaterThan(0);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

@@ -343,4 +343,57 @@ describe("mubit-remote-sync", () => {
     expect(appended).toHaveLength(1);
     expect(appended[0]?.source).toBe("claude_code_history");
   });
+
+  it("preserves null thread ids from remote activities", async () => {
+    const timeline = [
+      {
+        id: "null-thread-1",
+        created_at: "2026-02-23T10:00:00.000Z",
+        payload: JSON.stringify({
+          schema: "codaph_event.v2",
+          event: {
+            eventId: "evt-null-thread-1",
+            source: "codex_exec",
+            repoId: "repo-x",
+            actorId: "friend",
+            sessionId: "sess-1",
+            threadId: null,
+            ts: "2026-02-23T10:00:00.000Z",
+            eventType: "codaph.session.summary",
+            payload: { item: { type: "codaph_session_summary" } },
+            reasoningAvailability: "unavailable",
+          },
+        }),
+      },
+    ];
+
+    const appended: CapturedEventEnvelope[] = [];
+    const mirror = {
+      async appendEvent(event: CapturedEventEnvelope): Promise<MirrorAppendResult> {
+        appended.push(event);
+        return {
+          segment: "seg",
+          offset: appended.length,
+          checksum: `sum-${appended.length}`,
+          deduplicated: false,
+        };
+      },
+      async appendRawLine(): Promise<void> {},
+    };
+
+    const memory = {
+      async fetchContextSnapshot(): Promise<Record<string, unknown>> {
+        return { timeline };
+      },
+    } as unknown as MubitMemoryEngine;
+
+    await syncMubitRemoteActivity({
+      mirror,
+      memory,
+      runId: "codaph:repo-x",
+      repoId: "repo-x",
+    });
+
+    expect(appended[0]?.threadId).toBeNull();
+  });
 });
