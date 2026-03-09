@@ -67,6 +67,7 @@ import {
   parseProvidersFlag,
   type AgentProviderId,
 } from "./lib/agent-providers";
+import { buildHookCommandCandidates } from "./lib/hook-command-candidates";
 import {
   addProjectToRegistry,
   loadRegistry,
@@ -185,33 +186,12 @@ function hookCommandCandidates(
   hookName: "post-commit" | "post-push" | "agent-complete",
   provider?: AgentProviderId,
 ): string[] {
-  const out: string[] = [];
-  const providerSuffix =
-    hookName === "agent-complete" && provider ? ` --provider ${shellQuote(provider)}` : "";
-
-  const scriptPath = process.argv[1];
-  const runtimePath = typeof process.execPath === "string" && process.execPath.length > 0 ? process.execPath : null;
-  const isLocalSourceEntry = Boolean(scriptPath && /(?:^|\/)(?:src\/index\.ts|dist\/index\.js)$/.test(scriptPath));
-  if (runtimePath && scriptPath && isAbsolute(scriptPath)) {
-    out.push(`${shellQuote(runtimePath)} ${shellQuote(scriptPath)} hooks run ${hookName}${providerSuffix} --quiet`);
-  }
-
-  if (isLocalSourceEntry && scriptPath) {
-    const codaphRoot = resolve(dirname(scriptPath), "..");
-    out.push(`bun --cwd ${shellQuote(codaphRoot)} run cli hooks run ${hookName}${providerSuffix} --quiet`);
-    out.push(`codaph hooks run ${hookName}${providerSuffix} --quiet`);
-  } else {
-    out.push(`codaph hooks run ${hookName}${providerSuffix} --quiet`);
-    try {
-      const thisFile = fileURLToPath(import.meta.url);
-      const codaphRoot = resolve(dirname(thisFile), "..");
-      out.push(`bun --cwd ${shellQuote(codaphRoot)} run cli hooks run ${hookName}${providerSuffix} --quiet`);
-    } catch {
-      // best-effort fallback not available
-    }
-  }
-
-  return [...new Set(out)];
+  return buildHookCommandCandidates({
+    hookName,
+    provider,
+    scriptPath: process.argv[1],
+    moduleUrl: import.meta.url,
+  });
 }
 
 function parseArgs(args: string[]): { positionals: string[]; flags: Flags } {
@@ -2990,21 +2970,83 @@ async function syncRemote(rest: string[]): Promise<void> {
   await syncPullCommand(rest);
 }
 
+function stdinChunkToBuffer(chunk: string | Buffer): Buffer {
+  return Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+}
+
+async function readFirstStdinChunkWithin(timeoutMs = 100): Promise<string | Buffer | null> {
+  if (input.readableEnded) {
+    return null;
+  }
+
+  const immediate = input.read();
+  if (immediate !== null) {
+    return immediate as string | Buffer;
+  }
+
+  return await new Promise((resolve, reject) => {
+    let settled = false;
+    const cleanup = (): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      input.off("readable", onReadable);
+      input.off("end", onEnd);
+      input.off("error", onError);
+    };
+    const onReadable = (): void => {
+      const chunk = input.read();
+      if (chunk === null) {
+        return;
+      }
+      cleanup();
+      resolve(chunk as string | Buffer);
+    };
+    const onEnd = (): void => {
+      cleanup();
+      resolve(null);
+    };
+    const onError = (error: Error): void => {
+      cleanup();
+      reject(error);
+    };
+    const timer = setTimeout(() => {
+      cleanup();
+      resolve(null);
+    }, Math.max(0, timeoutMs));
+
+    input.on("readable", onReadable);
+    input.once("end", onEnd);
+    input.once("error", onError);
+  });
+}
+
 async function readOptionalStdinJson(): Promise<Record<string, unknown> | null> {
   if (input.isTTY) {
     return null;
   }
-  const chunks: Buffer[] = [];
+
+  // Git hooks frequently inherit an open stdin with no payload. Wait briefly
+  // for actual bytes instead of blocking the hook forever on an idle stream.
+  const firstChunk = await readFirstStdinChunkWithin();
+  if (firstChunk === null) {
+    return null;
+  }
+
+  const chunks: Buffer[] = [stdinChunkToBuffer(firstChunk)];
+  let totalBytes = chunks[0].length;
+
   for await (const chunk of input) {
-    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
+    const buffer = stdinChunkToBuffer(chunk);
     chunks.push(buffer);
-    if (Buffer.concat(chunks).length > 512 * 1024) {
+    totalBytes += buffer.length;
+    if (totalBytes > 512 * 1024) {
       break;
     }
   }
-  if (chunks.length === 0) {
-    return null;
-  }
+
   try {
     const parsed = JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
     return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)

@@ -1132,3 +1132,13 @@ Do not rewrite history; append a new snapshot each run.
 - unstaged: 0
 - untracked: 0
 - files: src/index.ts, src/mubit-remote-sync-state.ts, src/mubit-remote-sync.ts, test/lib-mubit-remote-sync.test.ts
+
+## Status Snapshot — 2026-03-09T09:37:37.334Z
+- source: pre-commit
+- repo: /Users/anilp/Code/codaph
+- branch: core/tree
+- head: 7dd2733
+- staged: 3
+- unstaged: 0
+- untracked: 0
+- files: src/index.ts, src/lib/hook-command-candidates.ts, test/lib-hook-command-candidates.test.ts
