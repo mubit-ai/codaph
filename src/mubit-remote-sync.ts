@@ -288,6 +288,14 @@ export async function syncMubitRemoteActivity(options: MubitRemoteSyncOptions): 
       : 1200;
   const refresh = options.refresh ?? true;
   const priorState = options.statePath ? await readMubitRemoteSyncState(options.statePath) : defaultMubitRemoteSyncState();
+  const priorObservedUniqueEvents = Math.max(0, priorState.observedUniqueEvents ?? 0);
+  const priorObservedTimelineEvents = Math.max(0, priorState.observedUniqueTimelineEvents ?? 0);
+  const priorObservedPromptTimelineEvents = Math.max(0, priorState.observedUniquePromptTimelineEvents ?? 0);
+  const priorObservedSessionSummaryTimelineEvents = Math.max(
+    0,
+    priorState.observedUniqueSessionSummaryTimelineEvents ?? 0,
+  );
+  const priorObservedDiffTimelineEvents = Math.max(0, priorState.observedUniqueDiffTimelineEvents ?? 0);
   const startedAt = new Date().toISOString();
 
   let timeline: unknown[] = [];
@@ -425,32 +433,47 @@ export async function syncMubitRemoteActivity(options: MubitRemoteSyncOptions): 
   } else {
     consecutiveSameSnapshotCount = 0;
   }
+  const combinedTimeline = [
+    ...sessionSummaryTimeline.map((entry) => ({ kind: "session" as const, entry })),
+    ...diffTimeline.map((entry) => ({ kind: "diff" as const, entry })),
+    ...promptTimeline.map((entry) => ({ kind: "prompt" as const, entry })),
+    ...timeline.map((entry) => ({ kind: "main" as const, entry })),
+  ];
+  const shorterStreams: Array<{ label: string; length: number; previouslyObserved: number }> = [];
+  if (requestedTimelineLimit > timeline.length && timeline.length > 0) {
+    shorterStreams.push({ label: "events", length: timeline.length, previouslyObserved: priorObservedTimelineEvents });
+  }
+  if (requestedTimelineLimit > promptTimeline.length && promptTimeline.length > 0) {
+    shorterStreams.push({
+      label: "prompts",
+      length: promptTimeline.length,
+      previouslyObserved: priorObservedPromptTimelineEvents,
+    });
+  }
+  if (requestedTimelineLimit > sessionSummaryTimeline.length && sessionSummaryTimeline.length > 0) {
+    shorterStreams.push({
+      label: "sessions",
+      length: sessionSummaryTimeline.length,
+      previouslyObserved: priorObservedSessionSummaryTimelineEvents,
+    });
+  }
+  if (requestedTimelineLimit > diffTimeline.length && diffTimeline.length > 0) {
+    shorterStreams.push({
+      label: "diffs",
+      length: diffTimeline.length,
+      previouslyObserved: priorObservedDiffTimelineEvents,
+    });
+  }
+  const windowedStreams = shorterStreams.filter((stream) => stream.previouslyObserved > stream.length);
   if (
     snapshotFingerprint &&
     consecutiveSameSnapshotCount >= 3 &&
-    (
-      (requestedTimelineLimit > timeline.length && timeline.length > 0) ||
-      (requestedTimelineLimit > promptTimeline.length && promptTimeline.length > 0) ||
-      (requestedTimelineLimit > sessionSummaryTimeline.length && sessionSummaryTimeline.length > 0) ||
-      (requestedTimelineLimit > diffTimeline.length && diffTimeline.length > 0)
-    )
+    windowedStreams.length > 0
   ) {
     suspectedServerCap = true;
-    const streams: string[] = [];
-    if (requestedTimelineLimit > timeline.length && timeline.length > 0) {
-      streams.push(`events=${timeline.length}`);
-    }
-    if (requestedTimelineLimit > promptTimeline.length && promptTimeline.length > 0) {
-      streams.push(`prompts=${promptTimeline.length}`);
-    }
-    if (requestedTimelineLimit > sessionSummaryTimeline.length && sessionSummaryTimeline.length > 0) {
-      streams.push(`sessions=${sessionSummaryTimeline.length}`);
-    }
-    if (requestedTimelineLimit > diffTimeline.length && diffTimeline.length > 0) {
-      streams.push(`diffs=${diffTimeline.length}`);
-    }
+    const streams = windowedStreams.map((stream) => `${stream.label}=${stream.length}`);
     diagnosticNote =
-      `Mubit snapshot appears capped (${streams.join(", ")} despite requested ${requestedTimelineLimit}); Codaph is deduping locally. This is a snapshot API limitation, not a local sync error.`;
+      `Mubit snapshot window appears limited (${streams.join(", ")} while requested ${requestedTimelineLimit}); Codaph has already seen more remote events than this, so the backend is returning a shorter repeated window rather than the full history. Codaph is healthy and still deduping locally.`;
   }
 
   let imported = 0;
@@ -461,22 +484,23 @@ export async function syncMubitRemoteActivity(options: MubitRemoteSyncOptions): 
   const sessions = new Set<string>();
   const contributors = new Set<string>();
   const fallbackActorId = options.fallbackActorId ?? null;
-
-  const combinedTimeline = [
-    ...sessionSummaryTimeline,
-    ...diffTimeline,
-    ...promptTimeline,
-    ...timeline,
-  ];
+  const importedByStream = {
+    main: 0,
+    prompt: 0,
+    session: 0,
+    diff: 0,
+  };
   for (let i = 0; i < combinedTimeline.length; i += 1) {
     const rawTimelineEntry = combinedTimeline[i];
-    if (isRecord(rawTimelineEntry)) {
-      const createdAt = asString(rawTimelineEntry.created_at);
+    const streamKind = rawTimelineEntry?.kind ?? "main";
+    const rawEntry = rawTimelineEntry?.entry;
+    if (isRecord(rawEntry)) {
+      const createdAt = asString(rawEntry.created_at);
       if (createdAt && isIsoDate(createdAt)) {
         timelineMaxTs = maxIsoTs(timelineMaxTs, new Date(createdAt).toISOString());
       }
     }
-    const event = parseTimelineEntry(rawTimelineEntry, options.repoId, fallbackActorId);
+    const event = parseTimelineEntry(rawEntry, options.repoId, fallbackActorId);
     if (!event) {
       skipped += 1;
       options.onProgress?.({
@@ -494,6 +518,7 @@ export async function syncMubitRemoteActivity(options: MubitRemoteSyncOptions): 
       deduplicated += 1;
     } else {
       imported += 1;
+      importedByStream[streamKind] += 1;
       sessions.add(event.sessionId);
       if (event.actorId) {
         contributors.add(event.actorId);
@@ -518,6 +543,13 @@ export async function syncMubitRemoteActivity(options: MubitRemoteSyncOptions): 
     diagnosticNote = "No remote changes detected (snapshot matches previous pull).";
   }
 
+  const observedUniqueEvents = priorObservedUniqueEvents + imported;
+  const observedUniqueTimelineEvents = priorObservedTimelineEvents + importedByStream.main;
+  const observedUniquePromptTimelineEvents = priorObservedPromptTimelineEvents + importedByStream.prompt;
+  const observedUniqueSessionSummaryTimelineEvents =
+    priorObservedSessionSummaryTimelineEvents + importedByStream.session;
+  const observedUniqueDiffTimelineEvents = priorObservedDiffTimelineEvents + importedByStream.diff;
+
   if (options.statePath) {
     const next = {
       ...priorState,
@@ -526,6 +558,11 @@ export async function syncMubitRemoteActivity(options: MubitRemoteSyncOptions): 
       lastTriggerSource: options.triggerSource ?? priorState.lastTriggerSource ?? "manual",
       requestedTimelineLimit,
       receivedTimelineCount: combinedTimeline.length,
+      observedUniqueEvents,
+      observedUniqueTimelineEvents,
+      observedUniquePromptTimelineEvents,
+      observedUniqueSessionSummaryTimelineEvents,
+      observedUniqueDiffTimelineEvents,
       lastImported: imported,
       lastDeduplicated: deduplicated,
       lastSkipped: skipped,

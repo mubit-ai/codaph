@@ -595,7 +595,7 @@ async function doctor(rest: string[]): Promise<void> {
   );
   if (remoteState) {
     console.log(
-      `Remote sync state: lastSuccess=${remoteState.lastSuccessAt ?? "(never)"} received=${remoteState.receivedTimelineCount ?? 0} imported=${remoteState.lastImported ?? 0} dedup=${remoteState.lastDeduplicated ?? 0} sameSnapshot=${remoteState.consecutiveSameSnapshotCount} capped=${remoteState.suspectedServerCap ? "yes" : "no"} pending=${remoteState.pendingTrigger.pending ? "yes" : "no"}`,
+      `Remote sync state: lastSuccess=${remoteState.lastSuccessAt ?? "(never)"} received=${remoteState.receivedTimelineCount ?? 0} imported=${remoteState.lastImported ?? 0} dedup=${remoteState.lastDeduplicated ?? 0} sameSnapshot=${remoteState.consecutiveSameSnapshotCount} windowed=${remoteState.suspectedServerCap ? "yes" : "no"} pending=${remoteState.pendingTrigger.pending ? "yes" : "no"}`,
     );
     if (remoteState.lastError) {
       console.log(`Remote sync last error: ${remoteState.lastError}`);
@@ -1601,7 +1601,7 @@ function formatPullPhaseLine(result: SyncPullPhaseOutcome): string {
     return `Pull (cloud->local): skipped (${result.reason})`;
   }
   const s = result.summary;
-  const cap = s.suspectedServerCap ? ", capped?" : "";
+  const cap = s.suspectedServerCap ? ", windowed" : "";
   const noChange = s.noRemoteChangesDetected ? ", no remote changes" : "";
   const promptStream = (s.promptTimelineEvents ?? 0) > 0 ? `, prompt-stream=${s.promptTimelineEvents}` : "";
   const sessionStream = (s.sessionSummaryTimelineEvents ?? 0) > 0 ? `, session-stream=${s.sessionSummaryTimelineEvents}` : "";
@@ -1684,7 +1684,7 @@ function formatTuiSyncFooterSummary(raw: string, width: number): string | null {
     const sessionStreamMatch = /session-stream=(\d+)/.exec(pullPart);
     const diffStreamMatch = /diff-stream=(\d+)/.exec(pullPart);
     const noChange = pullPart.includes("no remote changes");
-    const capped = pullPart.includes("capped?");
+    const capped = pullPart.includes("windowed");
     const skipped = pullPart.toLowerCase().startsWith("skipped");
     const recv = Number(receivedMatch?.[1] ?? "0");
     const pullTone =
@@ -1719,7 +1719,7 @@ function formatTuiSyncFooterSummary(raw: string, width: number): string | null {
       pullBits.push(tuiStatusKV("diffs", diffStreamMatch[1] ?? "0", "info"));
     }
     if (capped) {
-      pullBits.push(paint("capped?", TUI_COLORS.yellow));
+      pullBits.push(paint("windowed", TUI_COLORS.yellow));
     }
     if (noChange) {
       pullBits.push(paint("no-change", TUI_COLORS.muted));
@@ -2491,7 +2491,7 @@ async function syncStatus(rest: string[]): Promise<void> {
     `Remote pull: last=${remoteState.lastSuccessAt ?? "(never)"}${formatTimeAgo(remoteState.lastSuccessAt) ? ` (${formatTimeAgo(remoteState.lastSuccessAt)})` : ""} | received=${remoteState.receivedTimelineCount ?? 0} | imported=${remoteState.lastImported ?? 0} | dedup=${remoteState.lastDeduplicated ?? 0}`,
   );
   console.log(
-    `Snapshot: ${remoteState.lastSnapshotFingerprint ? `fp=${remoteState.lastSnapshotFingerprint}` : "none"} | same-count=${remoteState.consecutiveSameSnapshotCount} | capped=${remoteState.suspectedServerCap ? "yes" : "no"} | pending=${remoteState.pendingTrigger.pending ? "yes" : "no"}`,
+    `Snapshot: ${remoteState.lastSnapshotFingerprint ? `fp=${remoteState.lastSnapshotFingerprint}` : "none"} | same-count=${remoteState.consecutiveSameSnapshotCount} | windowed=${remoteState.suspectedServerCap ? "yes" : "no"} | pending=${remoteState.pendingTrigger.pending ? "yes" : "no"}`,
   );
   if (remoteState.lastError) {
     console.log(`Last error: ${remoteState.lastError}`);
@@ -6851,7 +6851,7 @@ async function tui(rest: string[]): Promise<void> {
     if (remote.lastError) {
       state.autoSyncCloudStatus = "error";
     } else if (remote.suspectedServerCap) {
-      state.autoSyncCloudStatus = "capped?";
+      state.autoSyncCloudStatus = "windowed";
     } else if (remote.pendingTrigger.pending) {
       state.autoSyncCloudStatus = "pending";
     } else if (remote.consecutiveSameSnapshotCount > 0) {

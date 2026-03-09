@@ -13,6 +13,11 @@ export interface MubitRemoteSyncState {
   lastTriggerSource: string | null;
   requestedTimelineLimit: number | null;
   receivedTimelineCount: number | null;
+  observedUniqueEvents: number;
+  observedUniqueTimelineEvents: number;
+  observedUniquePromptTimelineEvents: number;
+  observedUniqueSessionSummaryTimelineEvents: number;
+  observedUniqueDiffTimelineEvents: number;
   lastImported: number | null;
   lastDeduplicated: number | null;
   lastSkipped: number | null;
@@ -30,6 +35,11 @@ const DEFAULT_REMOTE_SYNC_STATE: MubitRemoteSyncState = {
   lastTriggerSource: null,
   requestedTimelineLimit: null,
   receivedTimelineCount: null,
+  observedUniqueEvents: 0,
+  observedUniqueTimelineEvents: 0,
+  observedUniquePromptTimelineEvents: 0,
+  observedUniqueSessionSummaryTimelineEvents: 0,
+  observedUniqueDiffTimelineEvents: 0,
   lastImported: null,
   lastDeduplicated: null,
   lastSkipped: null,
@@ -87,6 +97,20 @@ export async function readMubitRemoteSyncState(path: string): Promise<MubitRemot
       lastTriggerSource: asString(record.lastTriggerSource),
       requestedTimelineLimit: asFiniteNumber(record.requestedTimelineLimit),
       receivedTimelineCount: asFiniteNumber(record.receivedTimelineCount),
+      observedUniqueEvents: Math.max(0, Math.floor(asFiniteNumber(record.observedUniqueEvents) ?? 0)),
+      observedUniqueTimelineEvents: Math.max(0, Math.floor(asFiniteNumber(record.observedUniqueTimelineEvents) ?? 0)),
+      observedUniquePromptTimelineEvents: Math.max(
+        0,
+        Math.floor(asFiniteNumber(record.observedUniquePromptTimelineEvents) ?? 0),
+      ),
+      observedUniqueSessionSummaryTimelineEvents: Math.max(
+        0,
+        Math.floor(asFiniteNumber(record.observedUniqueSessionSummaryTimelineEvents) ?? 0),
+      ),
+      observedUniqueDiffTimelineEvents: Math.max(
+        0,
+        Math.floor(asFiniteNumber(record.observedUniqueDiffTimelineEvents) ?? 0),
+      ),
       lastImported: asFiniteNumber(record.lastImported),
       lastDeduplicated: asFiniteNumber(record.lastDeduplicated),
       lastSkipped: asFiniteNumber(record.lastSkipped),

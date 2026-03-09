@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { syncMubitRemoteActivity } from "../src/mubit-remote-sync";
-import { readMubitRemoteSyncState } from "../src/mubit-remote-sync-state";
+import { readMubitRemoteSyncState, writeMubitRemoteSyncState } from "../src/mubit-remote-sync-state";
 import type { CapturedEventEnvelope, MirrorAppendResult } from "../src/lib/core-types";
 import type { MubitMemoryEngine } from "../src/lib/memory-mubit";
 
@@ -126,7 +126,7 @@ describe("mubit-remote-sync", () => {
     expect(calls[0]?.refresh).toBe(true);
   });
 
-  it("tracks repeated snapshots and flags suspected snapshot caps", async () => {
+  it("tracks repeated snapshot windows when prior pulls prove the remote history is larger than the snapshot", async () => {
     const root = await mkdtemp(join(tmpdir(), "codaph-remote-sync-"));
     const statePath = join(root, "mubit-remote-sync-state.json");
     const timeline = Array.from({ length: 200 }, (_, i) => ({
@@ -162,6 +162,32 @@ describe("mubit-remote-sync", () => {
       },
     } as unknown as MubitMemoryEngine;
 
+    await writeMubitRemoteSyncState(statePath, {
+      lastRunAt: "2026-02-23T09:59:00.000Z",
+      lastSuccessAt: "2026-02-23T09:59:00.000Z",
+      lastTriggerSource: "manual",
+      requestedTimelineLimit: 1200,
+      receivedTimelineCount: 200,
+      observedUniqueEvents: 450,
+      observedUniqueTimelineEvents: 450,
+      observedUniquePromptTimelineEvents: 0,
+      observedUniqueSessionSummaryTimelineEvents: 0,
+      observedUniqueDiffTimelineEvents: 0,
+      lastImported: 0,
+      lastDeduplicated: 200,
+      lastSkipped: 0,
+      lastMaxTs: "2026-02-23T10:03:19.000Z",
+      lastSnapshotFingerprint: null,
+      consecutiveSameSnapshotCount: 0,
+      suspectedServerCap: false,
+      lastError: null,
+      pendingTrigger: {
+        pending: false,
+        source: null,
+        ts: null,
+      },
+    });
+
     let summary = await syncMubitRemoteActivity({
       mirror,
       memory,
@@ -187,12 +213,75 @@ describe("mubit-remote-sync", () => {
     expect(summary.noRemoteChangesDetected).toBe(true);
     expect(summary.consecutiveSameSnapshotCount).toBeGreaterThanOrEqual(3);
     expect(summary.suspectedServerCap).toBe(true);
-    expect(summary.diagnosticNote).toContain("appears capped");
+    expect(summary.diagnosticNote).toContain("window appears limited");
 
     const persisted = await readMubitRemoteSyncState(statePath);
     expect(persisted.receivedTimelineCount).toBe(200);
+    expect(persisted.observedUniqueEvents).toBe(450);
+    expect(persisted.observedUniqueTimelineEvents).toBe(450);
     expect(persisted.suspectedServerCap).toBe(true);
 
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it("does not flag a snapshot window when the known remote history is not larger than the returned timeline", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codaph-remote-sync-known-window-"));
+    const statePath = join(root, "mubit-remote-sync-state.json");
+    const timeline = Array.from({ length: 200 }, (_, i) => ({
+      id: `tl-known-${i + 1}`,
+      created_at: `2026-02-23T10:${String(Math.floor(i / 60)).padStart(2, "0")}:${String(i % 60).padStart(2, "0")}.000Z`,
+      payload: JSON.stringify({
+        schema: "codaph_event.v2",
+        event: {
+          eventId: `evt-known-${i + 1}`,
+          source: "codex_exec",
+          repoId: "repo-x",
+          actorId: "friend",
+          sessionId: "sess-1",
+          threadId: "thread-1",
+          ts: `2026-02-23T10:${String(Math.floor(i / 60)).padStart(2, "0")}:${String(i % 60).padStart(2, "0")}.000Z`,
+          eventType: "item.completed",
+          payload: {},
+          reasoningAvailability: "unavailable",
+        },
+      }),
+    }));
+
+    const mirror = {
+      async appendEvent(): Promise<MirrorAppendResult> {
+        return { segment: "seg", offset: 1, checksum: "sum", deduplicated: true };
+      },
+      async appendRawLine(): Promise<void> {},
+    };
+
+    const memory = {
+      async fetchContextSnapshot(): Promise<Record<string, unknown>> {
+        return { timeline };
+      },
+    } as unknown as MubitMemoryEngine;
+
+    let summary = await syncMubitRemoteActivity({
+      mirror,
+      memory,
+      runId: "codaph:repo-x",
+      repoId: "repo-x",
+      timelineLimit: 1200,
+      statePath,
+    });
+
+    for (let i = 0; i < 3; i += 1) {
+      summary = await syncMubitRemoteActivity({
+        mirror,
+        memory,
+        runId: "codaph:repo-x",
+        repoId: "repo-x",
+        timelineLimit: 1200,
+        statePath,
+      });
+    }
+
+    expect(summary.noRemoteChangesDetected).toBe(true);
+    expect(summary.suspectedServerCap).toBe(false);
     await rm(root, { recursive: true, force: true });
   });
 
