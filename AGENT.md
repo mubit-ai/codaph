@@ -1142,3 +1142,13 @@ Do not rewrite history; append a new snapshot each run.
 - unstaged: 0
 - untracked: 0
 - files: src/index.ts, src/lib/hook-command-candidates.ts, test/lib-hook-command-candidates.test.ts
+
+## Status Snapshot — 2026-03-13T11:26:00.816Z
+- source: pre-commit
+- repo: /Users/anilp/Code/codaph
+- branch: core/tree
+- head: 2e84c8f
+- staged: 1
+- unstaged: 0
+- untracked: 0
+- files: src/index.ts

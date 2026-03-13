@@ -4102,6 +4102,7 @@ interface SessionBrowseRow {
   fileCount: number;
   tokenEstimate: number;
   status: "synced" | "no_files";
+  summary: string;
 }
 
 interface CachedSessionAnalysis {
@@ -4628,6 +4629,34 @@ function browseRowTitle(row: SessionBrowseRow): string {
   return `Session ${row.sessionId.slice(0, 8)} - ${formatDateCell(row.to)}`;
 }
 
+function browseRowStateText(row: SessionBrowseRow): string {
+  const sessionCountSuffix =
+    row.kind === "day"
+      ? ` (${row.memberSessionCount ?? row.memberSessionIds?.length ?? 0}s)`
+      : "";
+  return `${row.status === "synced" ? "● synced" : "○ no-files"}${sessionCountSuffix}`;
+}
+
+function browseSummaryFromAnalysis(analysis: SessionAnalysis): string {
+  for (let i = analysis.prompts.length - 1; i >= 0; i -= 1) {
+    const prompt = analysis.prompts[i];
+    if (!prompt || prompt.prompt === "(No prompt captured)") {
+      continue;
+    }
+    const preview = promptPreview(prompt.prompt, 260);
+    if (preview.length > 0) {
+      return preview;
+    }
+  }
+
+  if (analysis.files.length > 0) {
+    const topFiles = analysis.files.slice(0, 3).map((file) => file.path);
+    return `Files: ${topFiles.join(", ")}`;
+  }
+
+  return "(No prompt captured)";
+}
+
 function groupBrowseRowsByDay(rows: SessionBrowseRow[]): SessionBrowseRow[] {
   const buckets = new Map<string, SessionBrowseRow[]>();
   for (const row of rows) {
@@ -4659,6 +4688,10 @@ function groupBrowseRowsByDay(rows: SessionBrowseRow[]): SessionBrowseRow[] {
       fileCount: sorted.reduce((sum, row) => sum + row.fileCount, 0),
       tokenEstimate: sorted.reduce((sum, row) => sum + row.tokenEstimate, 0),
       status: sorted.some((row) => row.status === "synced") ? "synced" : "no_files",
+      summary:
+        sorted.length > 1
+          ? `Latest: ${sorted[0]?.summary ?? `${sorted.length} sessions`}`
+          : (sorted[0]?.summary ?? `${sorted.length} sessions`),
     });
   }
 
@@ -5871,10 +5904,27 @@ function renderBrowseView(
   const start = windowStart(state.rows.length, state.selectedSessionIndex, bodyRows);
   const rows = state.rows.slice(start, start + bodyRows);
   const groupingLabel = state.browseGrouping === "day" ? "day" : "session";
-
+  const innerWidth = Math.max(14, width - 2);
+  const idxWidth = Math.max(2, String(state.rows.length).length);
+  const dateWidth = 16;
+  const promptWidth = Math.max(4, ...rows.map((row) => String(row.promptCount).length));
+  const fileWidth = Math.max(5, ...rows.map((row) => String(row.fileCount).length));
+  const tokenWidth = Math.max(6, ...rows.map((row) => formatTokenEstimate(row.tokenEstimate).length));
+  const agentWidth = Math.max(11, ...rows.map((row) => providerRowSummary(row.providers).length));
+  const stateWidth = Math.max(10, ...rows.map((row) => visibleLength(browseRowStateText(row))));
+  const baseHeader =
+    `  ${padPlain("#", idxWidth)}  ${padPlain("Timestamp", dateWidth)}  ${padPlain("Pmts", promptWidth)}  ${padPlain("Files", fileWidth)}  ${padPlain("Tokens", tokenWidth)}  ${padPlain("Agent", agentWidth)}  ${padPlain("State", stateWidth)}`;
+  const summaryMinWidth = 18;
+  const summaryWidth = innerWidth - visibleLength(baseHeader) - 2;
+  const showSummaryColumn = summaryWidth >= summaryMinWidth;
   const sessionLines: PaneLine[] = [
-    { text: "  #  Timestamp         Pmts  Files  Tokens  Agent        State", color: TUI_COLORS.panelTitleInactive },
-    { text: "  ───────────────────────────────────────────────────────────────", color: TUI_COLORS.rule },
+    {
+      text: showSummaryColumn
+        ? `${baseHeader}  ${padPlain("Summary", summaryWidth)}`
+        : baseHeader,
+      color: TUI_COLORS.panelTitleInactive,
+    },
+    { text: "─".repeat(innerWidth), color: TUI_COLORS.rule },
   ];
 
   if (rows.length === 0) {
@@ -5884,24 +5934,25 @@ function renderBrowseView(
       const absoluteIndex = start + i;
       const row = rows[i] as SessionBrowseRow;
       const marker = absoluteIndex === state.selectedSessionIndex ? "▸" : " ";
-      const idx = String(absoluteIndex + 1).padStart(2, " ");
       const dateText =
         row.kind === "day"
           ? formatDayBucketCell(row.to, row.memberSessionCount ?? row.memberSessionIds?.length ?? 0)
           : formatDateCell(row.to);
-      const dateCell = padPlain(dateText, 16);
-      const prompts = String(row.promptCount).padStart(4, " ");
-      const files = String(row.fileCount).padStart(6, " ");
-      const tokens = padPlain(formatTokenEstimate(row.tokenEstimate), 7);
-      const agentCell = padPlain(providerRowSummary(row.providers), 11);
-      const sessionCountSuffix =
-        row.kind === "day"
-          ? ` (${row.memberSessionCount ?? row.memberSessionIds?.length ?? 0}s)`
-          : "";
-      const statusText = `${row.status === "synced" ? "● synced" : "○ no-files"}${sessionCountSuffix}`;
+      const dateCell = padPlain(dateText, dateWidth);
+      const prompts = String(row.promptCount).padStart(promptWidth, " ");
+      const files = String(row.fileCount).padStart(fileWidth, " ");
+      const tokens = padPlain(formatTokenEstimate(row.tokenEstimate), tokenWidth);
+      const agentCell = padPlain(providerRowSummary(row.providers), agentWidth);
+      const statusText = padPlain(browseRowStateText(row), stateWidth);
+      const baseText =
+        `${marker} ${String(absoluteIndex + 1).padStart(idxWidth, " ")}  ${dateCell}  ${prompts}  ${files}  ${tokens}  ${agentCell}  ${statusText}`;
+      const summaryText =
+        showSummaryColumn
+          ? `${baseText}  ${clipPlain(row.summary, summaryWidth)}`
+          : baseText;
 
       sessionLines.push({
-        text: `${marker} ${idx}  ${dateCell}  ${prompts}   ${files}   ${tokens}  ${agentCell}  ${statusText}`,
+        text: summaryText,
         color: row.status === "no_files" ? TUI_COLORS.yellow : undefined,
         highlight: absoluteIndex === state.selectedSessionIndex,
       });
@@ -6715,7 +6766,7 @@ async function tui(rest: string[]): Promise<void> {
   let busyAnimationTimer: ReturnType<typeof setInterval> | null = null;
 
   const getSize = (): { width: number; height: number } => ({
-    width: Math.max(20, (output.columns ?? 120) - 1),
+    width: Math.max(20, output.columns ?? 120),
     height: Math.max(2, Math.max(2, (output.rows ?? 40) - 2)),
   });
 
@@ -7064,6 +7115,7 @@ async function tui(rest: string[]): Promise<void> {
         fileCount,
         tokenEstimate: analysis.tokenEstimate,
         status: fileCount > 0 ? "synced" : "no_files",
+        summary: browseSummaryFromAnalysis(analysis),
       });
     }
 
