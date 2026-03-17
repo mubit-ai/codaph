@@ -15,6 +15,7 @@ import { IngestPipeline } from "./lib/ingest-pipeline";
 import { CodexSdkAdapter } from "./lib/adapter-codex-sdk";
 import { CodexExecAdapter } from "./lib/adapter-codex-exec";
 import { QueryService } from "./lib/query-service";
+import { loadProjectEnv } from "./lib/project-env";
 import { resolveScopedProjectPathsForWorktrees } from "./lib/git-worktrees";
 import {
   MubitMemoryEngine,
@@ -106,6 +107,26 @@ import {
 
 type Flags = Record<string, string | boolean>;
 type CaptureMode = "run" | "exec";
+
+function resolveEnvLoadStartDir(argv: string[]): string {
+  for (let i = 0; i < argv.length; i += 1) {
+    const token = argv[i];
+    if (token === "--cwd") {
+      const next = argv[i + 1];
+      if (typeof next === "string" && next.length > 0 && !next.startsWith("--")) {
+        return resolve(next);
+      }
+      continue;
+    }
+    if (token.startsWith("--cwd=")) {
+      const value = token.slice("--cwd=".length).trim();
+      if (value.length > 0) {
+        return resolve(value);
+      }
+    }
+  }
+  return process.cwd();
+}
 
 function detectCliVersion(): string {
   if (typeof process.env.npm_package_version === "string" && process.env.npm_package_version.trim().length > 0) {
@@ -8322,6 +8343,7 @@ async function tui(rest: string[]): Promise<void> {
 }
 
 async function main(): Promise<void> {
+  loadProjectEnv(resolveEnvLoadStartDir(process.argv.slice(2)));
   const [cmd, sub, ...rest] = process.argv.slice(2);
 
   if (!cmd) {

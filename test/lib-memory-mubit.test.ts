@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { MubitMemoryEngine, mubitPromptRunIdForProject, mubitRunIdForProject, mubitRunIdForSession } from "../src/lib/memory-mubit";
+import type { RecallOptions, RememberOptions } from "@mubit-ai/sdk";
+import {
+  MubitMemoryEngine,
+  mubitPromptRunIdForProject,
+  mubitRunIdForProject,
+  mubitRunIdForSession,
+  resolveMubitRegionalEndpointDefaults,
+} from "../src/lib/memory-mubit";
 
 describe("memory-mubit", () => {
   it("builds stable run ids", () => {
@@ -12,19 +19,29 @@ describe("memory-mubit", () => {
     expect(mubitPromptRunIdForProject("repo123")).toBe("codaph-prompts:repo123");
   });
 
-  it("writes core ingest payloads with idempotency key", async () => {
-    const captures: Array<Record<string, unknown>> = [];
+  it("infers EU regional endpoints from MUBIT_REGION when explicit endpoints are absent", () => {
+    expect(resolveMubitRegionalEndpointDefaults({ MUBIT_REGION: "EU" })).toEqual({
+      httpEndpoint: "https://api.eu.mubit.ai",
+      grpcEndpoint: "grpc.api.eu.mubit.ai:443",
+    });
+    expect(
+      resolveMubitRegionalEndpointDefaults({
+        MUBIT_REGION: "EU",
+        MUBIT_HTTP_ENDPOINT: "https://custom.example",
+      }),
+    ).toEqual({});
+  });
+
+  it("writes remember payloads with idempotency key", async () => {
+    const remembers: Array<Record<string, unknown>> = [];
     const activities: Array<Record<string, unknown>> = [];
     const engine = new MubitMemoryEngine({
       client: {
-        core: {
-          ingest: async (payload?: Record<string, unknown>) => {
-            captures.push(payload ?? {});
-            return { accepted: true, job_id: "job-1", deduplicated: true };
-          },
+        remember: async (payload: RememberOptions) => {
+          remembers.push(payload as unknown as Record<string, unknown>);
+          return { accepted: true, job_id: "job-1", deduplicated: true };
         },
         control: {
-          ingest: async () => ({ accepted: true }),
           setVariable: async () => ({ success: true }),
           query: async () => ({ final_answer: "ok" }),
           appendActivity: async (payload?: Record<string, unknown>) => {
@@ -51,9 +68,10 @@ describe("memory-mubit", () => {
     expect(result.accepted).toBe(true);
     expect(result.jobId).toBe("job-1");
     expect(result.deduplicated).toBe(true);
-    expect(captures).toHaveLength(1);
-    expect(captures[0].idempotency_key).toBe("evt-123");
-    expect(captures[0].run_id).toBe("codaph:repo-abc:session-def");
+    expect(remembers).toHaveLength(1);
+    expect(remembers[0].idempotency_key).toBe("evt-123");
+    expect(remembers[0].session_id).toBe("codaph:repo-abc:session-def");
+    expect(remembers[0].content).toBe("prompt.submitted [actor:anil]: summarize current repo");
     expect(activities).toHaveLength(2);
     const eventActivityPayload = activities.find(
       (entry) => ((entry.activity as Record<string, unknown> | undefined)?.type as string | undefined) === "codaph_event",
@@ -80,11 +98,8 @@ describe("memory-mubit", () => {
     const activities: Array<Record<string, unknown>> = [];
     const engine = new MubitMemoryEngine({
       client: {
-        core: {
-          ingest: async () => ({ accepted: true }),
-        },
+        remember: async (_payload: RememberOptions) => ({ accepted: true }),
         control: {
-          ingest: async () => ({ accepted: true }),
           setVariable: async () => ({ success: true }),
           query: async () => ({ final_answer: "ok" }),
           appendActivity: async (payload?: Record<string, unknown>) => {
@@ -118,20 +133,17 @@ describe("memory-mubit", () => {
   });
 
   it("supports shared project scope and actor metadata", async () => {
-    const captures: Array<Record<string, unknown>> = [];
+    const remembers: Array<Record<string, unknown>> = [];
     const engine = new MubitMemoryEngine({
       projectId: "team-repo",
       actorId: "anil",
       runScope: "project",
       client: {
-        core: {
-          ingest: async (payload?: Record<string, unknown>) => {
-            captures.push(payload ?? {});
-            return { accepted: true };
-          },
+        remember: async (payload: RememberOptions) => {
+          remembers.push(payload as unknown as Record<string, unknown>);
+          return { accepted: true };
         },
         control: {
-          ingest: async () => ({ accepted: true }),
           setVariable: async () => ({ success: true }),
           query: async () => ({ final_answer: "ok" }),
           appendActivity: async () => ({ success: true }),
@@ -152,28 +164,23 @@ describe("memory-mubit", () => {
       reasoningAvailability: "full",
     });
 
-    expect(captures).toHaveLength(1);
-    expect(captures[0].run_id).toBe("codaph:team-repo");
-    const item = (captures[0].items as Array<Record<string, unknown>>)[0];
-    const metadataRaw = typeof item.metadata_json === "string" ? item.metadata_json : "{}";
-    const metadata = JSON.parse(metadataRaw) as Record<string, unknown>;
+    expect(remembers).toHaveLength(1);
+    expect(remembers[0].session_id).toBe("codaph:team-repo");
+    const metadata = (remembers[0].metadata ?? {}) as Record<string, unknown>;
     expect(metadata.project_id).toBe("team-repo");
     expect(metadata.actor_id).toBe("anil");
   });
 
-  it("batches ingest writes and preserves activity streams", async () => {
-    const coreIngestCalls: Array<Record<string, unknown>> = [];
+  it("batches ingest writes through control.ingest and preserves activity streams", async () => {
+    const controlIngestCalls: Array<Record<string, unknown>> = [];
     const activities: Array<Record<string, unknown>> = [];
     const engine = new MubitMemoryEngine({
       client: {
-        core: {
+        control: {
           ingest: async (payload?: Record<string, unknown>) => {
-            coreIngestCalls.push(payload ?? {});
+            controlIngestCalls.push(payload ?? {});
             return { accepted: true };
           },
-        },
-        control: {
-          ingest: async () => ({ accepted: true }),
           setVariable: async () => ({ success: true }),
           query: async () => ({ final_answer: "ok" }),
           appendActivity: async (payload?: Record<string, unknown>) => {
@@ -211,8 +218,8 @@ describe("memory-mubit", () => {
       },
     ]);
 
-    expect(coreIngestCalls).toHaveLength(1);
-    const payload = coreIngestCalls[0] ?? {};
+    expect(controlIngestCalls).toHaveLength(1);
+    const payload = controlIngestCalls[0] ?? {};
     expect(payload.run_id).toBe("codaph:repo-abc:session-1");
     expect(Array.isArray(payload.items)).toBe(true);
     expect((payload.items as Array<unknown>).length).toBe(2);
@@ -220,23 +227,15 @@ describe("memory-mubit", () => {
     expect(activities).toHaveLength(3);
   });
 
-  it("prefers control.batchInsert for bulk writes", async () => {
-    const controlBatchCalls: Array<Record<string, unknown>> = [];
-    const coreIngestCalls: Array<Record<string, unknown>> = [];
+  it("falls back to control.ingest when remember helper is unavailable", async () => {
+    const controlIngestCalls: Array<Record<string, unknown>> = [];
     const engine = new MubitMemoryEngine({
       client: {
-        core: {
-          ingest: async (payload?: Record<string, unknown>) => {
-            coreIngestCalls.push(payload ?? {});
-            return { accepted: true };
-          },
-        },
         control: {
-          batchInsert: async (payload?: Record<string, unknown>) => {
-            controlBatchCalls.push(payload ?? {});
-            return { success: true, count: 2 };
+          ingest: async (payload?: Record<string, unknown>) => {
+            controlIngestCalls.push(payload ?? {});
+            return { accepted: true, job_id: "job-fallback" };
           },
-          ingest: async () => ({ accepted: true }),
           setVariable: async () => ({ success: true }),
           query: async () => ({ final_answer: "ok" }),
           appendActivity: async () => ({ success: true }),
@@ -244,42 +243,27 @@ describe("memory-mubit", () => {
       },
     });
 
-    await engine.writeEventsBatch([
-      {
-        eventId: "evt-b1",
-        source: "codex_exec",
-        repoId: "repo-bulk",
-        actorId: "anil",
-        sessionId: "session-1",
-        threadId: "thread-1",
-        ts: "2026-02-24T16:10:00.000Z",
-        eventType: "prompt.submitted",
-        payload: { prompt: "one" },
-        reasoningAvailability: "unavailable",
-      },
-      {
-        eventId: "evt-b2",
-        source: "codex_exec",
-        repoId: "repo-bulk",
-        actorId: "anil",
-        sessionId: "session-1",
-        threadId: "thread-1",
-        ts: "2026-02-24T16:10:05.000Z",
-        eventType: "message.assistant",
-        payload: { text: "two" },
-        reasoningAvailability: "partial",
-      },
-    ]);
+    const result = await engine.writeEvent({
+      eventId: "evt-fallback",
+      source: "codex_exec",
+      repoId: "repo-bulk",
+      actorId: "anil",
+      sessionId: "session-1",
+      threadId: "thread-1",
+      ts: "2026-02-24T16:10:00.000Z",
+      eventType: "prompt.submitted",
+      payload: { prompt: "one" },
+      reasoningAvailability: "unavailable",
+    });
 
-    expect(controlBatchCalls).toHaveLength(1);
-    expect(coreIngestCalls).toHaveLength(0);
-    expect(controlBatchCalls[0].run_id).toBe("codaph:repo-bulk:session-1");
-    expect(controlBatchCalls[0].deduplicate).toBe(true);
-    expect(Array.isArray(controlBatchCalls[0].items)).toBe(true);
-    expect((controlBatchCalls[0].items as unknown[]).length).toBe(2);
+    expect(result.jobId).toBe("job-fallback");
+    expect(controlIngestCalls).toHaveLength(1);
+    expect(controlIngestCalls[0].run_id).toBe("codaph:repo-bulk:session-1");
+    expect(Array.isArray(controlIngestCalls[0].items)).toBe(true);
+    expect((controlIngestCalls[0].items as unknown[]).length).toBe(1);
   });
 
-  it("falls back to core.insert when core.ingest is unavailable", async () => {
+  it("falls back to core.insert when helper and raw ingest APIs are unavailable", async () => {
     const inserts: Array<Record<string, unknown>> = [];
     const engine = new MubitMemoryEngine({
       client: {
@@ -290,12 +274,11 @@ describe("memory-mubit", () => {
           },
         },
         control: {
-          ingest: async () => ({ accepted: true }),
           setVariable: async () => ({ success: true }),
           query: async () => ({ final_answer: "ok" }),
           appendActivity: async () => ({ success: true }),
-        },
-      },
+        } as Record<string, unknown>,
+      } as unknown as any,
     });
 
     await engine.writeEvent({
@@ -319,16 +302,15 @@ describe("memory-mubit", () => {
   });
 
   it("uses strict hdql_query direct-bypass lane for semantic context retrieval", async () => {
-    const queryCalls: Array<Record<string, unknown>> = [];
+    const recallCalls: Array<Record<string, unknown>> = [];
     const engine = new MubitMemoryEngine({
       client: {
+        recall: async (payload: RecallOptions) => {
+          recallCalls.push(payload as unknown as Record<string, unknown>);
+          return { evidence: [{ source: "mubit", content: "match" }] };
+        },
         control: {
-          ingest: async () => ({ accepted: true }),
           setVariable: async () => ({ success: true }),
-          query: async (payload?: Record<string, unknown>) => {
-            queryCalls.push(payload ?? {});
-            return { evidence: [{ source: "mubit", content: "match" }] };
-          },
         },
       },
     });
@@ -339,25 +321,24 @@ describe("memory-mubit", () => {
       limit: 5,
     });
 
-    expect(queryCalls).toHaveLength(1);
-    expect(queryCalls[0].mode).toBe("direct_bypass");
-    expect(queryCalls[0].direct_lane).toBe("hdql_query");
+    expect(recallCalls).toHaveLength(1);
+    expect(recallCalls[0].mode).toBe("direct_bypass");
+    expect(recallCalls[0].direct_lane).toBe("hdql_query");
     expect(result.codaph_query_lane).toBe("hdql_query");
     expect(result.codaph_query_mode).toBe("direct_bypass");
   });
 
   it("does not fall back from hdql_query lane", async () => {
-    const queryCalls: Array<Record<string, unknown>> = [];
+    const recallCalls: Array<Record<string, unknown>> = [];
     const engine = new MubitMemoryEngine({
       client: {
+        recall: async (payload: RecallOptions) => {
+          const p = payload as unknown as Record<string, unknown>;
+          recallCalls.push(p);
+          throw new Error("invalid argument: direct_lane hdql_query unsupported");
+        },
         control: {
-          ingest: async () => ({ accepted: true }),
           setVariable: async () => ({ success: true }),
-          query: async (payload?: Record<string, unknown>) => {
-            const p = payload ?? {};
-            queryCalls.push(p);
-            throw new Error("invalid argument: direct_lane hdql_query unsupported");
-          },
         },
       },
     });
@@ -369,7 +350,44 @@ describe("memory-mubit", () => {
       }),
     ).rejects.toThrow(/hdql_query unsupported/i);
 
-    expect(queryCalls).toHaveLength(1);
-    expect(queryCalls[0].direct_lane).toBe("hdql_query");
+    expect(recallCalls).toHaveLength(1);
+    expect(recallCalls[0].direct_lane).toBe("hdql_query");
+  });
+
+  it("adds a regional endpoint hint when snapshot sync cannot connect", async () => {
+    const prevRegion = process.env.MUBIT_REGION;
+    process.env.MUBIT_REGION = "EU";
+
+    try {
+      const engine = new MubitMemoryEngine({
+        apiKey: "mbt_test",
+        client: {
+          control: {
+            contextSnapshot: async () => {
+              throw new Error(
+                "control.context_snapshot HTTP request failed: Error: Unable to connect. Is the computer able to access the url?",
+              );
+            },
+          },
+        } as unknown as any,
+      });
+
+      await expect(
+        engine.fetchContextSnapshot({
+          runId: "codaph:repo:session",
+        }),
+      ).rejects.toThrow(/MUBIT_HTTP_ENDPOINT=https:\/\/api\.eu\.mubit\.ai/);
+      await expect(
+        engine.fetchContextSnapshot({
+          runId: "codaph:repo:session",
+        }),
+      ).rejects.toThrow(/MUBIT_GRPC_ENDPOINT=grpc\.api\.eu\.mubit\.ai:443/);
+    } finally {
+      if (prevRegion === undefined) {
+        delete process.env.MUBIT_REGION;
+      } else {
+        process.env.MUBIT_REGION = prevRegion;
+      }
+    }
   });
 });

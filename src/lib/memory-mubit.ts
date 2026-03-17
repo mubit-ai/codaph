@@ -1,4 +1,9 @@
-import { Client, type ClientConfig } from "@mubit-ai/sdk";
+import {
+  Client,
+  type ClientConfig,
+  type RecallOptions,
+  type RememberOptions,
+} from "@mubit-ai/sdk";
 import type { CapturedEventEnvelope, MemoryEngine, MemoryWriteResult } from "./core-types";
 
 export type MubitTransport = "auto" | "http" | "grpc";
@@ -35,15 +40,16 @@ export interface MubitMemoryOptions {
 }
 
 interface MubitClientLike {
+  remember?(options: RememberOptions): Promise<unknown>;
+  recall?(options: RecallOptions): Promise<unknown>;
   core?: {
     ingest?(payload?: Record<string, unknown>): Promise<unknown>;
     insert?(payload?: Record<string, unknown>): Promise<unknown>;
   };
   control: {
-    ingest(payload?: Record<string, unknown>): Promise<unknown>;
-    setVariable(payload?: Record<string, unknown>): Promise<unknown>;
-    query(payload?: Record<string, unknown>): Promise<unknown>;
-    batchInsert?(payload?: Record<string, unknown>): Promise<unknown>;
+    ingest?(payload?: Record<string, unknown>): Promise<unknown>;
+    setVariable?(payload?: Record<string, unknown>): Promise<unknown>;
+    query?(payload?: Record<string, unknown>): Promise<unknown>;
     appendActivity?(payload?: Record<string, unknown>): Promise<unknown>;
     contextSnapshot?(payload?: Record<string, unknown>): Promise<unknown>;
   };
@@ -51,6 +57,16 @@ interface MubitClientLike {
 
 interface JsonObject {
   [key: string]: unknown;
+}
+
+interface EnvLike {
+  [key: string]: string | undefined;
+}
+
+interface ResolvedTransportLike {
+  httpEndpoint?: unknown;
+  grpcEndpoint?: unknown;
+  transport?: unknown;
 }
 
 function asRecord(value: unknown): JsonObject | null {
@@ -71,6 +87,96 @@ function asString(value: unknown): string | undefined {
   }
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function envString(env: EnvLike, key: string): string | undefined {
+  return asString(env[key]);
+}
+
+function normalizeMubitRegion(value: unknown): "eu" | undefined {
+  const region = asString(value)?.toLowerCase();
+  if (!region) {
+    return undefined;
+  }
+  if (region === "eu" || region === "europe" || region === "europe-west") {
+    return "eu";
+  }
+  return undefined;
+}
+
+export function resolveMubitRegionalEndpointDefaults(
+  env: EnvLike = process.env,
+): Pick<MubitMemoryOptions, "httpEndpoint" | "grpcEndpoint"> {
+  const hasExplicitEndpoint =
+    Boolean(envString(env, "MUBIT_ENDPOINT")) ||
+    Boolean(envString(env, "MUBIT_HTTP_ENDPOINT")) ||
+    Boolean(envString(env, "MUBIT_GRPC_ENDPOINT"));
+  if (hasExplicitEndpoint) {
+    return {};
+  }
+
+  const region =
+    normalizeMubitRegion(envString(env, "MUBIT_REGION")) ??
+    normalizeMubitRegion(envString(env, "MUBIT_INSTANCE_REGION")) ??
+    normalizeMubitRegion(envString(env, "MUBIT_TENANT_REGION"));
+  if (region === "eu") {
+    return {
+      httpEndpoint: "https://api.eu.mubit.ai",
+      grpcEndpoint: "grpc.api.eu.mubit.ai:443",
+    };
+  }
+  return {};
+}
+
+function buildMubitConnectivityHint(env: EnvLike = process.env): string {
+  const region =
+    normalizeMubitRegion(envString(env, "MUBIT_REGION")) ??
+    normalizeMubitRegion(envString(env, "MUBIT_INSTANCE_REGION")) ??
+    normalizeMubitRegion(envString(env, "MUBIT_TENANT_REGION"));
+  if (region === "eu") {
+    return " If this is your EU tenant, set MUBIT_HTTP_ENDPOINT=https://api.eu.mubit.ai and MUBIT_GRPC_ENDPOINT=grpc.api.eu.mubit.ai:443, or export MUBIT_REGION=EU.";
+  }
+  return " If this tenant is regional, set MUBIT_HTTP_ENDPOINT and MUBIT_GRPC_ENDPOINT, or pass --mubit-http-endpoint and --mubit-grpc-endpoint.";
+}
+
+function isConnectivityError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /unable to connect|econnrefused|enotfound|http request failed/i.test(message);
+}
+
+function describeResolvedEndpoints(transport: ResolvedTransportLike | null): string {
+  if (!transport) {
+    return "";
+  }
+  const httpEndpoint = asString(transport.httpEndpoint);
+  const grpcEndpoint = asString(transport.grpcEndpoint);
+  const mode = asString(transport.transport);
+  const parts = [
+    httpEndpoint ? `HTTP=${httpEndpoint}` : null,
+    grpcEndpoint ? `gRPC=${grpcEndpoint}` : null,
+    mode ? `transport=${mode}` : null,
+  ].filter((part): part is string => !!part);
+  if (parts.length === 0) {
+    return "";
+  }
+  return ` Resolved endpoints: ${parts.join(", ")}.`;
+}
+
+function withMubitConnectivityHint(
+  error: unknown,
+  env: EnvLike = process.env,
+  transport: ResolvedTransportLike | null = null,
+): Error {
+  if (!(error instanceof Error)) {
+    return new Error(`${String(error)}${describeResolvedEndpoints(transport)}${buildMubitConnectivityHint(env)}`);
+  }
+  if (!isConnectivityError(error)) {
+    return error;
+  }
+  if (/MUBIT_HTTP_ENDPOINT|--mubit-http-endpoint/i.test(error.message)) {
+    return error;
+  }
+  return new Error(`${error.message}${describeResolvedEndpoints(transport)}${buildMubitConnectivityHint(env)}`, { cause: error });
 }
 
 function toJson(value: unknown): string {
@@ -434,6 +540,7 @@ export class MubitMemoryEngine implements MemoryEngine {
   private readonly projectId?: string;
   private readonly actorId?: string;
   private readonly runScope: MubitRunScope;
+  private readonly resolvedTransport: ResolvedTransportLike | null;
 
   constructor(options: MubitMemoryOptions = {}) {
     this.enabled = options.enabled ?? true;
@@ -445,22 +552,25 @@ export class MubitMemoryEngine implements MemoryEngine {
 
     if (options.client) {
       this.client = options.client;
+      this.resolvedTransport = asRecord((options.client as unknown as Record<string, unknown>)._transport);
       this.configured = true;
       return;
     }
 
     const apiKey = asString(options.apiKey ?? process.env.MUBIT_API_KEY);
     this.configured = Boolean(apiKey);
+    const regionalDefaults = resolveMubitRegionalEndpointDefaults(process.env);
 
     const config: ClientConfig = {
       api_key: apiKey,
       transport: options.transport,
       endpoint: options.endpoint,
-      http_endpoint: options.httpEndpoint,
-      grpc_endpoint: options.grpcEndpoint,
+      http_endpoint: options.httpEndpoint ?? regionalDefaults.httpEndpoint,
+      grpc_endpoint: options.grpcEndpoint ?? regionalDefaults.grpcEndpoint,
     };
 
     this.client = new Client(config) as unknown as MubitClientLike;
+    this.resolvedTransport = asRecord((this.client as unknown as Record<string, unknown>)._transport);
   }
 
   isEnabled(): boolean {
@@ -501,24 +611,55 @@ export class MubitMemoryEngine implements MemoryEngine {
   }
 
   private buildIngestItem(event: CapturedEventEnvelope): Record<string, unknown> {
+    const hints = {
+      source: event.source,
+      event_type: event.eventType,
+      reasoning_availability: event.reasoningAvailability,
+    };
+    const metadata = {
+      repo_id: event.repoId,
+      project_id: this.projectId ?? event.repoId,
+      actor_id: event.actorId ?? this.actorId ?? null,
+      session_id: event.sessionId,
+      thread_id: event.threadId,
+      ts: event.ts,
+    };
+
     return {
       item_id: event.eventId,
       content_type: "text",
       text: eventToText(event),
       payload_json: toJson(event.payload),
-      hints_json: toJson({
-        source: event.source,
-        event_type: event.eventType,
-        reasoning_availability: event.reasoningAvailability,
-      }),
-      metadata_json: toJson({
+      hints_json: toJson(hints),
+      metadata_json: toJson(metadata),
+    };
+  }
+
+  private buildRememberOptions(runId: string, event: CapturedEventEnvelope): RememberOptions {
+    return {
+      session_id: runId,
+      content: eventToText(event),
+      agent_id: this.agentId,
+      item_id: event.eventId,
+      content_type: "text",
+      metadata: {
         repo_id: event.repoId,
         project_id: this.projectId ?? event.repoId,
         actor_id: event.actorId ?? this.actorId ?? null,
         session_id: event.sessionId,
         thread_id: event.threadId,
         ts: event.ts,
-      }),
+      },
+      hints: {
+        source: event.source,
+        event_type: event.eventType,
+        reasoning_availability: event.reasoningAvailability,
+      },
+      payload: event.payload,
+      source: event.source,
+      parallel: false,
+      wait: false,
+      idempotency_key: event.eventId,
     };
   }
 
@@ -534,30 +675,6 @@ export class MubitMemoryEngine implements MemoryEngine {
       payload.idempotency_key = events[0]?.eventId;
     }
     return payload;
-  }
-
-  private buildControlBatchInsertPayload(runId: string, events: CapturedEventEnvelope[]): Record<string, unknown> {
-    return {
-      run_id: runId,
-      deduplicate: true,
-      items: events.map((event) => ({
-        item_id: event.eventId,
-        text: eventToText(event),
-        metadata_json: toJson({
-          repo_id: event.repoId,
-          project_id: this.projectId ?? event.repoId,
-          actor_id: event.actorId ?? this.actorId ?? null,
-          session_id: event.sessionId,
-          thread_id: event.threadId,
-          ts: event.ts,
-          source: event.source,
-          event_type: event.eventType,
-          reasoning_availability: event.reasoningAvailability,
-          payload: event.payload,
-        }),
-        source: event.source,
-      })),
-    };
   }
 
   private buildCoreInsertPayload(runId: string, event: CapturedEventEnvelope): Record<string, unknown> {
@@ -586,7 +703,9 @@ export class MubitMemoryEngine implements MemoryEngine {
 
   private async insertEventsViaCore(runId: string, events: CapturedEventEnvelope[]): Promise<unknown> {
     if (!this.client.core?.insert) {
-      throw new Error("Mubit core.ingest/core.insert is required; control.ingest fallback is disabled in Codaph.");
+      throw new Error(
+        "Mubit ingest is unavailable. Expected client.remember, control.ingest, core.ingest, or core.insert.",
+      );
     }
 
     const results: unknown[] = [];
@@ -599,9 +718,29 @@ export class MubitMemoryEngine implements MemoryEngine {
     return { success: true, count: results.length, results };
   }
 
+  private async rememberEvent(runId: string, event: CapturedEventEnvelope): Promise<unknown> {
+    if (this.client.remember) {
+      return await this.client.remember(this.buildRememberOptions(runId, event));
+    }
+    if (this.client.control.ingest) {
+      return await this.client.control.ingest(this.buildIngestPayload(runId, [event]));
+    }
+    if (this.client.core?.ingest) {
+      return await this.client.core.ingest(this.buildIngestPayload(runId, [event]));
+    }
+    return await this.insertEventsViaCore(runId, [event]);
+  }
+
   private async ingestEvents(runId: string, events: CapturedEventEnvelope[]): Promise<unknown> {
-    if (events.length > 0 && this.client.control.batchInsert) {
-      return await this.client.control.batchInsert(this.buildControlBatchInsertPayload(runId, events));
+    if (events.length === 1) {
+      const [event] = events;
+      if (!event) {
+        return { accepted: false };
+      }
+      return await this.rememberEvent(runId, event);
+    }
+    if (this.client.control.ingest) {
+      return await this.client.control.ingest(this.buildIngestPayload(runId, events));
     }
     if (this.client.core?.ingest) {
       return await this.client.core.ingest(this.buildIngestPayload(runId, events));
@@ -752,6 +891,9 @@ export class MubitMemoryEngine implements MemoryEngine {
     if (!this.isEnabled()) {
       return;
     }
+    if (!this.client.control.setVariable) {
+      return;
+    }
 
     await this.client.control.setVariable({
       run_id: runId,
@@ -783,7 +925,22 @@ export class MubitMemoryEngine implements MemoryEngine {
     if (mode === "direct_bypass") {
       payload.direct_lane = directLane;
     }
-    const result = await this.client.control.query(payload);
+    let result: unknown;
+    if (this.client.recall) {
+      result = await this.client.recall({
+        session_id: options.runId,
+        query: options.query,
+        mode,
+        direct_lane: directLane,
+        include_linked_runs: options.includeLinkedRuns ?? false,
+        limit,
+        embedding: [],
+      });
+    } else if (this.client.control.query) {
+      result = await this.client.control.query(payload);
+    } else {
+      throw new Error("Mubit recall/query API is unavailable in this runtime.");
+    }
     const record = asRecord(result);
     const meta = {
       codaph_query_lane: mode === "direct_bypass" ? directLane : "agent_routed",
@@ -814,7 +971,12 @@ export class MubitMemoryEngine implements MemoryEngine {
           : 500,
       refresh: Boolean(options.refresh),
     };
-    const result = await this.client.control.contextSnapshot(payload);
+    let result: unknown;
+    try {
+      result = await this.client.control.contextSnapshot(payload);
+    } catch (error) {
+      throw withMubitConnectivityHint(error, process.env, this.resolvedTransport);
+    }
     const record = asRecord(result);
     return record ?? { raw: result };
   }
