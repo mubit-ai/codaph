@@ -95,6 +95,7 @@ Use `codaph mcp setup claude` to print (or run with `--run`) the recommended `cl
 Optional query example (OpenAI-assisted if `OPENAI_API_KEY` is set, otherwise Mubit response):
 
 ```bash
+codaph mubit query "what changed in auth?"
 codaph mubit query "what changed in auth?" --session <session-id>
 ```
 

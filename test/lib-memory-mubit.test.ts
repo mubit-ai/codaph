@@ -584,6 +584,163 @@ describe("memory-mubit", () => {
     });
   });
 
+  it("supplements weak semantic query answers with context without replacing the query result", async () => {
+    const recallCalls: Array<Record<string, unknown>> = [];
+    const contextCalls: Array<Record<string, unknown>> = [];
+    const engine = new MubitMemoryEngine({
+      client: {
+        recall: async (payload: RecallOptions) => {
+          recallCalls.push(payload as unknown as Record<string, unknown>);
+          return {
+            final_answer: "I do not know.",
+            confidence: 0.2,
+            evidence: [{ content: "some evidence", source: "codaph-cli" }],
+          };
+        },
+        control: {
+          context: async (payload?: Record<string, unknown>) => {
+            contextCalls.push(payload ?? {});
+            return {
+              context_block: "Known facts:\n- Use activity replay when snapshots are empty.",
+              section_summaries: [{ section_name: "Known Facts", item_count: 1 }],
+            };
+          },
+        } as Record<string, unknown>,
+      } as unknown as any,
+    });
+
+    const result = await engine.queryWithContextFallback({
+      runId: "codaph:repo-abc",
+      query: "what should the next agent know?",
+      limit: 6,
+      includeLinkedRuns: true,
+      mode: "agent_routed",
+      contextMode: "summary",
+      contextFormat: "structured",
+    });
+
+    expect(recallCalls).toHaveLength(1);
+    expect(contextCalls).toHaveLength(1);
+    expect(result.final_answer).toBe("I do not know.");
+    expect(result.query_fallback_used).toBe(true);
+    expect(result.query_fallback_reason).toBe("weak_final_answer");
+    expect(result.query_result).toMatchObject({
+      final_answer: "I do not know.",
+    });
+    expect(result.supplemental_context_block).toContain("Use activity replay");
+    expect((result.supplemental_context as Record<string, unknown>).context_block).toContain("Known facts");
+    expect(contextCalls[0]).toMatchObject({
+      run_id: "codaph:repo-abc",
+      query: "what should the next agent know?",
+      mode: "summary",
+      format: "structured",
+      include_linked_runs: true,
+      limit: 6,
+    });
+  });
+
+  it("keeps strong semantic query answers without fetching fallback context", async () => {
+    const recallCalls: Array<Record<string, unknown>> = [];
+    const contextCalls: Array<Record<string, unknown>> = [];
+    const engine = new MubitMemoryEngine({
+      client: {
+        recall: async (payload: RecallOptions) => {
+          recallCalls.push(payload as unknown as Record<string, unknown>);
+          return {
+            final_answer: "Use project scope for shared repo memory.",
+            confidence: 1,
+            evidence: [{ content: "shared repo memory", source: "codaph-cli" }],
+          };
+        },
+        control: {
+          context: async (payload?: Record<string, unknown>) => {
+            contextCalls.push(payload ?? {});
+            return {
+              context_block: "unused fallback",
+            };
+          },
+        } as Record<string, unknown>,
+      } as unknown as any,
+    });
+
+    const result = await engine.queryWithContextFallback({
+      runId: "codaph:repo-abc",
+      query: "how should we share memory?",
+      mode: "agent_routed",
+    });
+
+    expect(recallCalls).toHaveLength(1);
+    expect(contextCalls).toHaveLength(0);
+    expect(result.query_fallback_used).toBe(false);
+    expect(result.query_fallback_reason).toBeNull();
+    expect(result.final_answer).toContain("project scope");
+    expect(result.supplemental_context).toBeNull();
+  });
+
+  it("normalizes context snapshots into a repo-facing inspection shape", async () => {
+    const snapshotCalls: Array<Record<string, unknown>> = [];
+    const engine = new MubitMemoryEngine({
+      client: {
+        control: {
+          contextSnapshot: async (payload?: Record<string, unknown>) => {
+            snapshotCalls.push(payload ?? {});
+            return {
+              scope: {
+                run_id: "state::123::codaph:repo-abc",
+                linked_run_ids: ["codaph:repo-abc:session-1"],
+              },
+              agents: [],
+              timeline: [],
+              promotions: [
+                {
+                  policy_rule: "llm_policy",
+                  reason: "The user explicitly asked to build and test the integration.",
+                  source_record_id: "rec-1",
+                },
+              ],
+              snapshot: {
+                summary: "The latest run assembled state without replayable timeline events.",
+                progress: ["Imported recent activity."],
+                next_actions: ["Inspect the query path."],
+                uncertainties: ["Why recall is weaker than getContext."],
+                blockers: [],
+                facts: ["Activity replay imported 1456 events."],
+                updated_at: "2026-03-25T12:00:00.000Z",
+              },
+            };
+          },
+        } as Record<string, unknown>,
+      } as unknown as any,
+    });
+
+    const result = await engine.inspectContextSnapshot({
+      runId: "codaph:repo-abc",
+      timelineLimit: 25,
+      refresh: false,
+    });
+
+    expect(snapshotCalls).toHaveLength(1);
+    expect(snapshotCalls[0]).toMatchObject({
+      run_id: "codaph:repo-abc",
+      timeline_limit: 25,
+      refresh: false,
+    });
+    expect(result.run_id_requested).toBe("codaph:repo-abc");
+    expect(result.run_id_resolved).toBe("state::123::codaph:repo-abc");
+    expect(result.linked_run_ids).toEqual(["codaph:repo-abc:session-1"]);
+    expect(result.timeline_count).toBe(0);
+    expect(result.promotion_count).toBe(1);
+    expect(result.has_promotions).toBe(true);
+    expect(result.has_replayable_timeline).toBe(false);
+    expect(result.snapshot_summary).toContain("assembled state");
+    expect(result.snapshot_progress).toEqual(["Imported recent activity."]);
+    expect(result.snapshot_next_actions).toEqual(["Inspect the query path."]);
+    expect(result.snapshot_uncertainties).toEqual(["Why recall is weaker than getContext."]);
+    expect(result.snapshot_facts).toEqual(["Activity replay imported 1456 events."]);
+    expect((result.promotion_policy_counts as Record<string, number>).llm_policy).toBe(1);
+    expect((result.promotion_samples as Array<Record<string, unknown>>)[0]?.reason).toContain("build and test");
+  });
+
   it("wraps list/export activity and run-state control APIs", async () => {
     const listActivityCalls: Array<Record<string, unknown>> = [];
     const exportActivityCalls: Array<Record<string, unknown>> = [];

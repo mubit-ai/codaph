@@ -136,6 +136,13 @@ Current tools include:
 - `codaph_timeline_get`
 - `codaph_diff_summary`
 - `codaph_projects_list`
+- `codaph_mubit_context`
+- `codaph_mubit_snapshot`
+- `codaph_mubit_activity`
+- `codaph_mubit_diagnose`
+- `codaph_mubit_strategies`
+- `codaph_handoffs_list`
+- `codaph_agents_list`
 
 ## If Claude Code Shows `failed`
 
@@ -150,4 +157,3 @@ codaph mcp
 ```
 
 If the process stays open waiting for stdio input, the server is starting correctly.
-

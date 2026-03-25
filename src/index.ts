@@ -418,7 +418,7 @@ function help(): string {
     "  codaph mcp [serve] [--cwd <path>]            (MCP stdio server for agents/tools)",
     "  codaph mcp setup claude [--scope user|project] [--run] [--cwd <path>]",
     "  codaph sessions|timeline|diff|inspect ...",
-    "  codaph doctor, codaph hooks run ..., codaph mubit query|context|diagnose|replay|reflect|strategies ...",
+    "  codaph doctor, codaph hooks run ..., codaph mubit query|context|snapshot|activity|export|diagnose|replay|reflect|strategies ...",
     "  codaph agents list, codaph handoff send|list|feedback ...",
     "",
     "Tip: run `codaph init`, then `codaph pull` and `codaph tui`.",
@@ -686,6 +686,21 @@ async function doctor(rest: string[]): Promise<void> {
     });
     console.log(`Mubit doctor run scope: ${runId}`);
     printStructuredMubitResult("Mubit memory health", health, ["summary"]);
+
+    const snapshot = await memory.inspectContextSnapshot({
+      runId,
+      timelineLimit: 20,
+      refresh: false,
+    }).catch(() => null);
+    if (snapshot && snapshot.disabled !== true && snapshot.unsupported !== true) {
+      const resolvedRunId =
+        typeof snapshot.run_id_resolved === "string" ? snapshot.run_id_resolved : runId;
+      const timelineCount = typeof snapshot.timeline_count === "number" ? snapshot.timeline_count : 0;
+      const promotionCount = typeof snapshot.promotion_count === "number" ? snapshot.promotion_count : 0;
+      console.log(
+        `Mubit snapshot status: resolved=${resolvedRunId} timeline=${timelineCount} promotions=${promotionCount} ${timelineCount === 0 && promotionCount > 0 ? "(assembled state without replayable timeline)" : ""}`.trim(),
+      );
+    }
   }
 }
 
@@ -3725,8 +3740,12 @@ function buildMubitQueryPrompt(question: string): string {
   return `${question}\n\nReturn a concise answer in up to 6 bullet points. Do not suggest endpoints, lanes, or internal query modes unless explicitly asked. Avoid raw terminal dumps or repeated transcript blocks.`;
 }
 
-function printMubitNoDataHint(cwd: string, sessionId: string): void {
-  console.log(`Mubit returned no answer/evidence for session ${sessionId}.`);
+function printMubitNoDataHint(cwd: string, runId: string | null): void {
+  if (runId) {
+    console.log(`Mubit returned no answer/evidence for run ${runId}.`);
+  } else {
+    console.log("Mubit returned no answer/evidence.");
+  }
   console.log(`Try refining your query or checking run scope: ${cwd}`);
 }
 
@@ -3820,6 +3839,10 @@ function buildOpenAiContext(
     question,
     mubit_final_answer:
       typeof mubitResponse.final_answer === "string" ? clipText(mubitResponse.final_answer, 1500) : null,
+    mubit_context_supplement:
+      typeof mubitResponse.supplemental_context_block === "string"
+        ? clipText(mubitResponse.supplemental_context_block, 1500)
+        : null,
     evidence,
     confidence: typeof mubitResponse.confidence === "number" ? mubitResponse.confidence : null,
   };
@@ -3903,7 +3926,7 @@ async function runOpenAiAgentFromMubit(
 function printMubitResponse(
   response: Record<string, unknown>,
   cwd: string,
-  sessionId: string,
+  runId: string | null,
   raw: boolean,
 ): void {
   if (raw) {
@@ -3918,6 +3941,24 @@ function printMubitResponse(
     typeof response.final_answer === "string" && response.final_answer.trim().length > 0
       ? response.final_answer
       : null;
+  const supplementalContext =
+    typeof response.supplemental_context_block === "string" && response.supplemental_context_block.trim().length > 0
+      ? response.supplemental_context_block.trim()
+      : null;
+
+  if (finalAnswer) {
+    console.log("Mubit answer:");
+    console.log(sanitizeMubitAnswer(finalAnswer));
+    const confidenceText =
+      typeof confidence === "number" ? ` | confidence=${confidence.toFixed(2)}` : "";
+    console.log(`evidence=${evidenceCount}${confidenceText}`);
+    if (supplementalContext && response.query_fallback_used === true) {
+      console.log("");
+      console.log("Context supplement:");
+      console.log(clipText(stripTranscriptDump(supplementalContext).trim(), 1400));
+    }
+    return;
+  }
 
   if (snippets.length > 0) {
     console.log("Mubit answer:");
@@ -3927,25 +3968,26 @@ function printMubitResponse(
     const confidenceText =
       typeof confidence === "number" ? ` | confidence=${confidence.toFixed(2)}` : "";
     console.log(`evidence=${evidenceCount}${confidenceText}`);
-    return;
-  }
-
-  if (finalAnswer) {
-    console.log("Mubit answer:");
-    console.log(sanitizeMubitAnswer(finalAnswer));
-    const confidenceText =
-      typeof confidence === "number" ? ` | confidence=${confidence.toFixed(2)}` : "";
-    console.log(`evidence=${evidenceCount}${confidenceText}`);
+    if (supplementalContext && response.query_fallback_used === true) {
+      console.log("");
+      console.log("Context supplement:");
+      console.log(clipText(stripTranscriptDump(supplementalContext).trim(), 1400));
+    }
     return;
   }
 
   if (evidenceCount === 0) {
-    printMubitNoDataHint(cwd, sessionId);
+    printMubitNoDataHint(cwd, runId);
     return;
   }
   console.log(`Mubit returned ${evidenceCount} evidence items, but no final answer.`);
   for (const snippet of snippets) {
     console.log(snippet);
+  }
+  if (supplementalContext && response.query_fallback_used === true) {
+    console.log("");
+    console.log("Context supplement:");
+    console.log(clipText(stripTranscriptDump(supplementalContext).trim(), 1400));
   }
 }
 
@@ -3972,14 +4014,10 @@ async function mubitQuery(rest: string[]): Promise<void> {
     throw new Error("A query string is required.");
   }
 
-  const sessionId = getStringFlag(flags, "session");
-  if (!sessionId) {
-    throw new Error("--session is required to resolve Mubit run scope.");
-  }
-
   const cwd = resolve(getStringFlag(flags, "cwd") ?? process.cwd());
   const settings = loadCodaphSettings();
   const repoId = resolveRepoIdForProject(flags, cwd, settings);
+  const sessionId = getStringFlag(flags, "session");
   const engine = createMubitMemory(flags, cwd, settings);
   if (!engine || !engine.isEnabled()) {
     throw new Error("Mubit is disabled. Set MUBIT_API_KEY (or MUBIT_APIKEY) and use --mubit.");
@@ -3989,20 +4027,31 @@ async function mubitQuery(rest: string[]): Promise<void> {
   const limit = limitRaw ? Number.parseInt(limitRaw, 10) : undefined;
   const rawMode = getBooleanFlag(flags, "raw", false);
   const forceDirect = getBooleanFlag(flags, "direct", false) || getBooleanFlag(flags, "hdql", false);
-  const runId = mubitRunIdForContext(flags, repoId, sessionId, cwd, settings);
-  console.log(`Querying Mubit run scope: ${runId}`);
+  const runId = resolveMubitCommandRunId(flags, cwd, settings, { sessionId, preferProject: !sessionId });
+  if (flags.json !== true) {
+    console.log(`Querying Mubit run scope: ${runId}`);
+  }
 
   const response = await withTimeout(
-    engine.querySemanticContext({
+    engine.queryWithContextFallback({
       runId,
       query: buildMubitQueryPrompt(question),
       limit,
+      includeLinkedRuns: getBooleanFlag(flags, "include-linked-runs", resolveMubitLinkedRuns(flags, cwd, settings)),
       mode: forceDirect ? "direct_bypass" : "agent_routed",
       directLane: "hdql_query",
+      contextLimit: limit,
+      contextFormat: "structured",
+      contextMode: "summary",
     }),
     45000,
     "Mubit query",
   );
+
+  if (flags.json === true) {
+    console.log(JSON.stringify({ cwd, repoId, sessionId: sessionId ?? null, runId, query: question, ...response }, null, 2));
+    return;
+  }
 
   if (!rawMode) {
     const openAiKey = resolveOpenAiApiKey(flags, settings);
@@ -4018,7 +4067,7 @@ async function mubitQuery(rest: string[]): Promise<void> {
     }
   }
 
-  printMubitResponse(response, cwd, sessionId, rawMode);
+  printMubitResponse(response, cwd, runId, rawMode);
 }
 
 async function mubitContextCommand(rest: string[]): Promise<void> {
@@ -4066,6 +4115,112 @@ async function mubitContextCommand(rest: string[]): Promise<void> {
 
   console.log(`Mubit run scope: ${runId}`);
   printStructuredMubitResult("Mubit context", response, ["context_block", "context"]);
+}
+
+async function mubitSnapshotCommand(rest: string[]): Promise<void> {
+  const { flags } = parseArgs(rest);
+  const cwd = resolve(getStringFlag(flags, "cwd") ?? process.cwd());
+  const settings = loadCodaphSettings();
+  const repoId = resolveRepoIdForProject(flags, cwd, settings);
+  const sessionId = getStringFlag(flags, "session");
+  const runId = resolveMubitCommandRunId(flags, cwd, settings, { sessionId, preferProject: !sessionId });
+  const engine = createMubitMemory(flags, cwd, settings);
+  if (!engine || !engine.isEnabled()) {
+    throw new Error("Mubit is disabled. Set MUBIT_API_KEY (or MUBIT_APIKEY) and use --mubit.");
+  }
+
+  const timelineLimitRaw = getStringFlag(flags, "timeline-limit") ?? getStringFlag(flags, "limit");
+  const response = await withTimeout(
+    engine.inspectContextSnapshot({
+      runId,
+      timelineLimit: timelineLimitRaw ? Number.parseInt(timelineLimitRaw, 10) : undefined,
+      refresh: getBooleanFlag(flags, "refresh", false),
+    }),
+    45000,
+    "Mubit snapshot",
+  );
+
+  if (flags.json === true) {
+    console.log(JSON.stringify({ cwd, repoId, sessionId: sessionId ?? null, runId, ...response }, null, 2));
+    return;
+  }
+
+  console.log(`Mubit run scope: ${runId}`);
+  printMubitSnapshot(response);
+}
+
+async function mubitActivityCommand(rest: string[]): Promise<void> {
+  const { flags } = parseArgs(rest);
+  const cwd = resolve(getStringFlag(flags, "cwd") ?? process.cwd());
+  const settings = loadCodaphSettings();
+  const repoId = resolveRepoIdForProject(flags, cwd, settings);
+  const sessionId = getStringFlag(flags, "session");
+  const runId = resolveMubitCommandRunId(flags, cwd, settings, { sessionId, preferProject: !sessionId });
+  const engine = createMubitMemory(flags, cwd, settings);
+  if (!engine || !engine.isEnabled()) {
+    throw new Error("Mubit is disabled. Set MUBIT_API_KEY (or MUBIT_APIKEY) and use --mubit.");
+  }
+
+  const limitRaw = getStringFlag(flags, "limit");
+  const response = await withTimeout(
+    engine.listActivity({
+      runId,
+      entryTypes: parseCsvFlag(getStringFlag(flags, "entry-types")),
+      sort: getStringFlag(flags, "sort") === "asc" ? "asc" : "desc",
+      limit: limitRaw ? Number.parseInt(limitRaw, 10) : 50,
+      pageToken: getStringFlag(flags, "page-token"),
+      agentId: getStringFlag(flags, "agent-id") ?? undefined,
+    }),
+    45000,
+    "Mubit activity",
+  );
+
+  if (flags.json === true) {
+    console.log(JSON.stringify({ cwd, repoId, sessionId: sessionId ?? null, runId, ...response }, null, 2));
+    return;
+  }
+
+  console.log(`Mubit run scope: ${runId}`);
+  printMubitActivity(response);
+}
+
+async function mubitExportCommand(rest: string[]): Promise<void> {
+  const { flags } = parseArgs(rest);
+  const cwd = resolve(getStringFlag(flags, "cwd") ?? process.cwd());
+  const settings = loadCodaphSettings();
+  const repoId = resolveRepoIdForProject(flags, cwd, settings);
+  const sessionId = getStringFlag(flags, "session");
+  const runId = resolveMubitCommandRunId(flags, cwd, settings, { sessionId, preferProject: !sessionId });
+  const engine = createMubitMemory(flags, cwd, settings);
+  if (!engine || !engine.isEnabled()) {
+    throw new Error("Mubit is disabled. Set MUBIT_API_KEY (or MUBIT_APIKEY) and use --mubit.");
+  }
+
+  const limitRaw = getStringFlag(flags, "limit");
+  const response = await withTimeout(
+    engine.exportActivity({
+      runId,
+      entryTypes: parseCsvFlag(getStringFlag(flags, "entry-types")),
+      sort: getStringFlag(flags, "sort") === "asc" ? "asc" : "desc",
+      limit: limitRaw ? Number.parseInt(limitRaw, 10) : undefined,
+      format: getStringFlag(flags, "format") ?? "jsonl",
+      agentId: getStringFlag(flags, "agent-id") ?? undefined,
+    }),
+    45000,
+    "Mubit export",
+  );
+
+  if (flags.json === true) {
+    console.log(JSON.stringify({ cwd, repoId, sessionId: sessionId ?? null, runId, ...response }, null, 2));
+    return;
+  }
+
+  console.log(`Mubit run scope: ${runId}`);
+  if (typeof response.content === "string" && response.content.length > 0) {
+    process.stdout.write(response.content.endsWith("\n") ? response.content : `${response.content}\n`);
+    return;
+  }
+  console.log(JSON.stringify(response, null, 2));
 }
 
 async function mubitDiagnoseCommand(rest: string[]): Promise<void> {
@@ -6393,10 +6548,111 @@ function composeMubitAnswer(
     return snippets.map((line) => line.replace(/^- /, "")).join("\n");
   }
   if (finalAnswer) {
-    return sanitizeMubitAnswer(finalAnswer);
+    const base = sanitizeMubitAnswer(finalAnswer);
+    const supplementalContext =
+      typeof response.supplemental_context_block === "string" && response.supplemental_context_block.trim().length > 0
+        ? clipText(stripTranscriptDump(response.supplemental_context_block).trim(), 1200)
+        : null;
+    if (supplementalContext && response.query_fallback_used === true) {
+      return `${base}\n\nContext supplement:\n${supplementalContext}`;
+    }
+    return base;
+  }
+
+  const supplementalContext =
+    typeof response.supplemental_context_block === "string" && response.supplemental_context_block.trim().length > 0
+      ? clipText(stripTranscriptDump(response.supplemental_context_block).trim(), 1200)
+      : null;
+  if (supplementalContext) {
+    return `Mubit did not return a strong answer for session ${sessionId}.\n\nContext supplement:\n${supplementalContext}`;
   }
 
   return `Mubit returned no answer/evidence for session ${sessionId}. Try refining query for ${cwd}.`;
+}
+
+function printMubitSnapshot(payload: Record<string, unknown>): void {
+  console.log("Mubit snapshot:");
+  if (typeof payload.summary === "string" && payload.summary.trim().length > 0) {
+    console.log(payload.summary.trim());
+  }
+  if (typeof payload.snapshot_summary === "string" && payload.snapshot_summary.trim().length > 0) {
+    console.log("");
+    console.log("Snapshot summary:");
+    console.log(payload.snapshot_summary.trim());
+  }
+
+  const sections: Array<[string, unknown]> = [
+    ["Progress", payload.snapshot_progress],
+    ["Next actions", payload.snapshot_next_actions],
+    ["Uncertainties", payload.snapshot_uncertainties],
+    ["Blockers", payload.snapshot_blockers],
+    ["Facts", payload.snapshot_facts],
+  ];
+
+  for (const [label, value] of sections) {
+    if (!Array.isArray(value) || value.length === 0) {
+      continue;
+    }
+    console.log("");
+    console.log(`${label}:`);
+    for (const entry of value) {
+      if (typeof entry === "string" && entry.trim().length > 0) {
+        console.log(`- ${entry.trim()}`);
+      }
+    }
+  }
+
+  if (Array.isArray(payload.promotion_samples) && payload.promotion_samples.length > 0) {
+    console.log("");
+    console.log("Promotion samples:");
+    for (const sample of payload.promotion_samples.slice(0, 5)) {
+      if (!isRecord(sample)) {
+        continue;
+      }
+      const policy = typeof sample.policy_rule === "string" ? sample.policy_rule : "unknown";
+      const reason = typeof sample.reason === "string" ? sample.reason : "";
+      const line = reason.length > 0 ? `- [${policy}] ${reason}` : `- [${policy}]`;
+      console.log(clipText(line, 240));
+    }
+  }
+}
+
+function printMubitActivity(payload: Record<string, unknown>): void {
+  const entries = Array.isArray(payload.entries)
+    ? payload.entries.filter((entry): entry is Record<string, unknown> => isRecord(entry))
+    : [];
+  if (entries.length === 0) {
+    console.log("Mubit activity: no entries visible for this run.");
+    return;
+  }
+
+  console.log(`Mubit activity (${entries.length} entries):`);
+  for (const entry of entries) {
+    const timestamp = typeof entry.created_at === "string" ? entry.created_at : "";
+    const entryType =
+      typeof entry.entry_type === "string"
+        ? entry.entry_type
+        : typeof entry.origin_entry_type === "string"
+          ? entry.origin_entry_type
+          : typeof entry.type === "string"
+            ? entry.type
+            : "activity";
+    const content =
+      typeof entry.content === "string"
+        ? entry.content
+        : typeof entry.metadata_json === "string"
+          ? entry.metadata_json
+          : JSON.stringify(entry);
+    const prefix = [timestamp, entryType].filter((part) => part.length > 0).join(" ");
+    console.log(`- ${prefix}: ${clipText(content, 220)}`);
+  }
+
+  if (typeof payload.next_page_token === "string" && payload.next_page_token.trim().length > 0) {
+    console.log(`next_page_token=${payload.next_page_token.trim()}`);
+  }
+  if (typeof payload.total_visible === "number") {
+    console.log(`total_visible=${payload.total_visible}`);
+  }
 }
 
 function headerLine(left: string, right: string, width: number): string {
@@ -7971,12 +8227,15 @@ async function tui(rest: string[]): Promise<void> {
     const useMubitAgentRouting = true;
 
     const response = await withTimeout(
-      memory.querySemanticContext({
+      memory.queryWithContextFallback({
         runId,
         query: buildMubitQueryPrompt(contextualQuery),
         limit: 8,
         mode: useMubitAgentRouting ? "agent_routed" : "direct_bypass",
         directLane: "hdql_query",
+        contextLimit: 6,
+        contextMode: "summary",
+        contextFormat: "structured",
       }),
       45000,
       "Mubit query",
@@ -9039,6 +9298,21 @@ async function main(): Promise<void> {
 
   if (cmd === "mubit" && sub === "context") {
     await mubitContextCommand(rest);
+    return;
+  }
+
+  if (cmd === "mubit" && sub === "snapshot") {
+    await mubitSnapshotCommand(rest);
+    return;
+  }
+
+  if (cmd === "mubit" && sub === "activity") {
+    await mubitActivityCommand(rest);
+    return;
+  }
+
+  if (cmd === "mubit" && sub === "export") {
+    await mubitExportCommand(rest);
     return;
   }
 

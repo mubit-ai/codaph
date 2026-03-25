@@ -252,6 +252,7 @@ What to do:
 Example:
 
 ```bash
+codaph mubit query "what changed in auth.ts recently?" --limit 12
 codaph mubit query "what changed in auth.ts during the last session?" --session <session-id> --limit 12
 ```
 

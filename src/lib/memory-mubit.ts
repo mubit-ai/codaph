@@ -18,11 +18,25 @@ export interface MubitSemanticQueryOptions {
   mode?: "agent_routed" | "direct_bypass";
 }
 
+export interface MubitSemanticQueryWithFallbackOptions extends MubitSemanticQueryOptions {
+  contextLimit?: number;
+  contextMaxTokenBudget?: number;
+  contextSections?: string[];
+  contextEntryTypes?: string[];
+  contextMode?: string;
+  contextFormat?: string;
+  includeWorkingMemory?: boolean;
+  laneFilter?: string;
+  agentId?: string;
+}
+
 export interface MubitContextSnapshotOptions {
   runId: string;
   timelineLimit?: number;
   refresh?: boolean;
 }
+
+export interface MubitInspectContextSnapshotOptions extends MubitContextSnapshotOptions {}
 
 export interface MubitContextBlockOptions {
   runId: string;
@@ -680,6 +694,61 @@ function summarizeActivityLine(entry: Record<string, unknown>): { line: string; 
     entryType,
     line: text ? `- ${header}: ${text}` : `- ${header}`,
   };
+}
+
+function asRecordArray(value: unknown): Record<string, unknown>[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter(
+    (entry): entry is Record<string, unknown> => typeof entry === "object" && entry !== null && !Array.isArray(entry),
+  );
+}
+
+function compactList(value: unknown, maxItems = 6, maxChars = 240): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const lines = value
+    .map((entry) => compactString(entry, maxChars))
+    .filter((entry): entry is string => !!entry);
+  return lines.slice(0, maxItems);
+}
+
+function summarizePromotionSample(entry: Record<string, unknown>): Record<string, unknown> {
+  return {
+    source_record_id: asString(entry.source_record_id) ?? null,
+    target: asString(entry.target) ?? null,
+    policy_rule: asString(entry.policy_rule) ?? "unknown",
+    reason: compactString(entry.reason, 220),
+    created_at: asString(entry.created_at) ?? null,
+    confidence:
+      typeof entry.confidence === "number" && Number.isFinite(entry.confidence)
+        ? entry.confidence
+        : null,
+  };
+}
+
+function getWeakQueryReason(response: Record<string, unknown>): string | null {
+  const finalAnswer = asString(response.final_answer);
+  if (!finalAnswer) {
+    return "empty_final_answer";
+  }
+
+  const normalized = finalAnswer.trim().toLowerCase();
+  if (
+    normalized === "i do not know." ||
+    normalized === "i do not know" ||
+    normalized === "i don't know." ||
+    normalized === "i don't know" ||
+    normalized === "unknown" ||
+    normalized === "not enough information"
+  ) {
+    return "weak_final_answer";
+  }
+
+  return null;
 }
 
 function compactActivityEnvelope(event: CapturedEventEnvelope): Record<string, unknown> {
@@ -1471,6 +1540,73 @@ export class MubitMemoryEngine implements MemoryEngine {
     });
   }
 
+  async inspectContextSnapshot(options: MubitInspectContextSnapshotOptions): Promise<Record<string, unknown>> {
+    const response = await this.fetchContextSnapshot(options);
+    if (response.disabled === true || response.unsupported === true) {
+      return response;
+    }
+
+    const snapshot = asRecord(response.snapshot) ?? {};
+    const scope = asRecord(response.scope) ?? {};
+    const promotions = asRecordArray(response.promotions);
+    const agents = asRecordArray(response.agents);
+    const timeline = asRecordArray(response.timeline);
+    const promotionPolicyCounts: Record<string, number> = {};
+
+    for (const promotion of promotions) {
+      const policy = asString(promotion.policy_rule) ?? "unknown";
+      promotionPolicyCounts[policy] = (promotionPolicyCounts[policy] ?? 0) + 1;
+    }
+
+    const runIdResolved = asString(scope.run_id) ?? options.runId;
+    const linkedRunIds = Array.isArray(scope.linked_run_ids)
+      ? scope.linked_run_ids.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)
+      : [];
+    const timelineCount = timeline.length;
+    const promotionCount = promotions.length;
+    const agentCount = agents.length;
+    const summaryParts = [
+      `resolved=${runIdResolved}`,
+      `${timelineCount} timeline event${timelineCount === 1 ? "" : "s"}`,
+      `${promotionCount} promotion${promotionCount === 1 ? "" : "s"}`,
+      `${agentCount} agent${agentCount === 1 ? "" : "s"}`,
+    ];
+    if (linkedRunIds.length > 0) {
+      summaryParts.push(`${linkedRunIds.length} linked run${linkedRunIds.length === 1 ? "" : "s"}`);
+    }
+    if (timelineCount === 0 && promotionCount > 0) {
+      summaryParts.push("assembled state available without replayable timeline");
+    }
+
+    return {
+      run_id_requested: options.runId,
+      run_id_resolved: runIdResolved,
+      linked_run_ids: linkedRunIds,
+      scope_owner_user_id:
+        typeof scope.owner_user_id === "number" || typeof scope.owner_user_id === "string"
+          ? scope.owner_user_id
+          : null,
+      control_status: asRecord(response.control_status) ?? null,
+      timeline_count: timelineCount,
+      agent_count: agentCount,
+      agents: agents.slice(0, 10),
+      promotion_count: promotionCount,
+      promotion_policy_counts: promotionPolicyCounts,
+      promotion_samples: promotions.slice(0, 5).map((entry) => summarizePromotionSample(entry)),
+      has_replayable_timeline: timelineCount > 0,
+      has_promotions: promotionCount > 0,
+      has_snapshot_state: Object.keys(snapshot).length > 0,
+      snapshot_summary: compactString(snapshot.summary, 1600),
+      snapshot_progress: compactList(snapshot.progress, 8),
+      snapshot_next_actions: compactList(snapshot.next_actions, 8),
+      snapshot_uncertainties: compactList(snapshot.uncertainties, 8),
+      snapshot_blockers: compactList(snapshot.blockers, 8),
+      snapshot_facts: compactList(snapshot.facts, 12),
+      snapshot_updated_at: asString(snapshot.updated_at) ?? null,
+      summary: summaryParts.join(" | "),
+    };
+  }
+
   async linkRun(runId: string, linkedRunId: string): Promise<Record<string, unknown>> {
     return await this.callControlMethod("linkRun", {
       run_id: runId,
@@ -1744,6 +1880,57 @@ export class MubitMemoryEngine implements MemoryEngine {
       codaph_query_mode: mode,
     };
     return record ? { ...record, ...meta } : { raw: result, ...meta };
+  }
+
+  async queryWithContextFallback(
+    options: MubitSemanticQueryWithFallbackOptions,
+  ): Promise<Record<string, unknown>> {
+    const queryResult = await this.querySemanticContext(options);
+    if (queryResult.disabled === true || queryResult.unsupported === true) {
+      return queryResult;
+    }
+
+    const fallbackReason = getWeakQueryReason(queryResult);
+    if (!fallbackReason) {
+      return {
+        ...queryResult,
+        query_result: queryResult,
+        query_fallback_used: false,
+        query_fallback_reason: null,
+        supplemental_context: null,
+        supplemental_context_block: null,
+      };
+    }
+
+    const supplementalContext = await this.getContextBlock({
+      runId: options.runId,
+      query: options.query,
+      limit: options.contextLimit ?? options.limit,
+      maxTokenBudget: options.contextMaxTokenBudget,
+      includeLinkedRuns: options.includeLinkedRuns,
+      includeWorkingMemory: options.includeWorkingMemory,
+      format: options.contextFormat ?? "structured",
+      mode: options.contextMode ?? "summary",
+      sections: options.contextSections,
+      entryTypes: options.contextEntryTypes,
+      laneFilter: options.laneFilter,
+      agentId: options.agentId,
+    }).catch(() => ({}) as Record<string, unknown>);
+
+    const supplementalContextBlock =
+      compactString(supplementalContext.context_block, 2200) ??
+      compactString(supplementalContext.context, 2200) ??
+      compactString(supplementalContext.summary, 2200);
+    const fallbackUsed = Boolean(supplementalContextBlock) || hasStructuredContextContent(supplementalContext);
+
+    return {
+      ...queryResult,
+      query_result: queryResult,
+      query_fallback_used: fallbackUsed,
+      query_fallback_reason: fallbackReason,
+      supplemental_context: fallbackUsed ? supplementalContext : null,
+      supplemental_context_block: fallbackUsed ? supplementalContextBlock ?? null : null,
+    };
   }
 
   async fetchContextSnapshot(options: MubitContextSnapshotOptions): Promise<Record<string, unknown>> {

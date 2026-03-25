@@ -103,7 +103,7 @@ This usually happens even when both contributors use the same Mubit key and proj
 Common reasons:
 
 - one person ran `codaph import` and the other did not
-- cloud pull is based on a snapshot and may return a partial event slice
+- cloud pull starts from a snapshot view and may fall back to activity replay when the snapshot does not expose a replayable timeline
 - event-level snapshots can be dominated by thoughts/tool events instead of prompts
 
 Codaph now writes a prompt-focused cloud stream to improve prompt parity, but local backfill can still show more complete history on the originating machine.
@@ -124,7 +124,7 @@ Compare:
 - `mubitRunScope`
 - remote pull counters and snapshot fingerprint
 
-If the snapshot fingerprint matches, both users are pulling the same cloud snapshot.
+If the snapshot fingerprint matches, both users are seeing the same assembled cloud snapshot state.
 
 ## Commands You Will Actually Use
 
@@ -144,8 +144,8 @@ codaph tui
 
 ## Current Limits (Important)
 
-- Cloud pull uses a Mubit snapshot timeline and may be bounded.
-- Prompt parity is better than full thought/diff parity when the cloud snapshot is capped.
+- Cloud pull reads assembled snapshot state first, but chronological reconstruction may require activity replay.
+- Prompt parity is better than full thought/diff parity when remote history is capped or older entries need replay.
 - `codaph import` is machine-local because it reads that machine's `~/.codex/sessions`.
 
 These are product limits, not usually user mistakes.

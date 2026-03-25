@@ -567,6 +567,48 @@ function toolSchemas(): McpTool[] {
       },
     },
     {
+      name: "codaph_mubit_snapshot",
+      description: "Inspect the assembled Mubit snapshot for a project or session run.",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          cwd: { type: "string" },
+          project_path: { type: "string" },
+          repoId: { type: "string" },
+          repo_id: { type: "string" },
+          sessionId: { type: "string" },
+          session_id: { type: "string" },
+          timelineLimit: { type: "integer", minimum: 1, maximum: 5000 },
+          timeline_limit: { type: "integer", minimum: 1, maximum: 5000 },
+          refresh: { type: "boolean" },
+        },
+      },
+      handler: async (args, ctx) => {
+        const project = await resolveProjectContext(args, ctx);
+        const engine = createMubitMemoryForProject(project.cwd, project.settings);
+        if (!engine?.isEnabled()) {
+          throw new Error("Mubit is not configured for this environment.");
+        }
+        const sessionId = asOptionalString(args.sessionId) ?? asOptionalString(args.session_id);
+        const runId = resolveMubitRunIdForProjectContext(project, sessionId);
+        const response = await engine.inspectContextSnapshot({
+          runId,
+          timelineLimit:
+            asOptionalInteger(args.timelineLimit, "timelineLimit") ??
+            asOptionalInteger(args.timeline_limit, "timeline_limit"),
+          refresh: asOptionalBoolean(args.refresh, "refresh") ?? false,
+        });
+        return {
+          cwd: project.cwd,
+          repoId: project.repoId,
+          sessionId: sessionId ?? null,
+          runId,
+          ...response,
+        };
+      },
+    },
+    {
       name: "codaph_mubit_diagnose",
       description: "Diagnose an error against Mubit memory for prior lessons and similar failures.",
       inputSchema: {
@@ -601,6 +643,56 @@ function toolSchemas(): McpTool[] {
           errorText: asOptionalString(args.errorText) ?? asRequiredString(args.error_text, "error_text"),
           errorType: asOptionalString(args.errorType) ?? asOptionalString(args.error_type),
           limit: asOptionalInteger(args.limit, "limit"),
+          agentId: asOptionalString(args.agentId),
+        });
+        return {
+          cwd: project.cwd,
+          repoId: project.repoId,
+          sessionId: sessionId ?? null,
+          runId,
+          ...response,
+        };
+      },
+    },
+    {
+      name: "codaph_mubit_activity",
+      description: "List chronological Mubit activity for a project or session.",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          cwd: { type: "string" },
+          project_path: { type: "string" },
+          repoId: { type: "string" },
+          repo_id: { type: "string" },
+          sessionId: { type: "string" },
+          session_id: { type: "string" },
+          entryTypes: { type: ["array", "string"], items: { type: "string" } },
+          entry_types: { type: ["array", "string"], items: { type: "string" } },
+          limit: { type: "integer", minimum: 1, maximum: 200 },
+          sort: { type: "string", enum: ["asc", "desc"] },
+          pageToken: { type: "string" },
+          page_token: { type: "string" },
+          agentId: { type: "string" },
+        },
+      },
+      handler: async (args, ctx) => {
+        const project = await resolveProjectContext(args, ctx);
+        const engine = createMubitMemoryForProject(project.cwd, project.settings);
+        if (!engine?.isEnabled()) {
+          throw new Error("Mubit is not configured for this environment.");
+        }
+        const sessionId = asOptionalString(args.sessionId) ?? asOptionalString(args.session_id);
+        const runId = resolveMubitRunIdForProjectContext(project, sessionId);
+        const sort = asOptionalString(args.sort);
+        const response = await engine.listActivity({
+          runId,
+          entryTypes:
+            asOptionalStringArray(args.entryTypes, "entryTypes") ??
+            asOptionalStringArray(args.entry_types, "entry_types"),
+          sort: sort === "asc" ? "asc" : "desc",
+          limit: asOptionalInteger(args.limit, "limit") ?? 50,
+          pageToken: asOptionalString(args.pageToken) ?? asOptionalString(args.page_token),
           agentId: asOptionalString(args.agentId),
         });
         return {

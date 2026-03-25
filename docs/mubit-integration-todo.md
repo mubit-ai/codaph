@@ -10,7 +10,7 @@ Implemented:
 
 - post-normalization write hook in ingest pipeline
 - semantic query command (`mubit query`) with optional OpenAI synthesis
-- remote replay job (`sync remote`) from Mubit context snapshot timeline
+- remote replay job (`sync remote`) with snapshot-first detection and activity replay fallback
 - project-scoped and session-scoped run ids
 - actor-aware metadata for collaborative attribution
 

@@ -213,7 +213,7 @@ These commands are useful for debugging, inspection, and power users.
 codaph doctor mubit
 ```
 
-Use `codaph doctor mubit` when you want memory-health diagnostics from Mubit.
+Use `codaph doctor mubit` when you want memory-health diagnostics from Mubit plus a quick snapshot-state summary for the current project run.
 
 ### Session inspection
 
@@ -240,9 +240,12 @@ Use `pull --full` or `replay --mode activity` when snapshot-based remote pull lo
 ```bash
 codaph mubit context "what should the next agent know?"
 codaph mubit context "what should the next agent know?" --session <session-id>
+codaph mubit snapshot
+codaph mubit activity --limit 20
+codaph mubit export --limit 20 --format jsonl
 ```
 
-Use this before starting a new agent run or handing off work to another provider.
+Use `mubit context` before starting a new agent run or handing off work to another provider. Use `mubit snapshot` when you want assembled run state, and `mubit activity` / `export` when you want chronological audit data.
 
 ### Checkpoints
 
@@ -283,10 +286,11 @@ Use handoffs when one agent should explicitly continue the work of another inste
 ### Mubit queries
 
 ```bash
+codaph mubit query "what changed in auth?"
 codaph mubit query "what changed in auth?" --session <session-id>
 ```
 
-OpenAI-assisted synthesis is optional. Without `OPENAI_API_KEY`, Codaph falls back to the Mubit response.
+OpenAI-assisted synthesis is optional. Without `OPENAI_API_KEY`, Codaph falls back to the Mubit response. When the answer path is weak, Codaph can attach a clearly labeled context supplement instead of silently replacing the query result.
 
 Useful query flags:
 

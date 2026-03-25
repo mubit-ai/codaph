@@ -195,9 +195,10 @@ Inside the TUI:
 
 ## Ask Mubit a Question (Optional OpenAI-assisted)
 
-After you identify a session id, you can query Mubit directly from the CLI:
+You can query Mubit directly from the CLI at project scope or narrow to one session when needed:
 
 ```bash
+codaph mubit query "what changed in auth?"
 codaph mubit query "what changed in auth?" --session <session-id>
 ```
 
@@ -214,6 +215,8 @@ After setup, these commands are the main building blocks for cross-agent continu
 ```bash
 codaph pull --full
 codaph mubit context "what should the next agent know?"
+codaph mubit snapshot
+codaph mubit activity --limit 20
 codaph checkpoint "before-auth-refactor"
 codaph doctor mubit
 codaph mubit diagnose "auth failure in CI"

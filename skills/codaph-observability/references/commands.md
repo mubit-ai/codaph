@@ -20,6 +20,7 @@ Use this sequence before answering questions like "what changed?", "what is the 
 codaph status --cwd <repo> --json
 codaph pull --cwd <repo> --json
 codaph mubit context "what should the next agent know about this work?" --cwd <repo> --json
+codaph mubit snapshot --cwd <repo> --json
 ```
 
 Only add full replay when needed:
@@ -42,6 +43,22 @@ Session scope:
 
 ```bash
 codaph mubit context "what should the next agent know?" --cwd <repo> --session <session-id> --json
+```
+
+## Snapshot And Activity Inspection
+
+Assembled run state:
+
+```bash
+codaph mubit snapshot --cwd <repo> --json
+codaph mubit snapshot --cwd <repo> --session <session-id> --json
+```
+
+Chronological activity:
+
+```bash
+codaph mubit activity --cwd <repo> --limit 20 --json
+codaph mubit export --cwd <repo> --limit 20 --format jsonl
 ```
 
 ## Before Risky Edits
@@ -112,5 +129,6 @@ Use `--session <session-id>` when reflection should stay tied to one run.
 codaph status --cwd /Users/shankha/code/codaph --json
 codaph pull --cwd /Users/shankha/code/codaph --full --json
 codaph mubit context "what should the next agent know about the current codaph work?" --cwd /Users/shankha/code/codaph --json
+codaph mubit snapshot --cwd /Users/shankha/code/codaph --json
 codaph checkpoint "smoke-test" --cwd /Users/shankha/code/codaph --json
 ```

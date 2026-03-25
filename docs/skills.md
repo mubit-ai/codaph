@@ -59,10 +59,11 @@ The included `codaph-observability` skill standardizes this workflow:
 2. Run `codaph push --cwd <repo>` if local work may be ahead.
 3. Run `codaph pull --cwd <repo>` or `codaph pull --full --cwd <repo>` when remote replay is needed.
 4. Use `codaph mubit context` before starting or resuming an agent.
-5. Use `codaph checkpoint` before risky edits.
-6. Use `codaph doctor mubit` and `codaph mubit diagnose` when an agent is stuck.
-7. Use `codaph handoff send` when another agent should continue.
-8. Use `codaph mubit reflect` and `codaph mubit strategies` after meaningful work.
+5. Use `codaph mubit snapshot` when you need assembled run state, and `codaph mubit activity` when you need chronological evidence.
+6. Use `codaph checkpoint` before risky edits.
+7. Use `codaph doctor mubit` and `codaph mubit diagnose` when an agent is stuck.
+8. Use `codaph handoff send` when another agent should continue.
+9. Use `codaph mubit reflect` and `codaph mubit strategies` after meaningful work.
 
 ## Recommended Usage By Tool
 
