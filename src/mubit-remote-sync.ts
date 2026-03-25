@@ -27,6 +27,7 @@ export interface MubitRemoteSyncOptions {
   fallbackActorId?: string | null;
   timelineLimit?: number;
   refresh?: boolean;
+  replayMode?: "snapshot" | "activity";
   statePath?: string;
   triggerSource?: string;
   onProgress?: (progress: { current: number; total: number; imported: number; deduplicated: number; skipped: number }) => void;
@@ -34,6 +35,7 @@ export interface MubitRemoteSyncOptions {
 
 export interface MubitRemoteSyncSummary {
   runId: string;
+  replayMode: "snapshot" | "activity";
   timelineEvents: number;
   promptTimelineEvents?: number;
   sessionSummaryTimelineEvents?: number;
@@ -115,6 +117,20 @@ function hashText(text: string): string {
 }
 
 function extractActivityRecord(rawTimeline: JsonRecord): JsonRecord | null {
+  const activityEntryType = asString(rawTimeline.entry_type) ?? asString(rawTimeline.origin_entry_type);
+  if (activityEntryType) {
+    const content = parseJsonRecord(rawTimeline.content);
+    if (content) {
+      return {
+        type: activityEntryType,
+        payload: rawTimeline.content,
+        ts: rawTimeline.created_at,
+        input_ref: rawTimeline.reference_id,
+        output_ref: rawTimeline.id,
+      };
+    }
+  }
+
   const directActivity = parseJsonRecord(rawTimeline.activity);
   if (directActivity) {
     return directActivity;
@@ -188,6 +204,60 @@ function resolveNestedEventRecord(envelopeRecord: JsonRecord): JsonRecord {
   return envelopeRecord;
 }
 
+function buildEventFromMetadataRecord(
+  rawTimeline: JsonRecord,
+  repoId: string,
+  fallbackActorId: string | null,
+): CapturedEventEnvelope | null {
+  const metadataRecord = parseJsonRecord(rawTimeline.metadata_json);
+  if (!metadataRecord) {
+    return null;
+  }
+
+  const eventType = asString(metadataRecord.event_type) ?? asString(metadataRecord.eventType);
+  if (!eventType) {
+    return null;
+  }
+
+  const sessionId = asString(metadataRecord.session_id) ?? asString(metadataRecord.sessionId) ?? asString(rawTimeline.id);
+  if (!sessionId) {
+    return null;
+  }
+
+  const tsCandidate =
+    asString(metadataRecord.ts) ??
+    asString(rawTimeline.created_at) ??
+    new Date().toISOString();
+  const ts = isIsoDate(tsCandidate) ? new Date(tsCandidate).toISOString() : new Date().toISOString();
+  const threadValue =
+    Object.prototype.hasOwnProperty.call(metadataRecord, "thread_id")
+      ? metadataRecord.thread_id
+      : metadataRecord.threadId;
+  const payloadRecord = isRecord(metadataRecord.payload)
+    ? metadataRecord.payload
+    : parseJsonRecord(metadataRecord.payload) ?? {};
+
+  return {
+    eventId:
+      asString(metadataRecord.event_id) ??
+      asString(metadataRecord.eventId) ??
+      asString(rawTimeline.reference_id) ??
+      asString(rawTimeline.id) ??
+      buildFallbackEventId(`${sessionId}|${eventType}|${ts}`),
+    source: normalizeSource(metadataRecord.source),
+    repoId: asString(metadataRecord.repo_id) ?? asString(metadataRecord.repoId) ?? repoId,
+    actorId: asString(metadataRecord.actor_id) ?? asString(metadataRecord.actorId) ?? fallbackActorId,
+    sessionId,
+    threadId: typeof threadValue === "string" ? (asString(threadValue) ?? null) : threadValue === null ? null : null,
+    ts,
+    eventType,
+    payload: payloadRecord,
+    reasoningAvailability: normalizeReasoning(
+      metadataRecord.reasoning_availability ?? metadataRecord.reasoningAvailability,
+    ),
+  };
+}
+
 function parseTimelineEntry(
   rawTimeline: unknown,
   repoId: string,
@@ -195,6 +265,10 @@ function parseTimelineEntry(
 ): CapturedEventEnvelope | null {
   if (!isRecord(rawTimeline)) {
     return null;
+  }
+  const metadataEvent = buildEventFromMetadataRecord(rawTimeline, repoId, fallbackActorId);
+  if (metadataEvent) {
+    return metadataEvent;
   }
   const activityRecord = extractActivityRecord(rawTimeline);
   if (!activityRecord) {
@@ -271,6 +345,21 @@ function summarizeTimelineFingerprint(timeline: unknown[]): string | null {
   return hasher.digest("hex").slice(0, 24);
 }
 
+function hasNonEmptySnapshotState(snapshot: Record<string, unknown> | null | undefined): boolean {
+  if (!snapshot || !isRecord(snapshot)) {
+    return false;
+  }
+  const snapshotState = snapshot.snapshot;
+  if (isRecord(snapshotState) && Object.keys(snapshotState).length > 0) {
+    return true;
+  }
+  const promotions = snapshot.promotions;
+  if (Array.isArray(promotions) && promotions.length > 0) {
+    return true;
+  }
+  return false;
+}
+
 function maxIsoTs(a: string | null, b: string | null): string | null {
   if (!a) {
     return b;
@@ -279,6 +368,42 @@ function maxIsoTs(a: string | null, b: string | null): string | null {
     return a;
   }
   return a > b ? a : b;
+}
+
+async function fetchActivityPages(
+  memory: MubitMemoryEngine,
+  runId: string,
+  pageSize: number,
+): Promise<unknown[]> {
+  const entries: unknown[] = [];
+  let pageToken: string | undefined;
+
+  for (;;) {
+    const response = await memory.listActivity({
+      runId,
+      sort: "asc",
+      limit: pageSize,
+      pageToken,
+      run_id: runId,
+      page_token: pageToken,
+    } as unknown as Parameters<MubitMemoryEngine["listActivity"]>[0]);
+    if (response.disabled === true) {
+      throw new Error(String(response.reason ?? "Mubit is not configured."));
+    }
+    if (response.unsupported === true) {
+      throw new Error(String(response.reason ?? "Mubit SDK does not expose listActivity."));
+    }
+
+    const pageEntries = Array.isArray(response.entries) ? response.entries : [];
+    entries.push(...pageEntries);
+    const nextPageToken = asString(response.next_page_token) ?? asString(response.nextPageToken);
+    if (!nextPageToken) {
+      break;
+    }
+    pageToken = nextPageToken;
+  }
+
+  return entries;
 }
 
 export async function syncMubitRemoteActivity(options: MubitRemoteSyncOptions): Promise<MubitRemoteSyncSummary> {
@@ -297,15 +422,18 @@ export async function syncMubitRemoteActivity(options: MubitRemoteSyncOptions): 
   );
   const priorObservedDiffTimelineEvents = Math.max(0, priorState.observedUniqueDiffTimelineEvents ?? 0);
   const startedAt = new Date().toISOString();
+  const requestedReplayMode = options.replayMode ?? "snapshot";
 
   let timeline: unknown[] = [];
   let promptTimeline: unknown[] = [];
   let sessionSummaryTimeline: unknown[] = [];
   let diffTimeline: unknown[] = [];
+  let replayMode: "snapshot" | "activity" = requestedReplayMode;
   let snapshotFingerprint: string | null = null;
   let consecutiveSameSnapshotCount = 0;
   let suspectedServerCap = false;
   let diagnosticNote: string | null = null;
+  let snapshotContainedStateWithoutTimeline = false;
 
   const writeFailureState = async (errorMessage: string): Promise<void> => {
     if (!options.statePath) {
@@ -321,160 +449,224 @@ export async function syncMubitRemoteActivity(options: MubitRemoteSyncOptions): 
     await writeMubitRemoteSyncState(options.statePath, next);
   };
 
-  let snapshot: Record<string, unknown>;
+  const pageSize = Math.max(1, Math.min(500, requestedTimelineLimit));
+  const summarizeCombinedFingerprint = (
+    main: unknown[],
+    prompt: unknown[],
+    sessionSummaries: unknown[],
+    diffs: unknown[],
+  ): string | null => {
+    const mainFingerprint = summarizeTimelineFingerprint(main);
+    const promptFingerprint = summarizeTimelineFingerprint(prompt);
+    const sessionFingerprint = summarizeTimelineFingerprint(sessionSummaries);
+    const diffFingerprint = summarizeTimelineFingerprint(diffs);
+    if (prompt.length > 0 || sessionSummaries.length > 0 || diffs.length > 0) {
+      return createHash("sha256")
+        .update(
+          `main:${mainFingerprint ?? "none"}|prompt:${promptFingerprint ?? "none"}|session:${sessionFingerprint ?? "none"}|diff:${diffFingerprint ?? "none"}`,
+        )
+        .digest("hex")
+        .slice(0, 24);
+    }
+    return mainFingerprint;
+  };
+
+  const loadSnapshotReplay = async (): Promise<void> => {
+    let snapshot: Record<string, unknown>;
+    try {
+      snapshot = await options.memory.fetchContextSnapshot({
+        runId: options.runId,
+        timelineLimit: requestedTimelineLimit,
+        refresh,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await writeFailureState(message).catch(() => {});
+      throw error;
+    }
+
+    timeline = Array.isArray(snapshot.timeline) ? snapshot.timeline : [];
+    snapshotContainedStateWithoutTimeline = hasNonEmptySnapshotState(snapshot) && timeline.length === 0;
+
+    const optionalSnapshots = await Promise.all([
+      (async () => {
+        if (!options.promptRunId || options.promptRunId === options.runId) {
+          return { kind: "prompt" as const, timeline: [] as unknown[], snapshot: null as Record<string, unknown> | null };
+        }
+        try {
+          const promptSnapshot = await options.memory.fetchContextSnapshot({
+            runId: options.promptRunId,
+            timelineLimit: requestedTimelineLimit,
+            refresh,
+          });
+          return {
+            kind: "prompt" as const,
+            timeline: Array.isArray(promptSnapshot.timeline) ? promptSnapshot.timeline : [],
+            snapshot: promptSnapshot,
+          };
+        } catch {
+          return { kind: "prompt" as const, timeline: [] as unknown[], snapshot: null as Record<string, unknown> | null };
+        }
+      })(),
+      (async () => {
+        if (!options.sessionSummaryRunId || options.sessionSummaryRunId === options.runId) {
+          return { kind: "session" as const, timeline: [] as unknown[], snapshot: null as Record<string, unknown> | null };
+        }
+        try {
+          const summarySnapshot = await options.memory.fetchContextSnapshot({
+            runId: options.sessionSummaryRunId,
+            timelineLimit: requestedTimelineLimit,
+            refresh,
+          });
+          return {
+            kind: "session" as const,
+            timeline: Array.isArray(summarySnapshot.timeline) ? summarySnapshot.timeline : [],
+            snapshot: summarySnapshot,
+          };
+        } catch {
+          return { kind: "session" as const, timeline: [] as unknown[], snapshot: null as Record<string, unknown> | null };
+        }
+      })(),
+      (async () => {
+        if (!options.diffRunId || options.diffRunId === options.runId) {
+          return { kind: "diff" as const, timeline: [] as unknown[], snapshot: null as Record<string, unknown> | null };
+        }
+        try {
+          const diffSnapshot = await options.memory.fetchContextSnapshot({
+            runId: options.diffRunId,
+            timelineLimit: requestedTimelineLimit,
+            refresh,
+          });
+          return {
+            kind: "diff" as const,
+            timeline: Array.isArray(diffSnapshot.timeline) ? diffSnapshot.timeline : [],
+            snapshot: diffSnapshot,
+          };
+        } catch {
+          return { kind: "diff" as const, timeline: [] as unknown[], snapshot: null as Record<string, unknown> | null };
+        }
+      })(),
+    ]);
+
+    promptTimeline = [];
+    sessionSummaryTimeline = [];
+    diffTimeline = [];
+    for (const snapshotResult of optionalSnapshots) {
+      if (snapshotResult.kind === "prompt") {
+        promptTimeline = snapshotResult.timeline;
+        continue;
+      }
+      if (snapshotResult.kind === "session") {
+        sessionSummaryTimeline = snapshotResult.timeline;
+        continue;
+      }
+      diffTimeline = snapshotResult.timeline;
+    }
+
+    const optionalSnapshotHasState = optionalSnapshots.some((snapshotResult) =>
+      hasNonEmptySnapshotState(snapshotResult.snapshot as Record<string, unknown> | undefined) &&
+      snapshotResult.timeline.length === 0
+    );
+    snapshotContainedStateWithoutTimeline =
+      snapshotContainedStateWithoutTimeline || optionalSnapshotHasState;
+
+    snapshotFingerprint = summarizeCombinedFingerprint(timeline, promptTimeline, sessionSummaryTimeline, diffTimeline);
+    consecutiveSameSnapshotCount =
+      snapshotFingerprint && priorState.lastSnapshotFingerprint && snapshotFingerprint === priorState.lastSnapshotFingerprint
+        ? (priorState.consecutiveSameSnapshotCount ?? 0) + 1
+        : 0;
+
+    const shorterStreams: Array<{ label: string; length: number; previouslyObserved: number }> = [];
+    if (requestedTimelineLimit > timeline.length && timeline.length > 0) {
+      shorterStreams.push({ label: "events", length: timeline.length, previouslyObserved: priorObservedTimelineEvents });
+    }
+    if (requestedTimelineLimit > promptTimeline.length && promptTimeline.length > 0) {
+      shorterStreams.push({
+        label: "prompts",
+        length: promptTimeline.length,
+        previouslyObserved: priorObservedPromptTimelineEvents,
+      });
+    }
+    if (requestedTimelineLimit > sessionSummaryTimeline.length && sessionSummaryTimeline.length > 0) {
+      shorterStreams.push({
+        label: "sessions",
+        length: sessionSummaryTimeline.length,
+        previouslyObserved: priorObservedSessionSummaryTimelineEvents,
+      });
+    }
+    if (requestedTimelineLimit > diffTimeline.length && diffTimeline.length > 0) {
+      shorterStreams.push({
+        label: "diffs",
+        length: diffTimeline.length,
+        previouslyObserved: priorObservedDiffTimelineEvents,
+      });
+    }
+    const windowedStreams = shorterStreams.filter((stream) => stream.previouslyObserved > stream.length);
+    if (snapshotFingerprint && consecutiveSameSnapshotCount >= 3 && windowedStreams.length > 0) {
+      suspectedServerCap = true;
+      const streams = windowedStreams.map((stream) => `${stream.label}=${stream.length}`);
+      diagnosticNote =
+        `Mubit snapshot window appears limited (${streams.join(", ")} while requested ${requestedTimelineLimit}); Codaph has already seen more remote events than this, so the backend is returning a shorter repeated window rather than the full history. Codaph is healthy and still deduping locally.`;
+    }
+  };
+
+  const loadActivityReplay = async (): Promise<void> => {
+    timeline = await fetchActivityPages(options.memory, options.runId, pageSize);
+    promptTimeline =
+      options.promptRunId && options.promptRunId !== options.runId
+        ? await fetchActivityPages(options.memory, options.promptRunId, pageSize).catch(() => [])
+        : [];
+    sessionSummaryTimeline =
+      options.sessionSummaryRunId && options.sessionSummaryRunId !== options.runId
+        ? await fetchActivityPages(options.memory, options.sessionSummaryRunId, pageSize).catch(() => [])
+        : [];
+    diffTimeline =
+      options.diffRunId && options.diffRunId !== options.runId
+        ? await fetchActivityPages(options.memory, options.diffRunId, pageSize).catch(() => [])
+        : [];
+    snapshotFingerprint = summarizeCombinedFingerprint(timeline, promptTimeline, sessionSummaryTimeline, diffTimeline);
+    consecutiveSameSnapshotCount =
+      snapshotFingerprint && priorState.lastSnapshotFingerprint && snapshotFingerprint === priorState.lastSnapshotFingerprint
+        ? (priorState.consecutiveSameSnapshotCount ?? 0) + 1
+        : 0;
+    suspectedServerCap = false;
+  };
+
   try {
-    snapshot = await options.memory.fetchContextSnapshot({
-      runId: options.runId,
-      timelineLimit: requestedTimelineLimit,
-      refresh,
-    });
+    if (requestedReplayMode === "activity") {
+      await loadActivityReplay();
+    } else {
+      await loadSnapshotReplay();
+      if (suspectedServerCap || snapshotContainedStateWithoutTimeline) {
+        try {
+          await loadActivityReplay();
+          replayMode = "activity";
+          if (snapshotContainedStateWithoutTimeline && !suspectedServerCap) {
+            diagnosticNote =
+              "Mubit snapshot returned assembled memory state and promotions but no replayable timeline. Switched to activity replay to recover chronological history.";
+          } else {
+            diagnosticNote = diagnosticNote
+              ? `${diagnosticNote} Switched to activity replay to recover the full remote history.`
+              : "Switched to activity replay to recover the full remote history.";
+          }
+        } catch (fallbackError) {
+          const message = fallbackError instanceof Error ? fallbackError.message : String(fallbackError);
+          diagnosticNote = diagnosticNote ? `${diagnosticNote} Activity replay fallback failed: ${message}` : message;
+        }
+      }
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     await writeFailureState(message).catch(() => {});
     throw error;
   }
 
-  timeline = Array.isArray(snapshot.timeline) ? snapshot.timeline : [];
-
-  const optionalSnapshots = await Promise.all([
-    (async () => {
-      if (!options.promptRunId || options.promptRunId === options.runId) {
-        return { kind: "prompt" as const, timeline: [] as unknown[], fingerprint: null as string | null };
-      }
-      try {
-        const promptSnapshot = await options.memory.fetchContextSnapshot({
-          runId: options.promptRunId,
-          timelineLimit: requestedTimelineLimit,
-          refresh,
-        });
-        const nextTimeline = Array.isArray(promptSnapshot.timeline) ? promptSnapshot.timeline : [];
-        return {
-          kind: "prompt" as const,
-          timeline: nextTimeline,
-          fingerprint: summarizeTimelineFingerprint(nextTimeline),
-        };
-      } catch {
-        return { kind: "prompt" as const, timeline: [] as unknown[], fingerprint: null as string | null };
-      }
-    })(),
-    (async () => {
-      if (!options.sessionSummaryRunId || options.sessionSummaryRunId === options.runId) {
-        return { kind: "session" as const, timeline: [] as unknown[], fingerprint: null as string | null };
-      }
-      try {
-        const summarySnapshot = await options.memory.fetchContextSnapshot({
-          runId: options.sessionSummaryRunId,
-          timelineLimit: requestedTimelineLimit,
-          refresh,
-        });
-        const nextTimeline = Array.isArray(summarySnapshot.timeline) ? summarySnapshot.timeline : [];
-        return {
-          kind: "session" as const,
-          timeline: nextTimeline,
-          fingerprint: summarizeTimelineFingerprint(nextTimeline),
-        };
-      } catch {
-        return { kind: "session" as const, timeline: [] as unknown[], fingerprint: null as string | null };
-      }
-    })(),
-    (async () => {
-      if (!options.diffRunId || options.diffRunId === options.runId) {
-        return { kind: "diff" as const, timeline: [] as unknown[], fingerprint: null as string | null };
-      }
-      try {
-        const diffSnapshot = await options.memory.fetchContextSnapshot({
-          runId: options.diffRunId,
-          timelineLimit: requestedTimelineLimit,
-          refresh,
-        });
-        const nextTimeline = Array.isArray(diffSnapshot.timeline) ? diffSnapshot.timeline : [];
-        return {
-          kind: "diff" as const,
-          timeline: nextTimeline,
-          fingerprint: summarizeTimelineFingerprint(nextTimeline),
-        };
-      } catch {
-        return { kind: "diff" as const, timeline: [] as unknown[], fingerprint: null as string | null };
-      }
-    })(),
-  ]);
-
-  let promptSnapshotFingerprint: string | null = null;
-  let sessionSummarySnapshotFingerprint: string | null = null;
-  let diffSnapshotFingerprint: string | null = null;
-  for (const snapshotResult of optionalSnapshots) {
-    if (snapshotResult.kind === "prompt") {
-      promptTimeline = snapshotResult.timeline;
-      promptSnapshotFingerprint = snapshotResult.fingerprint;
-      continue;
-    }
-    if (snapshotResult.kind === "session") {
-      sessionSummaryTimeline = snapshotResult.timeline;
-      sessionSummarySnapshotFingerprint = snapshotResult.fingerprint;
-      continue;
-    }
-    diffTimeline = snapshotResult.timeline;
-    diffSnapshotFingerprint = snapshotResult.fingerprint;
-  }
-
-  const mainFingerprint = summarizeTimelineFingerprint(timeline);
-  if (promptTimeline.length > 0 || sessionSummaryTimeline.length > 0 || diffTimeline.length > 0) {
-    snapshotFingerprint = createHash("sha256")
-      .update(
-        `main:${mainFingerprint ?? "none"}|prompt:${promptSnapshotFingerprint ?? "none"}|session:${sessionSummarySnapshotFingerprint ?? "none"}|diff:${diffSnapshotFingerprint ?? "none"}`,
-      )
-      .digest("hex")
-      .slice(0, 24);
-  } else {
-    snapshotFingerprint = mainFingerprint;
-  }
-  if (snapshotFingerprint && priorState.lastSnapshotFingerprint && snapshotFingerprint === priorState.lastSnapshotFingerprint) {
-    consecutiveSameSnapshotCount = (priorState.consecutiveSameSnapshotCount ?? 0) + 1;
-  } else {
-    consecutiveSameSnapshotCount = 0;
-  }
   const combinedTimeline = [
     ...sessionSummaryTimeline.map((entry) => ({ kind: "session" as const, entry })),
     ...diffTimeline.map((entry) => ({ kind: "diff" as const, entry })),
     ...promptTimeline.map((entry) => ({ kind: "prompt" as const, entry })),
     ...timeline.map((entry) => ({ kind: "main" as const, entry })),
   ];
-  const shorterStreams: Array<{ label: string; length: number; previouslyObserved: number }> = [];
-  if (requestedTimelineLimit > timeline.length && timeline.length > 0) {
-    shorterStreams.push({ label: "events", length: timeline.length, previouslyObserved: priorObservedTimelineEvents });
-  }
-  if (requestedTimelineLimit > promptTimeline.length && promptTimeline.length > 0) {
-    shorterStreams.push({
-      label: "prompts",
-      length: promptTimeline.length,
-      previouslyObserved: priorObservedPromptTimelineEvents,
-    });
-  }
-  if (requestedTimelineLimit > sessionSummaryTimeline.length && sessionSummaryTimeline.length > 0) {
-    shorterStreams.push({
-      label: "sessions",
-      length: sessionSummaryTimeline.length,
-      previouslyObserved: priorObservedSessionSummaryTimelineEvents,
-    });
-  }
-  if (requestedTimelineLimit > diffTimeline.length && diffTimeline.length > 0) {
-    shorterStreams.push({
-      label: "diffs",
-      length: diffTimeline.length,
-      previouslyObserved: priorObservedDiffTimelineEvents,
-    });
-  }
-  const windowedStreams = shorterStreams.filter((stream) => stream.previouslyObserved > stream.length);
-  if (
-    snapshotFingerprint &&
-    consecutiveSameSnapshotCount >= 3 &&
-    windowedStreams.length > 0
-  ) {
-    suspectedServerCap = true;
-    const streams = windowedStreams.map((stream) => `${stream.label}=${stream.length}`);
-    diagnosticNote =
-      `Mubit snapshot window appears limited (${streams.join(", ")} while requested ${requestedTimelineLimit}); Codaph has already seen more remote events than this, so the backend is returning a shorter repeated window rather than the full history. Codaph is healthy and still deduping locally.`;
-  }
 
   let imported = 0;
   let deduplicated = 0;
@@ -582,6 +774,7 @@ export async function syncMubitRemoteActivity(options: MubitRemoteSyncOptions): 
 
   return {
     runId: options.runId,
+    replayMode,
     timelineEvents: combinedTimeline.length,
     promptTimelineEvents: promptTimeline.length,
     sessionSummaryTimelineEvents: sessionSummaryTimeline.length,

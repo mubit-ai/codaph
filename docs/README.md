@@ -55,6 +55,8 @@ This split keeps daily sync fast and makes history replay explicit.
   Publish-ready overview page.
 - [CLI Reference](./cli-reference.md)
   User-facing commands with minimal flags first.
+- [Skills](./skills.md)
+  How to use the repo-shared Codaph skill with Claude Code, Codex, or Gemini CLI.
 - [TUI Guide](./tui-guide.md)
   Views, keys, and recommended workflow.
 - [Mubit Collaboration](./collaboration-mubit.md)
@@ -75,6 +77,7 @@ Codaph is production-usable for CLI/TUI workflows and Mubit-backed collaboration
 - `codaph init` provides a repo setup flow and Mubit onboarding.
 - `codaph sync` is a fast, Mubit-first daily sync path.
 - `codaph import` backfills local Codex history on demand.
+- Repo-shared skills can standardize the Codaph workflow around context, checkpoints, diagnostics, and handoffs.
 - TUI supports prompt/thought/diff inspection with contributor filters.
 - Cloud pull includes a prompt-focused stream to improve collaborator prompt parity.
 

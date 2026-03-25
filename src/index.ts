@@ -188,12 +188,17 @@ interface CodaphProjectFile {
   projectLabel: string;
   mubitProjectId: string | null;
   mubitRunScope: MubitRunScope;
+  mubitLinkedRuns: boolean;
   agentProviders: AgentProviderId[];
   syncAutomation: {
     enabled: boolean;
     gitPostCommit: boolean;
     agentComplete: boolean;
     agentCompleteProviders: AgentProviderId[];
+    registerAgent: boolean;
+    autoCheckpoint: boolean;
+    mirrorRunState: boolean;
+    autoReflect: boolean;
   };
   createdAt: string;
   updatedAt: string;
@@ -270,6 +275,32 @@ function getBooleanFlag(flags: Flags, key: string, fallback: boolean): boolean {
     }
   }
   return fallback;
+}
+
+function parseCsvFlag(raw: string | undefined): string[] {
+  if (typeof raw !== "string") {
+    return [];
+  }
+  return raw
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+}
+
+function parseJsonObjectFlag(raw: string | undefined, flagName: string): Record<string, unknown> | undefined {
+  if (typeof raw !== "string" || raw.trim().length === 0) {
+    return undefined;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error(`${flagName} must be valid JSON.`);
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error(`${flagName} must be a JSON object.`);
+  }
+  return parsed as Record<string, unknown>;
 }
 
 function parseAgentProvidersFromFlag(raw: string | undefined, allowNone = false): AgentProviderId[] | null {
@@ -367,10 +398,11 @@ function help(): string {
     "  codaph init [--cwd <path>] [--yes] [--force] [--no-auto-sync] [--providers <csv|auto>] [--agent-hooks <csv|all|none>] [--json]",
     "",
     "Daily Use:",
-    "  codaph pull [--cwd <path>] [--json]           (cloud -> local, daily)",
+    "  codaph pull [--cwd <path>] [--json] [--full]  (cloud -> local, daily; --full forces activity replay)",
     "  codaph sync [--cwd <path>] [--json]           (compat alias for `codaph pull`)",
     "  codaph status [--cwd <path>] [--json]         (repo sync + automation status)",
     "  codaph tui [--cwd <path>]",
+    "  codaph checkpoint <label> [--cwd <path>] [--session <id>] [--json]",
     "",
     "Push / Backfill:",
     "  codaph push [--cwd <path>] [--json] [--local-only] [--providers <csv|all|auto>] [--no-worktrees]",
@@ -386,7 +418,8 @@ function help(): string {
     "  codaph mcp [serve] [--cwd <path>]            (MCP stdio server for agents/tools)",
     "  codaph mcp setup claude [--scope user|project] [--run] [--cwd <path>]",
     "  codaph sessions|timeline|diff|inspect ...",
-    "  codaph doctor, codaph hooks run ..., codaph mubit query ...",
+    "  codaph doctor, codaph hooks run ..., codaph mubit query|context|diagnose|replay|reflect|strategies ...",
+    "  codaph agents list, codaph handoff send|list|feedback ...",
     "",
     "Tip: run `codaph init`, then `codaph pull` and `codaph tui`.",
   ].join("\n");
@@ -459,6 +492,16 @@ function resolveMubitRunScope(flags: Flags, cwd: string, settings?: CodaphSettin
     return explicit.toLowerCase() === "project" ? "project" : "session";
   }
   return resolveMubitProjectId(flags, cwd, loaded) ? "project" : "session";
+}
+
+function resolveMubitLinkedRuns(flags: Flags, cwd: string, settings?: CodaphSettings): boolean {
+  const loaded = loadSettingsOrDefault(settings);
+  const projectSettings = getProjectSettings(loaded, cwd);
+  const explicit = getStringFlag(flags, "mubit-linked-runs");
+  if (explicit) {
+    return explicit.toLowerCase() === "true" || explicit === "1" || explicit.toLowerCase() === "yes";
+  }
+  return projectSettings.mubitLinkedRuns === true;
 }
 
 function resolveProjectLabel(flags: Flags, cwd: string, settings?: CodaphSettings): string {
@@ -543,6 +586,7 @@ function createMubitMemory(flags: Flags, cwd: string, settings?: CodaphSettings)
     projectId: resolveMubitProjectId(flags, cwd, loaded) ?? undefined,
     actorId: resolveMubitActorId(flags, cwd, loaded) ?? undefined,
     runScope: resolveMubitRunScope(flags, cwd, loaded),
+    linkRuns: resolveMubitLinkedRuns(flags, cwd, loaded),
   });
 }
 
@@ -561,8 +605,23 @@ function mubitRunIdForContext(
   return mubitRunIdForSession(projectId, sessionId);
 }
 
+function resolveMubitCommandRunId(
+  flags: Flags,
+  cwd: string,
+  settings: CodaphSettings,
+  options: { sessionId?: string | null; preferProject?: boolean } = {},
+): string {
+  const repoId = resolveRepoIdForProject(flags, cwd, settings);
+  const projectId = resolveMubitProjectId(flags, cwd, settings) ?? repoId;
+  if (!options.preferProject && options.sessionId) {
+    return mubitRunIdForContext(flags, repoId, options.sessionId, cwd, settings);
+  }
+  return mubitRunIdForProject(projectId);
+}
+
 async function doctor(rest: string[]): Promise<void> {
-  const { flags } = parseArgs(rest);
+  const { positionals, flags } = parseArgs(rest);
+  const doctorTarget = positionals[0] ?? null;
   const settings = loadCodaphSettings();
   const requested = shouldEnableMubit(flags, settings);
   const envKeyPresent =
@@ -576,6 +635,7 @@ async function doctor(rest: string[]): Promise<void> {
   const projectId = resolveMubitProjectId(flags, cwd, settings);
   const actorId = resolveMubitActorId(flags, cwd, settings);
   const runScope = resolveMubitRunScope(flags, cwd, settings);
+  const linkedRuns = resolveMubitLinkedRuns(flags, cwd, settings);
   const repoId = resolveRepoIdForProject(flags, cwd, settings);
   const auto = resolveSyncAutomationConfig(settings, cwd);
   const remoteState = await maybeReadRemoteSyncStateForProject(cwd, repoId).catch(() => null);
@@ -584,6 +644,7 @@ async function doctor(rest: string[]): Promise<void> {
   console.log(`repoId(local): ${repoId}`);
   console.log(`Mubit project id: ${projectId ?? "(not set, uses local repoId)"}`);
   console.log(`Mubit run scope: ${runScope}`);
+  console.log(`Mubit linked runs: ${linkedRuns ? "enabled" : "disabled"}`);
   console.log(`Mubit actor id: ${actorId ?? "(not set)"}`);
   console.log(`env MUBIT_API_KEY present: ${envKeyPresent ? "yes" : "no"}`);
   console.log(`flag/env key resolved: ${keyPresent ? "yes" : "no"}`);
@@ -592,7 +653,7 @@ async function doctor(rest: string[]): Promise<void> {
   console.log(`Mubit run scope preview: ${mubitRunIdForContext(flags, repoId, "session-preview", cwd, settings)}`);
   console.log(`Mubit write timeout: ${resolveMubitWriteTimeoutMs(flags)}ms`);
   console.log(
-    `Sync automation: ${auto.enabled ? "enabled" : "disabled"} (post-commit:${auto.gitPostCommit ? "on" : "off"}, agent-complete:${auto.agentComplete ? "on" : "off"}, autoPull:${auto.autoPullOnSync ? "on" : "off"}, tuiWarm:${auto.autoWarmTuiOnOpen ? "on" : "off"}, cooldown=${auto.remotePullCooldownSec}s)`,
+    `Sync automation: ${auto.enabled ? "enabled" : "disabled"} (post-commit:${auto.gitPostCommit ? "on" : "off"}, agent-complete:${auto.agentComplete ? "on" : "off"}, registerAgent:${auto.registerAgent ? "on" : "off"}, checkpoint:${auto.autoCheckpoint ? "on" : "off"}, mirrorState:${auto.mirrorRunState ? "on" : "off"}, reflect:${auto.autoReflect ? "on" : "off"}, autoPull:${auto.autoPullOnSync ? "on" : "off"}, tuiWarm:${auto.autoWarmTuiOnOpen ? "on" : "off"}, cooldown=${auto.remotePullCooldownSec}s)`,
   );
   if (remoteState) {
     console.log(
@@ -613,6 +674,18 @@ async function doctor(rest: string[]): Promise<void> {
     console.log("Reason: no Mubit key resolved.");
   } else {
     console.log("Mubit setup looks valid from env/flags.");
+  }
+
+  if (doctorTarget === "mubit" && memory?.isEnabled()) {
+    const runId = resolveMubitCommandRunId(flags, cwd, settings, { preferProject: true });
+    const limitRaw = getStringFlag(flags, "limit");
+    const health = await memory.inspectMemoryHealth({
+      runId,
+      staleThresholdDays: 14,
+      limit: limitRaw ? Number.parseInt(limitRaw, 10) : 25,
+    });
+    console.log(`Mubit doctor run scope: ${runId}`);
+    printStructuredMubitResult("Mubit memory health", health, ["summary"]);
   }
 }
 
@@ -924,12 +997,17 @@ async function writeLocalProjectConfigSnapshot(cwd: string, flags: Flags, settin
     projectLabel: resolveProjectLabel(flags, projectPath, settings),
     mubitProjectId: resolveMubitProjectId(flags, projectPath, settings),
     mubitRunScope: resolveMubitRunScope(flags, projectPath, settings),
+    mubitLinkedRuns: resolveMubitLinkedRuns(flags, projectPath, settings),
     agentProviders,
     syncAutomation: {
       enabled: automation.enabled,
       gitPostCommit: automation.gitPostCommit,
       agentComplete: automation.agentComplete,
       agentCompleteProviders: automation.agentCompleteProviders,
+      registerAgent: automation.registerAgent,
+      autoCheckpoint: automation.autoCheckpoint,
+      mirrorRunState: automation.mirrorRunState,
+      autoReflect: automation.autoReflect,
     },
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
@@ -1380,6 +1458,14 @@ function resolvePullRefresh(flags: Flags, fallback = true): boolean {
   return getBooleanFlag(flags, "refresh", fallback);
 }
 
+function resolveReplayMode(flags: Flags): "snapshot" | "activity" {
+  if (getBooleanFlag(flags, "full", false)) {
+    return "activity";
+  }
+  const explicit = (getStringFlag(flags, "replay-mode") ?? getStringFlag(flags, "mode"))?.trim().toLowerCase();
+  return explicit === "activity" ? "activity" : "snapshot";
+}
+
 async function runSyncPushPhase(options: {
   cwd: string;
   flags: Flags;
@@ -1538,6 +1624,7 @@ async function runSyncPullPhase(options: {
       fallbackActorId: actorId,
       timelineLimit: resolveTimelineLimit(flags),
       refresh: resolvePullRefresh(flags, true),
+      replayMode: resolveReplayMode(flags),
       statePath: resolveRemoteSyncStatePath(cwd, repoId),
       triggerSource,
       onProgress,
@@ -1607,7 +1694,7 @@ function formatPullPhaseLine(result: SyncPullPhaseOutcome): string {
   const promptStream = (s.promptTimelineEvents ?? 0) > 0 ? `, prompt-stream=${s.promptTimelineEvents}` : "";
   const sessionStream = (s.sessionSummaryTimelineEvents ?? 0) > 0 ? `, session-stream=${s.sessionSummaryTimelineEvents}` : "";
   const diffStream = (s.diffTimelineEvents ?? 0) > 0 ? `, diff-stream=${s.diffTimelineEvents}` : "";
-  return `Pull (cloud->local): snapshot received=${s.timelineEvents} (requested=${s.requestedTimelineLimit}${cap}${promptStream}${sessionStream}${diffStream}), imported=${s.imported}, dedup=${s.deduplicated}, skipped=${s.skipped}${noChange}`;
+  return `Pull (cloud->local): ${s.replayMode} replay received=${s.timelineEvents} (requested=${s.requestedTimelineLimit}${cap}${promptStream}${sessionStream}${diffStream}), imported=${s.imported}, dedup=${s.deduplicated}, skipped=${s.skipped}${noChange}`;
 }
 
 function tuiStatusBadge(icon: string, label: string, color: string): string {
@@ -3105,6 +3192,122 @@ function cwdFromHookPayload(payload: Record<string, unknown> | null): string | n
   return null;
 }
 
+function sessionIdFromHookPayload(payload: Record<string, unknown> | null): string | null {
+  if (!payload) {
+    return null;
+  }
+  const keys = ["sessionId", "session_id", "conversationId", "conversation_id", "threadId", "thread_id"] as const;
+  for (const key of keys) {
+    const value = payload[key];
+    if (typeof value === "string" && value.trim().length > 0) {
+      return value.trim();
+    }
+  }
+  const nestedCandidates = [payload.session, payload.thread, payload.metadata];
+  for (const candidate of nestedCandidates) {
+    if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) {
+      continue;
+    }
+    const record = candidate as Record<string, unknown>;
+    for (const key of ["id", "sessionId", "session_id", "threadId", "thread_id"]) {
+      const value = record[key];
+      if (typeof value === "string" && value.trim().length > 0) {
+        return value.trim();
+      }
+    }
+  }
+  return null;
+}
+
+function providerFromHookContext(flags: Flags, payload: Record<string, unknown> | null): AgentProviderId | null {
+  const flagged = parseAgentProvidersFromFlag(getStringFlag(flags, "providers"));
+  if (flagged && flagged.length > 0) {
+    return flagged[0] ?? null;
+  }
+  const payloadProvider = typeof payload?.provider === "string" ? payload.provider.trim() : "";
+  return isAgentProviderId(payloadProvider) ? payloadProvider : null;
+}
+
+async function runAgentCompleteMubitAutomation(options: {
+  cwd: string;
+  flags: Flags;
+  settings: CodaphSettings;
+  payload: Record<string, unknown> | null;
+  quiet?: boolean;
+}): Promise<void> {
+  const { cwd, flags, settings, payload, quiet = false } = options;
+  const automation = resolveSyncAutomationConfig(settings, cwd);
+  if (!automation.enabled || !automation.agentComplete) {
+    return;
+  }
+  if (!automation.registerAgent && !automation.autoCheckpoint && !automation.mirrorRunState && !automation.autoReflect) {
+    return;
+  }
+
+  const memory = createMubitMemory(flags, cwd, settings);
+  if (!memory?.isEnabled()) {
+    return;
+  }
+
+  const provider = providerFromHookContext(flags, payload) ?? "codex";
+  const sessionId = sessionIdFromHookPayload(payload);
+  const runId = resolveMubitCommandRunId(flags, cwd, settings, { sessionId, preferProject: !sessionId });
+  const projectRunId = resolveMubitCommandRunId(flags, cwd, settings, { preferProject: true });
+  const timestamp = new Date().toISOString();
+  const actorId = resolveMubitActorId(flags, cwd, settings) ?? undefined;
+  const sharedPatch: Record<string, unknown> = {
+    last_agent_complete_at: timestamp,
+    last_agent_complete_provider: provider,
+    last_agent_complete_session_id: sessionId,
+  };
+
+  const tasks: Promise<unknown>[] = [];
+  if (automation.registerAgent) {
+    tasks.push(memory.registerAgent({
+      runId: projectRunId,
+      agentId: provider,
+      role: "coding_agent",
+      capabilities: ["history_sync", "code_changes"],
+      sharedMemoryLanes: ["history"],
+      userId: actorId,
+      metadata: { source: "codaph.agent_complete_hook", cwd },
+    }));
+  }
+  if (automation.autoCheckpoint) {
+    tasks.push(memory.createCheckpoint({
+      runId,
+      label: `agent-complete:${provider}:${timestamp}`,
+      metadata: {
+        source: "codaph.agent_complete_hook",
+        provider,
+        cwd,
+        session_id: sessionId,
+      },
+      userId: actorId,
+      agentId: provider,
+    }));
+  }
+  if (automation.mirrorRunState) {
+    tasks.push(memory.writeRunState(projectRunId, sharedPatch));
+  }
+  if (automation.autoReflect) {
+    tasks.push(memory.reflectRun({
+      runId,
+      includeLinkedRuns: resolveMubitLinkedRuns(flags, cwd, settings),
+      lastNItems: 50,
+      userId: actorId,
+      agentId: provider,
+    }));
+  }
+
+  const results = await Promise.allSettled(tasks);
+  const rejected = results.filter((entry): entry is PromiseRejectedResult => entry.status === "rejected");
+  if (rejected.length > 0 && !quiet) {
+    const message = rejected[0]?.reason instanceof Error ? rejected[0].reason.message : String(rejected[0]?.reason ?? "unknown");
+    console.warn(`Agent-complete Mubit automation failed: ${message}`);
+  }
+}
+
 async function hooksRun(rest: string[]): Promise<void> {
   const [hookName, ...args] = rest;
   if (!hookName) {
@@ -3151,6 +3354,16 @@ async function hooksRun(rest: string[]): Promise<void> {
     hookMode: true,
     quiet,
   });
+
+  if (hookName === "agent-complete" && summary.lockBusy !== true) {
+    await runAgentCompleteMubitAutomation({
+      cwd,
+      flags,
+      settings,
+      payload,
+      quiet,
+    });
+  }
 
   if (flags.json === true && !quiet) {
     console.log(JSON.stringify(summary, null, 2));
@@ -3736,6 +3949,22 @@ function printMubitResponse(
   }
 }
 
+function printStructuredMubitResult(
+  label: string,
+  payload: Record<string, unknown>,
+  preferredKeys: string[] = [],
+): void {
+  console.log(`${label}:`);
+  for (const key of preferredKeys) {
+    const value = payload[key];
+    if (typeof value === "string" && value.trim().length > 0) {
+      console.log(value.trim());
+      return;
+    }
+  }
+  console.log(JSON.stringify(payload, null, 2));
+}
+
 async function mubitQuery(rest: string[]): Promise<void> {
   const { positionals, flags } = parseArgs(rest);
   const question = positionals.join(" ").trim();
@@ -3790,6 +4019,346 @@ async function mubitQuery(rest: string[]): Promise<void> {
   }
 
   printMubitResponse(response, cwd, sessionId, rawMode);
+}
+
+async function mubitContextCommand(rest: string[]): Promise<void> {
+  const { positionals, flags } = parseArgs(rest);
+  const question = positionals.join(" ").trim();
+  if (!question) {
+    throw new Error("A context query string is required.");
+  }
+
+  const cwd = resolve(getStringFlag(flags, "cwd") ?? process.cwd());
+  const settings = loadCodaphSettings();
+  const repoId = resolveRepoIdForProject(flags, cwd, settings);
+  const sessionId = getStringFlag(flags, "session");
+  const engine = createMubitMemory(flags, cwd, settings);
+  if (!engine || !engine.isEnabled()) {
+    throw new Error("Mubit is disabled. Set MUBIT_API_KEY (or MUBIT_APIKEY) and use --mubit.");
+  }
+
+  const limitRaw = getStringFlag(flags, "limit");
+  const maxTokenBudgetRaw = getStringFlag(flags, "max-token-budget");
+  const response = await withTimeout(
+    engine.getContextBlock({
+      runId: resolveMubitCommandRunId(flags, cwd, settings, { sessionId, preferProject: !sessionId }),
+      query: question,
+      includeLinkedRuns: getBooleanFlag(flags, "include-linked-runs", resolveMubitLinkedRuns(flags, cwd, settings)),
+      limit: limitRaw ? Number.parseInt(limitRaw, 10) : undefined,
+      maxTokenBudget: maxTokenBudgetRaw ? Number.parseInt(maxTokenBudgetRaw, 10) : undefined,
+      format: getStringFlag(flags, "format") ?? "structured",
+      mode: getStringFlag(flags, "context-mode") ?? "sections",
+      sections: parseCsvFlag(getStringFlag(flags, "sections")),
+      entryTypes: parseCsvFlag(getStringFlag(flags, "entry-types")),
+      laneFilter: getStringFlag(flags, "lane-filter") ?? undefined,
+      agentId: getStringFlag(flags, "agent-id") ?? undefined,
+      includeWorkingMemory: getBooleanFlag(flags, "include-working-memory", true),
+    }),
+    45000,
+    "Mubit context",
+  );
+
+  const runId = resolveMubitCommandRunId(flags, cwd, settings, { sessionId, preferProject: !sessionId });
+  if (flags.json === true) {
+    console.log(JSON.stringify({ cwd, repoId, sessionId: sessionId ?? null, runId, query: question, ...response }, null, 2));
+    return;
+  }
+
+  console.log(`Mubit run scope: ${runId}`);
+  printStructuredMubitResult("Mubit context", response, ["context_block", "context"]);
+}
+
+async function mubitDiagnoseCommand(rest: string[]): Promise<void> {
+  const { positionals, flags } = parseArgs(rest);
+  const errorText = positionals.join(" ").trim();
+  if (!errorText) {
+    throw new Error("An error description is required.");
+  }
+
+  const cwd = resolve(getStringFlag(flags, "cwd") ?? process.cwd());
+  const settings = loadCodaphSettings();
+  const repoId = resolveRepoIdForProject(flags, cwd, settings);
+  const sessionId = getStringFlag(flags, "session");
+  const runId = resolveMubitCommandRunId(flags, cwd, settings, { sessionId, preferProject: !sessionId });
+  const engine = createMubitMemory(flags, cwd, settings);
+  if (!engine || !engine.isEnabled()) {
+    throw new Error("Mubit is disabled. Set MUBIT_API_KEY (or MUBIT_APIKEY) and use --mubit.");
+  }
+
+  const limitRaw = getStringFlag(flags, "limit");
+  const response = await withTimeout(
+    engine.diagnoseFailure({
+      runId,
+      errorText,
+      errorType: getStringFlag(flags, "error-type") ?? undefined,
+      limit: limitRaw ? Number.parseInt(limitRaw, 10) : undefined,
+      agentId: getStringFlag(flags, "agent-id") ?? undefined,
+    }),
+    45000,
+    "Mubit diagnose",
+  );
+
+  if (flags.json === true) {
+    console.log(JSON.stringify({ cwd, repoId, sessionId: sessionId ?? null, runId, errorText, ...response }, null, 2));
+    return;
+  }
+
+  console.log(`Mubit run scope: ${runId}`);
+  printStructuredMubitResult("Mubit diagnosis", response, ["summary", "diagnosis"]);
+}
+
+async function mubitReflectCommand(rest: string[]): Promise<void> {
+  const { flags } = parseArgs(rest);
+  const cwd = resolve(getStringFlag(flags, "cwd") ?? process.cwd());
+  const settings = loadCodaphSettings();
+  const repoId = resolveRepoIdForProject(flags, cwd, settings);
+  const sessionId = getStringFlag(flags, "session");
+  const runId = resolveMubitCommandRunId(flags, cwd, settings, { sessionId, preferProject: !sessionId });
+  const engine = createMubitMemory(flags, cwd, settings);
+  if (!engine || !engine.isEnabled()) {
+    throw new Error("Mubit is disabled. Set MUBIT_API_KEY (or MUBIT_APIKEY) and use --mubit.");
+  }
+
+  const lastNItemsRaw = getStringFlag(flags, "last-n-items") ?? getStringFlag(flags, "limit");
+  const response = await withTimeout(
+    engine.reflectRun({
+      runId,
+      includeLinkedRuns: getBooleanFlag(flags, "include-linked-runs", resolveMubitLinkedRuns(flags, cwd, settings)),
+      lastNItems: lastNItemsRaw ? Number.parseInt(lastNItemsRaw, 10) : 25,
+      agentId: getStringFlag(flags, "agent-id") ?? undefined,
+    }),
+    45000,
+    "Mubit reflect",
+  );
+
+  if (flags.json === true) {
+    console.log(JSON.stringify({ cwd, repoId, sessionId: sessionId ?? null, runId, ...response }, null, 2));
+    return;
+  }
+
+  console.log(`Mubit run scope: ${runId}`);
+  printStructuredMubitResult("Mubit reflection", response, ["summary"]);
+}
+
+async function mubitStrategiesCommand(rest: string[]): Promise<void> {
+  const { flags } = parseArgs(rest);
+  const cwd = resolve(getStringFlag(flags, "cwd") ?? process.cwd());
+  const settings = loadCodaphSettings();
+  const repoId = resolveRepoIdForProject(flags, cwd, settings);
+  const sessionId = getStringFlag(flags, "session");
+  const runId = resolveMubitCommandRunId(flags, cwd, settings, { sessionId, preferProject: !sessionId });
+  const engine = createMubitMemory(flags, cwd, settings);
+  if (!engine || !engine.isEnabled()) {
+    throw new Error("Mubit is disabled. Set MUBIT_API_KEY (or MUBIT_APIKEY) and use --mubit.");
+  }
+
+  const maxStrategiesRaw = getStringFlag(flags, "max-strategies") ?? getStringFlag(flags, "limit");
+  const response = await withTimeout(
+    engine.surfaceStrategies({
+      runId,
+      lessonTypes: parseCsvFlag(getStringFlag(flags, "lesson-types")),
+      maxStrategies: maxStrategiesRaw ? Number.parseInt(maxStrategiesRaw, 10) : undefined,
+      agentId: getStringFlag(flags, "agent-id") ?? undefined,
+    }),
+    45000,
+    "Mubit strategies",
+  );
+
+  if (flags.json === true) {
+    console.log(JSON.stringify({ cwd, repoId, sessionId: sessionId ?? null, runId, ...response }, null, 2));
+    return;
+  }
+
+  console.log(`Mubit run scope: ${runId}`);
+  printStructuredMubitResult("Mubit strategies", response, ["summary"]);
+}
+
+async function checkpointCommand(rest: string[]): Promise<void> {
+  const { positionals, flags } = parseArgs(rest);
+  const label = positionals.join(" ").trim();
+  if (!label) {
+    throw new Error("A checkpoint label is required.");
+  }
+
+  const cwd = resolve(getStringFlag(flags, "cwd") ?? process.cwd());
+  const settings = loadCodaphSettings();
+  const repoId = resolveRepoIdForProject(flags, cwd, settings);
+  const sessionId = getStringFlag(flags, "session");
+  const runId = resolveMubitCommandRunId(flags, cwd, settings, { sessionId, preferProject: !sessionId });
+  const metadata = parseJsonObjectFlag(getStringFlag(flags, "metadata-json"), "--metadata-json");
+  const engine = createMubitMemory(flags, cwd, settings);
+  if (!engine || !engine.isEnabled()) {
+    throw new Error("Mubit is disabled. Set MUBIT_API_KEY (or MUBIT_APIKEY) and use --mubit.");
+  }
+
+  const response = await withTimeout(
+    engine.createCheckpoint({
+      runId,
+      label,
+      contextSnapshot: getStringFlag(flags, "context") ?? undefined,
+      metadata,
+      agentId: getStringFlag(flags, "agent-id") ?? undefined,
+    }),
+    45000,
+    "Mubit checkpoint",
+  );
+
+  if (flags.json === true) {
+    console.log(JSON.stringify({ cwd, repoId, sessionId: sessionId ?? null, runId, label, ...response }, null, 2));
+    return;
+  }
+
+  console.log(`Mubit run scope: ${runId}`);
+  printStructuredMubitResult("Checkpoint created", response, ["checkpoint_id", "summary"]);
+}
+
+async function agentsListCommand(rest: string[]): Promise<void> {
+  const { flags } = parseArgs(rest);
+  const cwd = resolve(getStringFlag(flags, "cwd") ?? process.cwd());
+  const settings = loadCodaphSettings();
+  const repoId = resolveRepoIdForProject(flags, cwd, settings);
+  const runId = resolveMubitCommandRunId(flags, cwd, settings, { preferProject: true });
+  const engine = createMubitMemory(flags, cwd, settings);
+  if (!engine || !engine.isEnabled()) {
+    throw new Error("Mubit is disabled. Set MUBIT_API_KEY (or MUBIT_APIKEY) and use --mubit.");
+  }
+
+  const response = await withTimeout(engine.listAgents(runId), 45000, "Mubit list agents");
+  if (flags.json === true) {
+    console.log(JSON.stringify({ cwd, repoId, runId, ...response }, null, 2));
+    return;
+  }
+
+  console.log(`Mubit run scope: ${runId}`);
+  printStructuredMubitResult("Registered agents", response);
+}
+
+async function handoffSendCommand(rest: string[]): Promise<void> {
+  const { positionals, flags } = parseArgs(rest);
+  const content = positionals.join(" ").trim();
+  if (!content) {
+    throw new Error("Handoff content is required.");
+  }
+
+  const taskId = getStringFlag(flags, "task");
+  const fromAgentId = getStringFlag(flags, "from");
+  const toAgentId = getStringFlag(flags, "to");
+  if (!taskId || !fromAgentId || !toAgentId) {
+    throw new Error("--task, --from, and --to are required.");
+  }
+
+  const cwd = resolve(getStringFlag(flags, "cwd") ?? process.cwd());
+  const settings = loadCodaphSettings();
+  const repoId = resolveRepoIdForProject(flags, cwd, settings);
+  const sessionId = getStringFlag(flags, "session");
+  const runId = resolveMubitCommandRunId(flags, cwd, settings, { sessionId, preferProject: !sessionId });
+  const metadata = parseJsonObjectFlag(getStringFlag(flags, "metadata-json"), "--metadata-json");
+  const engine = createMubitMemory(flags, cwd, settings);
+  if (!engine || !engine.isEnabled()) {
+    throw new Error("Mubit is disabled. Set MUBIT_API_KEY (or MUBIT_APIKEY) and use --mubit.");
+  }
+
+  const response = await withTimeout(
+    engine.createHandoff({
+      runId,
+      taskId,
+      fromAgentId,
+      toAgentId,
+      content,
+      requestedAction: getStringFlag(flags, "action") ?? undefined,
+      metadata,
+    }),
+    45000,
+    "Mubit create handoff",
+  );
+
+  if (flags.json === true) {
+    console.log(JSON.stringify({ cwd, repoId, sessionId: sessionId ?? null, runId, taskId, ...response }, null, 2));
+    return;
+  }
+
+  console.log(`Mubit run scope: ${runId}`);
+  printStructuredMubitResult("Handoff created", response, ["handoff_id", "summary"]);
+}
+
+async function handoffListCommand(rest: string[]): Promise<void> {
+  const { flags } = parseArgs(rest);
+  const cwd = resolve(getStringFlag(flags, "cwd") ?? process.cwd());
+  const settings = loadCodaphSettings();
+  const repoId = resolveRepoIdForProject(flags, cwd, settings);
+  const sessionId = getStringFlag(flags, "session");
+  const runId = resolveMubitCommandRunId(flags, cwd, settings, { sessionId, preferProject: !sessionId });
+  const engine = createMubitMemory(flags, cwd, settings);
+  if (!engine || !engine.isEnabled()) {
+    throw new Error("Mubit is disabled. Set MUBIT_API_KEY (or MUBIT_APIKEY) and use --mubit.");
+  }
+
+  const limitRaw = getStringFlag(flags, "limit");
+  const response = await withTimeout(
+    engine.listActivity({
+      runId,
+      entryTypes: parseCsvFlag(getStringFlag(flags, "entry-types")).length > 0
+        ? parseCsvFlag(getStringFlag(flags, "entry-types"))
+        : ["handoff", "feedback"],
+      sort: "desc",
+      limit: limitRaw ? Number.parseInt(limitRaw, 10) : 50,
+    }),
+    45000,
+    "Mubit list handoffs",
+  );
+
+  if (flags.json === true) {
+    console.log(JSON.stringify({ cwd, repoId, sessionId: sessionId ?? null, runId, ...response }, null, 2));
+    return;
+  }
+
+  console.log(`Mubit run scope: ${runId}`);
+  printStructuredMubitResult("Handoffs", response);
+}
+
+async function handoffFeedbackCommand(rest: string[]): Promise<void> {
+  const { positionals, flags } = parseArgs(rest);
+  const verdict = getStringFlag(flags, "verdict") ?? positionals[0];
+  const fallbackComments = positionals.slice(verdict ? 1 : 0).join(" ").trim();
+  const comments = getStringFlag(flags, "comments") ?? (fallbackComments.length > 0 ? fallbackComments : undefined);
+  const handoffId = getStringFlag(flags, "handoff");
+  if (!handoffId || !verdict) {
+    throw new Error("--handoff and a verdict are required.");
+  }
+
+  const cwd = resolve(getStringFlag(flags, "cwd") ?? process.cwd());
+  const settings = loadCodaphSettings();
+  const repoId = resolveRepoIdForProject(flags, cwd, settings);
+  const sessionId = getStringFlag(flags, "session");
+  const runId = resolveMubitCommandRunId(flags, cwd, settings, { sessionId, preferProject: !sessionId });
+  const engine = createMubitMemory(flags, cwd, settings);
+  if (!engine || !engine.isEnabled()) {
+    throw new Error("Mubit is disabled. Set MUBIT_API_KEY (or MUBIT_APIKEY) and use --mubit.");
+  }
+
+  const response = await withTimeout(
+    engine.submitHandoffFeedback({
+      runId,
+      handoffId,
+      verdict,
+      comments,
+      fromAgentId: getStringFlag(flags, "from") ?? undefined,
+    }),
+    45000,
+    "Mubit handoff feedback",
+  );
+
+  if (flags.json === true) {
+    console.log(JSON.stringify({ cwd, repoId, sessionId: sessionId ?? null, runId, handoffId, verdict, ...response }, null, 2));
+    return;
+  }
+
+  console.log(`Mubit run scope: ${runId}`);
+  printStructuredMubitResult("Handoff feedback", response, ["feedback_id", "summary"]);
+}
+
+async function mubitReplayCommand(rest: string[]): Promise<void> {
+  await syncPullCommand(rest);
 }
 
 interface MubitBackfillSummary {
@@ -8468,8 +9037,58 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (cmd === "mubit" && sub === "context") {
+    await mubitContextCommand(rest);
+    return;
+  }
+
+  if (cmd === "mubit" && sub === "diagnose") {
+    await mubitDiagnoseCommand(rest);
+    return;
+  }
+
+  if (cmd === "mubit" && sub === "replay") {
+    await mubitReplayCommand(rest);
+    return;
+  }
+
+  if (cmd === "mubit" && sub === "reflect") {
+    await mubitReflectCommand(rest);
+    return;
+  }
+
+  if (cmd === "mubit" && sub === "strategies") {
+    await mubitStrategiesCommand(rest);
+    return;
+  }
+
   if (cmd === "mubit" && sub === "backfill") {
     await mubitBackfill(rest);
+    return;
+  }
+
+  if (cmd === "checkpoint") {
+    await checkpointCommand([sub, ...rest].filter(Boolean) as string[]);
+    return;
+  }
+
+  if (cmd === "agents" && sub === "list") {
+    await agentsListCommand(rest);
+    return;
+  }
+
+  if (cmd === "handoff" && sub === "send") {
+    await handoffSendCommand(rest);
+    return;
+  }
+
+  if (cmd === "handoff" && sub === "list") {
+    await handoffListCommand(rest);
+    return;
+  }
+
+  if (cmd === "handoff" && sub === "feedback") {
+    await handoffFeedbackCommand(rest);
     return;
   }
 

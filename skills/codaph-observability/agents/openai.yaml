@@ -1,0 +1,4 @@
+interface:
+  display_name: "Codaph Observability"
+  short_description: "Use Codaph memory and handoffs"
+  default_prompt: "Use $codaph-observability to pull Codaph state, load repo context, create checkpoints, and manage handoffs for this repository."

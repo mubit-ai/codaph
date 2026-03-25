@@ -1,6 +1,7 @@
 import { stat } from "node:fs/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { resolve } from "node:path";
+import { MubitMemoryEngine, mubitRunIdForProject, mubitRunIdForSession } from "./lib/memory-mubit";
 import { QueryService } from "./lib/query-service";
 import { redactUnknown } from "./lib/redactor";
 import { detectAgentProvidersForRepo, normalizeAgentProviderList } from "./lib/agent-providers";
@@ -93,6 +94,26 @@ function asOptionalBoolean(value: unknown, name: string): boolean | undefined {
   return value;
 }
 
+function asOptionalStringArray(value: unknown, name: string): string[] | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (Array.isArray(value)) {
+    const normalized = value
+      .map((entry) => (typeof entry === "string" ? entry.trim() : ""))
+      .filter((entry) => entry.length > 0);
+    return normalized.length > 0 ? normalized : [];
+  }
+  if (typeof value === "string") {
+    const normalized = value
+      .split(",")
+      .map((entry) => entry.trim())
+      .filter((entry) => entry.length > 0);
+    return normalized.length > 0 ? normalized : [];
+  }
+  throw new Error(`"${name}" must be a string or string array`);
+}
+
 async function pathExists(path: string): Promise<boolean> {
   try {
     await stat(path);
@@ -118,6 +139,49 @@ function resolveProjectRepoId(cwd: string, settings: CodaphSettings, explicitRep
     return detected.trim();
   }
   return repoIdFromPath(cwd);
+}
+
+function resolveProjectRunScope(cwd: string, settings: CodaphSettings): "session" | "project" {
+  const project = getProjectSettings(settings, cwd);
+  if (project.mubitRunScope === "project" || project.mubitRunScope === "session") {
+    return project.mubitRunScope;
+  }
+  return detectGitHubDefaults(cwd).projectId ? "project" : "session";
+}
+
+function createMubitMemoryForProject(cwd: string, settings: CodaphSettings): MubitMemoryEngine | null {
+  const apiKey =
+    (typeof process.env.MUBIT_API_KEY === "string" && process.env.MUBIT_API_KEY.trim().length > 0
+      ? process.env.MUBIT_API_KEY.trim()
+      : null) ??
+    (typeof process.env.MUBIT_APIKEY === "string" && process.env.MUBIT_APIKEY.trim().length > 0
+      ? process.env.MUBIT_APIKEY.trim()
+      : null) ??
+    (typeof settings.mubitApiKey === "string" && settings.mubitApiKey.trim().length > 0 ? settings.mubitApiKey.trim() : null);
+  if (!apiKey) {
+    return null;
+  }
+
+  const project = getProjectSettings(settings, cwd);
+  return new MubitMemoryEngine({
+    apiKey,
+    agentId: "codaph-mcp",
+    projectId: resolveProjectRepoId(cwd, settings),
+    actorId: settings.mubitActorId ?? undefined,
+    runScope: resolveProjectRunScope(cwd, settings),
+    linkRuns: project.mubitLinkedRuns === true,
+  });
+}
+
+function resolveMubitRunIdForProjectContext(
+  project: ResolvedProjectContext,
+  sessionId?: string,
+): string {
+  const projectId = resolveProjectRepoId(project.cwd, project.settings, project.repoId);
+  if (sessionId && sessionId.trim().length > 0) {
+    return mubitRunIdForSession(projectId, sessionId.trim());
+  }
+  return mubitRunIdForProject(projectId);
 }
 
 async function resolveProjectContext(args: Record<string, unknown>, ctx: ToolCallContext): Promise<ResolvedProjectContext> {
@@ -445,6 +509,230 @@ function toolSchemas(): McpTool[] {
           pathFilter: pathFilter ?? null,
           count: files.length,
           files,
+        };
+      },
+    },
+    {
+      name: "codaph_mubit_context",
+      description: "Fetch a structured Mubit context block for a project or session handoff.",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        required: ["query"],
+        properties: {
+          cwd: { type: "string" },
+          project_path: { type: "string" },
+          repoId: { type: "string" },
+          repo_id: { type: "string" },
+          sessionId: { type: "string" },
+          session_id: { type: "string" },
+          query: { type: "string" },
+          sections: { type: ["array", "string"], items: { type: "string" } },
+          entryTypes: { type: ["array", "string"], items: { type: "string" } },
+          limit: { type: "integer", minimum: 1, maximum: 200 },
+          maxTokenBudget: { type: "integer", minimum: 1, maximum: 32000 },
+          includeLinkedRuns: { type: "boolean" },
+          format: { type: "string" },
+          mode: { type: "string" },
+          agentId: { type: "string" },
+        },
+      },
+      handler: async (args, ctx) => {
+        const project = await resolveProjectContext(args, ctx);
+        const engine = createMubitMemoryForProject(project.cwd, project.settings);
+        if (!engine?.isEnabled()) {
+          throw new Error("Mubit is not configured for this environment.");
+        }
+        const sessionId = asOptionalString(args.sessionId) ?? asOptionalString(args.session_id);
+        const runId = resolveMubitRunIdForProjectContext(project, sessionId);
+        const response = await engine.getContextBlock({
+          runId,
+          query: asRequiredString(args.query, "query"),
+          sections: asOptionalStringArray(args.sections, "sections"),
+          entryTypes: asOptionalStringArray(args.entryTypes, "entryTypes"),
+          limit: asOptionalInteger(args.limit, "limit"),
+          maxTokenBudget: asOptionalInteger(args.maxTokenBudget, "maxTokenBudget"),
+          includeLinkedRuns: asOptionalBoolean(args.includeLinkedRuns, "includeLinkedRuns") ?? (getProjectSettings(project.settings, project.cwd).mubitLinkedRuns === true),
+          format: asOptionalString(args.format),
+          mode: asOptionalString(args.mode),
+          agentId: asOptionalString(args.agentId),
+        });
+        return {
+          cwd: project.cwd,
+          repoId: project.repoId,
+          sessionId: sessionId ?? null,
+          runId,
+          ...response,
+        };
+      },
+    },
+    {
+      name: "codaph_mubit_diagnose",
+      description: "Diagnose an error against Mubit memory for prior lessons and similar failures.",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        required: ["errorText"],
+        properties: {
+          cwd: { type: "string" },
+          project_path: { type: "string" },
+          repoId: { type: "string" },
+          repo_id: { type: "string" },
+          sessionId: { type: "string" },
+          session_id: { type: "string" },
+          errorText: { type: "string" },
+          error_text: { type: "string" },
+          errorType: { type: "string" },
+          error_type: { type: "string" },
+          limit: { type: "integer", minimum: 1, maximum: 100 },
+          agentId: { type: "string" },
+        },
+      },
+      handler: async (args, ctx) => {
+        const project = await resolveProjectContext(args, ctx);
+        const engine = createMubitMemoryForProject(project.cwd, project.settings);
+        if (!engine?.isEnabled()) {
+          throw new Error("Mubit is not configured for this environment.");
+        }
+        const sessionId = asOptionalString(args.sessionId) ?? asOptionalString(args.session_id);
+        const runId = resolveMubitRunIdForProjectContext(project, sessionId);
+        const response = await engine.diagnoseFailure({
+          runId,
+          errorText: asOptionalString(args.errorText) ?? asRequiredString(args.error_text, "error_text"),
+          errorType: asOptionalString(args.errorType) ?? asOptionalString(args.error_type),
+          limit: asOptionalInteger(args.limit, "limit"),
+          agentId: asOptionalString(args.agentId),
+        });
+        return {
+          cwd: project.cwd,
+          repoId: project.repoId,
+          sessionId: sessionId ?? null,
+          runId,
+          ...response,
+        };
+      },
+    },
+    {
+      name: "codaph_mubit_strategies",
+      description: "Surface reusable strategies and lessons from Mubit memory for a project or session.",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          cwd: { type: "string" },
+          project_path: { type: "string" },
+          repoId: { type: "string" },
+          repo_id: { type: "string" },
+          sessionId: { type: "string" },
+          session_id: { type: "string" },
+          lessonTypes: { type: ["array", "string"], items: { type: "string" } },
+          lesson_types: { type: ["array", "string"], items: { type: "string" } },
+          maxStrategies: { type: "integer", minimum: 1, maximum: 50 },
+          max_strategies: { type: "integer", minimum: 1, maximum: 50 },
+          agentId: { type: "string" },
+        },
+      },
+      handler: async (args, ctx) => {
+        const project = await resolveProjectContext(args, ctx);
+        const engine = createMubitMemoryForProject(project.cwd, project.settings);
+        if (!engine?.isEnabled()) {
+          throw new Error("Mubit is not configured for this environment.");
+        }
+        const sessionId = asOptionalString(args.sessionId) ?? asOptionalString(args.session_id);
+        const runId = resolveMubitRunIdForProjectContext(project, sessionId);
+        const response = await engine.surfaceStrategies({
+          runId,
+          lessonTypes:
+            asOptionalStringArray(args.lessonTypes, "lessonTypes") ??
+            asOptionalStringArray(args.lesson_types, "lesson_types"),
+          maxStrategies:
+            asOptionalInteger(args.maxStrategies, "maxStrategies") ??
+            asOptionalInteger(args.max_strategies, "max_strategies"),
+          agentId: asOptionalString(args.agentId),
+        });
+        return {
+          cwd: project.cwd,
+          repoId: project.repoId,
+          sessionId: sessionId ?? null,
+          runId,
+          ...response,
+        };
+      },
+    },
+    {
+      name: "codaph_handoffs_list",
+      description: "List handoff and feedback activity from Mubit for a project or session.",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          cwd: { type: "string" },
+          project_path: { type: "string" },
+          repoId: { type: "string" },
+          repo_id: { type: "string" },
+          sessionId: { type: "string" },
+          session_id: { type: "string" },
+          entryTypes: { type: ["array", "string"], items: { type: "string" } },
+          entry_types: { type: ["array", "string"], items: { type: "string" } },
+          limit: { type: "integer", minimum: 1, maximum: 200 },
+        },
+      },
+      handler: async (args, ctx) => {
+        const project = await resolveProjectContext(args, ctx);
+        const engine = createMubitMemoryForProject(project.cwd, project.settings);
+        if (!engine?.isEnabled()) {
+          throw new Error("Mubit is not configured for this environment.");
+        }
+        const sessionId = asOptionalString(args.sessionId) ?? asOptionalString(args.session_id);
+        const runId = resolveMubitRunIdForProjectContext(project, sessionId);
+        const response = await engine.listActivity({
+          runId,
+          entryTypes:
+            asOptionalStringArray(args.entryTypes, "entryTypes") ??
+            asOptionalStringArray(args.entry_types, "entry_types") ??
+            ["handoff", "feedback"],
+          sort: "desc",
+          limit: asOptionalInteger(args.limit, "limit") ?? 50,
+        });
+        return {
+          cwd: project.cwd,
+          repoId: project.repoId,
+          sessionId: sessionId ?? null,
+          runId,
+          ...response,
+        };
+      },
+    },
+    {
+      name: "codaph_agents_list",
+      description: "List registered agents for the project's Mubit run.",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          cwd: { type: "string" },
+          project_path: { type: "string" },
+          repoId: { type: "string" },
+          repo_id: { type: "string" },
+          sessionId: { type: "string" },
+          session_id: { type: "string" },
+        },
+      },
+      handler: async (args, ctx) => {
+        const project = await resolveProjectContext(args, ctx);
+        const engine = createMubitMemoryForProject(project.cwd, project.settings);
+        if (!engine?.isEnabled()) {
+          throw new Error("Mubit is not configured for this environment.");
+        }
+        const sessionId = asOptionalString(args.sessionId) ?? asOptionalString(args.session_id);
+        const runId = resolveMubitRunIdForProjectContext(project, sessionId);
+        const response = await engine.listAgents(runId);
+        return {
+          cwd: project.cwd,
+          repoId: project.repoId,
+          sessionId: sessionId ?? null,
+          runId,
+          ...response,
         };
       },
     },

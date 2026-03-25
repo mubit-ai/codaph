@@ -11,6 +11,10 @@ export interface SyncAutomationSettings {
   gitPostCommit?: boolean | null;
   agentComplete?: boolean | null;
   agentCompleteProviders?: AgentProviderId[] | null;
+  registerAgent?: boolean | null;
+  autoCheckpoint?: boolean | null;
+  mirrorRunState?: boolean | null;
+  autoReflect?: boolean | null;
   remotePullCooldownSec?: number | null;
   autoPullOnSync?: boolean | null;
   autoWarmTuiOnOpen?: boolean | null;
@@ -21,6 +25,7 @@ export interface ProjectSettings {
   projectName?: string | null;
   mubitProjectId?: string | null;
   mubitRunScope?: MubitRunScope | null;
+  mubitLinkedRuns?: boolean | null;
   agentProviders?: AgentProviderId[] | null;
   syncAutomation?: SyncAutomationSettings | null;
 }
@@ -88,6 +93,10 @@ function normalizeSyncAutomation(value: unknown): SyncAutomationSettings | null 
     gitPostCommit: asBoolean(record.gitPostCommit),
     agentComplete: asBoolean(record.agentComplete),
     agentCompleteProviders: normalizeAgentProviders(record.agentCompleteProviders),
+    registerAgent: asBoolean(record.registerAgent),
+    autoCheckpoint: asBoolean(record.autoCheckpoint),
+    mirrorRunState: asBoolean(record.mirrorRunState),
+    autoReflect: asBoolean(record.autoReflect),
     remotePullCooldownSec: asInteger(record.remotePullCooldownSec),
     autoPullOnSync: asBoolean(record.autoPullOnSync),
     autoWarmTuiOnOpen: asBoolean(record.autoWarmTuiOnOpen),
@@ -105,6 +114,7 @@ function normalizeProjectSettings(value: unknown): ProjectSettings | null {
     projectName: asString(record.projectName),
     mubitProjectId: asString(record.mubitProjectId),
     mubitRunScope: normalizeRunScope(record.mubitRunScope),
+    mubitLinkedRuns: asBoolean(record.mubitLinkedRuns),
     agentProviders: normalizeAgentProviders(record.agentProviders),
     syncAutomation: normalizeSyncAutomation(record.syncAutomation),
   };

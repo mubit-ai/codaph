@@ -133,10 +133,13 @@ Start with [Quickstart](docs/quickstart.md) for Mubit API key setup, optional Op
 - [Docs Index](docs/index.md)
 - [Quickstart](docs/quickstart.md)
 - [CLI Reference](docs/cli-reference.md)
+- [Skills](docs/skills.md)
 - [MCP Setup (Claude Code)](docs/mcp-setup.md)
 - [TUI Guide](docs/tui-guide.md)
 - [Mubit Collaboration](docs/collaboration-mubit.md)
 - [Troubleshooting](docs/troubleshooting.md)
+- [Repo Skills](skills/README.md)
+- [Codaph Observability Skill](skills/codaph-observability/SKILL.md)
 
 ## Contributing
 

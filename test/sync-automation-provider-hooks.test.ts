@@ -15,6 +15,14 @@ describe("sync-automation provider hooks", () => {
     expect(normalized.agentCompleteProviders).toEqual(["codex"]);
   });
 
+  it("keeps advanced Mubit automation toggles disabled by default", () => {
+    const normalized = normalizeSyncAutomationSettings({});
+    expect(normalized.registerAgent).toBe(false);
+    expect(normalized.autoCheckpoint).toBe(false);
+    expect(normalized.mirrorRunState).toBe(false);
+    expect(normalized.autoReflect).toBe(false);
+  });
+
   it("installs Claude Code agent-complete hook into .claude/settings.json idempotently", async () => {
     const root = await mkdtemp(join(tmpdir(), "codaph-claude-hook-"));
     try {

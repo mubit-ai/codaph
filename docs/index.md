@@ -40,6 +40,7 @@ codaph import
 
 - [Quickstart](./quickstart.md)
 - [CLI Reference](./cli-reference.md)
+- [Skills](./skills.md)
 - [MCP Setup (Claude Code)](./mcp-setup.md)
 - [TUI Guide](./tui-guide.md)
 - [Mubit Collaboration](./collaboration-mubit.md)

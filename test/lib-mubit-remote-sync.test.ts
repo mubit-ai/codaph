@@ -485,4 +485,233 @@ describe("mubit-remote-sync", () => {
 
     expect(appended[0]?.threadId).toBeNull();
   });
+
+  it("replays live-style fact entries by reconstructing events from metadata_json", async () => {
+    const timeline = [
+      {
+        id: "fact-1",
+        entry_type: "fact",
+        content: "item.completed [actor:shankha98]: tool:Edit",
+        metadata_json: JSON.stringify({
+          actor_id: "shankha98",
+          event_type: "item.completed",
+          payload: {
+            item: {
+              type: "agent_message",
+              text: "tool:Edit",
+            },
+          },
+          project_id: "repo-x",
+          reasoning_availability: "unavailable",
+          repo_id: "repo-x",
+          session_id: "sess-live-1",
+          source: "claude_code_history",
+          thread_id: "thread-live-1",
+          ts: "2026-03-21T17:54:26.102Z",
+        }),
+      },
+    ];
+
+    const appended: CapturedEventEnvelope[] = [];
+    const mirror = {
+      async appendEvent(event: CapturedEventEnvelope): Promise<MirrorAppendResult> {
+        appended.push(event);
+        return {
+          segment: "seg",
+          offset: appended.length,
+          checksum: `sum-${appended.length}`,
+          deduplicated: false,
+        };
+      },
+      async appendRawLine(): Promise<void> {},
+    };
+
+    const memory = {
+      async listActivity(): Promise<Record<string, unknown>> {
+        return { entries: timeline, next_page_token: "" };
+      },
+    } as unknown as MubitMemoryEngine;
+
+    const summary = await syncMubitRemoteActivity({
+      mirror,
+      memory,
+      runId: "codaph:repo-x",
+      repoId: "repo-x",
+      replayMode: "activity",
+    });
+
+    expect(summary.imported).toBe(1);
+    expect(summary.skipped).toBe(0);
+    expect(appended).toHaveLength(1);
+    expect(appended[0]?.eventType).toBe("item.completed");
+    expect(appended[0]?.source).toBe("claude_code_history");
+    expect(appended[0]?.sessionId).toBe("sess-live-1");
+    expect(appended[0]?.threadId).toBe("thread-live-1");
+    expect((appended[0]?.payload.item as Record<string, unknown>)?.text).toBe("tool:Edit");
+  });
+
+  it("supports explicit activity replay via paginated listActivity responses", async () => {
+    const appended: CapturedEventEnvelope[] = [];
+    const mirror = {
+      async appendEvent(event: CapturedEventEnvelope): Promise<MirrorAppendResult> {
+        appended.push(event);
+        return {
+          segment: "seg",
+          offset: appended.length,
+          checksum: `sum-${appended.length}`,
+          deduplicated: false,
+        };
+      },
+      async appendRawLine(): Promise<void> {},
+    };
+
+    const listCalls: Array<Record<string, unknown>> = [];
+    const memory = {
+      async listActivity(payload?: Record<string, unknown>): Promise<Record<string, unknown>> {
+        listCalls.push(payload ?? {});
+        const pageToken = String(payload?.pageToken ?? payload?.page_token ?? "");
+        if (pageToken === "page-2") {
+          return {
+            entries: [
+              {
+                id: "activity-2",
+                entry_type: "codaph_event",
+                created_at: "2026-02-23T10:00:01.000Z",
+                content: JSON.stringify({
+                  schema: "codaph_event.v2",
+                  event: {
+                    eventId: "evt-2",
+                    source: "codex_exec",
+                    repoId: "repo-x",
+                    actorId: "friend",
+                    sessionId: "sess-1",
+                    threadId: "thread-1",
+                    ts: "2026-02-23T10:00:01.000Z",
+                    eventType: "item.completed",
+                    payload: { item: { type: "reasoning", text: "second page" } },
+                    reasoningAvailability: "full",
+                  },
+                }),
+              },
+            ],
+            next_page_token: "",
+          };
+        }
+        return {
+          entries: [
+            {
+              id: "activity-1",
+              entry_type: "codaph_event",
+              created_at: "2026-02-23T10:00:00.000Z",
+              content: JSON.stringify({
+                schema: "codaph_event.v2",
+                event: {
+                  eventId: "evt-1",
+                  source: "codex_exec",
+                  repoId: "repo-x",
+                  actorId: "friend",
+                  sessionId: "sess-1",
+                  threadId: "thread-1",
+                  ts: "2026-02-23T10:00:00.000Z",
+                  eventType: "prompt.submitted",
+                  payload: { prompt: "activity replay prompt" },
+                  reasoningAvailability: "unavailable",
+                },
+              }),
+            },
+          ],
+          next_page_token: "page-2",
+        };
+      },
+    } as unknown as MubitMemoryEngine;
+
+    const summary = await syncMubitRemoteActivity({
+      mirror,
+      memory,
+      runId: "codaph:repo-x",
+      repoId: "repo-x",
+      replayMode: "activity",
+    });
+
+    expect(summary.replayMode).toBe("activity");
+    expect(summary.timelineEvents).toBe(2);
+    expect(summary.imported).toBe(2);
+    expect(appended.map((event) => event.eventType)).toEqual(["prompt.submitted", "item.completed"]);
+    expect(listCalls).toHaveLength(2);
+    expect(listCalls[0]?.run_id).toBe("codaph:repo-x");
+    expect(listCalls[0]?.sort).toBe("asc");
+    expect(listCalls[1]?.page_token).toBe("page-2");
+  });
+
+  it("falls back to activity replay when snapshot has memory state but no timeline", async () => {
+    const appended: CapturedEventEnvelope[] = [];
+    const mirror = {
+      async appendEvent(event: CapturedEventEnvelope): Promise<MirrorAppendResult> {
+        appended.push(event);
+        return {
+          segment: "seg",
+          offset: appended.length,
+          checksum: `sum-${appended.length}`,
+          deduplicated: false,
+        };
+      },
+      async appendRawLine(): Promise<void> {},
+    };
+
+    const snapshotCalls: Array<Record<string, unknown>> = [];
+    const activityCalls: Array<Record<string, unknown>> = [];
+    const memory = {
+      async fetchContextSnapshot(payload?: Record<string, unknown>): Promise<Record<string, unknown>> {
+        snapshotCalls.push(payload ?? {});
+        return {
+          timeline: [],
+          snapshot: {
+            summary: "Snapshot contains assembled memory but no replayable timeline.",
+            facts: ["Known fact 1"],
+          },
+          promotions: [{ target: "nexus:1" }],
+        };
+      },
+      async listActivity(payload?: Record<string, unknown>): Promise<Record<string, unknown>> {
+        activityCalls.push(payload ?? {});
+        return {
+          entries: [
+            {
+              id: "fact-1",
+              entry_type: "fact",
+              metadata_json: JSON.stringify({
+                actor_id: "shankha98",
+                event_type: "item.completed",
+                payload: {
+                  item: {
+                    type: "agent_message",
+                    text: "recovered via activity replay",
+                  },
+                },
+                repo_id: "repo-x",
+                session_id: "sess-1",
+                source: "codex_exec",
+                ts: "2026-03-25T10:00:00.000Z",
+              }),
+            },
+          ],
+          next_page_token: "",
+        };
+      },
+    } as unknown as MubitMemoryEngine;
+
+    const summary = await syncMubitRemoteActivity({
+      mirror,
+      memory,
+      runId: "codaph:repo-x",
+      repoId: "repo-x",
+    });
+
+    expect(summary.replayMode).toBe("activity");
+    expect(summary.imported).toBe(1);
+    expect(summary.diagnosticNote).toContain("snapshot returned assembled memory");
+    expect(snapshotCalls).toHaveLength(1);
+    expect(activityCalls).toHaveLength(1);
+    expect(appended[0]?.eventType).toBe("item.completed");
+  });
 });

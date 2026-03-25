@@ -29,6 +29,10 @@ export interface SyncAutomationSettingsResolved {
   gitPostCommit: boolean;
   agentComplete: boolean;
   agentCompleteProviders: AgentProviderId[];
+  registerAgent: boolean;
+  autoCheckpoint: boolean;
+  mirrorRunState: boolean;
+  autoReflect: boolean;
   remotePullCooldownSec: number;
   autoPullOnSync: boolean;
   autoWarmTuiOnOpen: boolean;
@@ -54,6 +58,10 @@ export function defaultSyncAutomationSettings(): SyncAutomationSettingsResolved 
     gitPostCommit: false,
     agentComplete: false,
     agentCompleteProviders: [],
+    registerAgent: false,
+    autoCheckpoint: false,
+    mirrorRunState: false,
+    autoReflect: false,
     remotePullCooldownSec: 45,
     autoPullOnSync: true,
     autoWarmTuiOnOpen: true,
@@ -67,6 +75,10 @@ export function normalizeSyncAutomationSettings(
     gitPostCommit?: boolean | null;
     agentComplete?: boolean | null;
     agentCompleteProviders?: AgentProviderId[] | string[] | null;
+    registerAgent?: boolean | null;
+    autoCheckpoint?: boolean | null;
+    mirrorRunState?: boolean | null;
+    autoReflect?: boolean | null;
     remotePullCooldownSec?: number | null;
     autoPullOnSync?: boolean | null;
     autoWarmTuiOnOpen?: boolean | null;
@@ -93,6 +105,10 @@ export function normalizeSyncAutomationSettings(
     gitPostCommit: typeof raw?.gitPostCommit === "boolean" ? raw.gitPostCommit : defaults.gitPostCommit,
     agentComplete: agentCompleteProviders.length > 0,
     agentCompleteProviders,
+    registerAgent: typeof raw?.registerAgent === "boolean" ? raw.registerAgent : defaults.registerAgent,
+    autoCheckpoint: typeof raw?.autoCheckpoint === "boolean" ? raw.autoCheckpoint : defaults.autoCheckpoint,
+    mirrorRunState: typeof raw?.mirrorRunState === "boolean" ? raw.mirrorRunState : defaults.mirrorRunState,
+    autoReflect: typeof raw?.autoReflect === "boolean" ? raw.autoReflect : defaults.autoReflect,
     remotePullCooldownSec: cooldown,
     autoPullOnSync: typeof raw?.autoPullOnSync === "boolean" ? raw.autoPullOnSync : defaults.autoPullOnSync,
     autoWarmTuiOnOpen: typeof raw?.autoWarmTuiOnOpen === "boolean" ? raw.autoWarmTuiOnOpen : defaults.autoWarmTuiOnOpen,

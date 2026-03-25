@@ -51,15 +51,25 @@ describe("settings-store", () => {
     const path = resolve("/tmp/provider-project");
     const next = updateProjectSettings({ projects: {} }, path, {
       projectName: "Provider Project",
+      mubitLinkedRuns: true,
       agentProviders: ["codex", "claude-code"],
       syncAutomation: {
         enabled: true,
         agentCompleteProviders: ["claude-code", "gemini-cli"],
+        registerAgent: true,
+        autoCheckpoint: true,
+        mirrorRunState: true,
+        autoReflect: true,
       },
     });
 
     const project = getProjectSettings(next, path);
+    expect(project.mubitLinkedRuns).toBe(true);
     expect(project.agentProviders).toEqual(["codex", "claude-code"]);
     expect(project.syncAutomation?.agentCompleteProviders).toEqual(["claude-code", "gemini-cli"]);
+    expect(project.syncAutomation?.registerAgent).toBe(true);
+    expect(project.syncAutomation?.autoCheckpoint).toBe(true);
+    expect(project.syncAutomation?.mirrorRunState).toBe(true);
+    expect(project.syncAutomation?.autoReflect).toBe(true);
   });
 });

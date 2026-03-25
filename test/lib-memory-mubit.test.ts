@@ -390,4 +390,484 @@ describe("memory-mubit", () => {
       }
     }
   });
+
+  it("preserves SDK control method binding when calling wrapped control APIs", async () => {
+    const engine = new MubitMemoryEngine({
+      client: {
+        control: {
+          _transport: { marker: "ok" },
+          async contextSnapshot(this: { _transport?: { marker?: string } }, payload?: Record<string, unknown>) {
+            if (this._transport?.marker !== "ok") {
+              throw new Error("lost control binding");
+            }
+            return {
+              timeline: [],
+              seen_run_id: payload?.run_id,
+            };
+          },
+        } as unknown as Record<string, unknown>,
+      } as unknown as any,
+    });
+
+    const snapshot = await engine.fetchContextSnapshot({
+      runId: "codaph:repo:session",
+    });
+
+    expect(snapshot.seen_run_id).toBe("codaph:repo:session");
+  });
+
+  it("retrieves structured context blocks through the control context API", async () => {
+    const contextCalls: Array<Record<string, unknown>> = [];
+    const engine = new MubitMemoryEngine({
+      client: {
+        control: {
+          context: async (payload?: Record<string, unknown>) => {
+            contextCalls.push(payload ?? {});
+            return {
+              context_block: "lesson: use repo-local queue first",
+              token_estimate: 42,
+            };
+          },
+        } as Record<string, unknown>,
+      } as unknown as any,
+    });
+
+    const result = await engine.getContextBlock({
+      runId: "codaph:repo-abc:session-1",
+      query: "what should the next agent know?",
+      sections: ["lessons", "handoffs"],
+      mode: "sections",
+      format: "structured",
+      maxTokenBudget: 500,
+      limit: 7,
+      agentId: "codex",
+    });
+
+    expect(result.context_block).toContain("repo-local queue");
+    expect(contextCalls).toHaveLength(1);
+    expect(contextCalls[0].run_id).toBe("codaph:repo-abc:session-1");
+    expect(contextCalls[0].query).toBe("what should the next agent know?");
+    expect(contextCalls[0].mode).toBe("sections");
+    expect(contextCalls[0].format).toBe("structured");
+    expect(contextCalls[0].max_token_budget).toBe(500);
+    expect(contextCalls[0].limit).toBe(7);
+    expect(contextCalls[0].agent_id).toBe("codex");
+    expect(contextCalls[0].sections).toEqual(["lessons", "handoffs"]);
+  });
+
+  it("normalizes sections mode without explicit sections to full mode", async () => {
+    const contextCalls: Array<Record<string, unknown>> = [];
+    const engine = new MubitMemoryEngine({
+      client: {
+        control: {
+          context: async (payload?: Record<string, unknown>) => {
+            contextCalls.push(payload ?? {});
+            return {
+              context_block: "full mode context",
+              section_summaries: [{ section_name: "Known Facts" }],
+            };
+          },
+        } as Record<string, unknown>,
+      } as unknown as any,
+    });
+
+    const result = await engine.getContextBlock({
+      runId: "codaph:repo-abc",
+      query: "what should the next agent know?",
+      mode: "sections",
+      format: "structured",
+      limit: 5,
+    });
+
+    expect(result.context_block).toContain("full mode context");
+    expect(contextCalls).toHaveLength(1);
+    expect(contextCalls[0].mode).toBe("full");
+    expect(contextCalls[0].sections).toBeUndefined();
+  });
+
+  it("creates a fallback checkpoint context snapshot when omitted", async () => {
+    const checkpointCalls: Array<Record<string, unknown>> = [];
+    const engine = new MubitMemoryEngine({
+      client: {
+        control: {
+          checkpoint: async (payload?: Record<string, unknown>) => {
+            checkpointCalls.push(payload ?? {});
+            return { success: true, checkpoint_id: "cp-fallback" };
+          },
+        } as Record<string, unknown>,
+      } as unknown as any,
+    });
+
+    const result = await engine.createCheckpoint({
+      runId: "codaph:repo-abc",
+      label: "before-migration",
+    });
+
+    expect(result.checkpoint_id).toBe("cp-fallback");
+    expect(checkpointCalls).toHaveLength(1);
+    expect(checkpointCalls[0]?.context_snapshot).toContain("before-migration");
+    expect(checkpointCalls[0]?.context_snapshot).toContain("codaph:repo-abc");
+  });
+
+  it("falls back to strategies and recent activity when Mubit context is empty", async () => {
+    const contextCalls: Array<Record<string, unknown>> = [];
+    const strategyCalls: Array<Record<string, unknown>> = [];
+    const listActivityCalls: Array<Record<string, unknown>> = [];
+    const engine = new MubitMemoryEngine({
+      client: {
+        control: {
+          context: async (payload?: Record<string, unknown>) => {
+            contextCalls.push(payload ?? {});
+            return {
+              context_block: "",
+              evidence_candidates_considered: 0,
+              sources: [],
+            };
+          },
+          surfaceStrategies: async (payload?: Record<string, unknown>) => {
+            strategyCalls.push(payload ?? {});
+            return {
+              strategies: [
+                {
+                  strategy_id: "s-1",
+                  description: "Use activity replay when snapshot-based context is empty.",
+                  supporting_lesson_count: 2,
+                },
+              ],
+            };
+          },
+          listActivity: async (payload?: Record<string, unknown>) => {
+            listActivityCalls.push(payload ?? {});
+            return {
+              entries: [
+                {
+                  id: "activity-1",
+                  entry_type: "codaph_event",
+                  created_at: "2026-03-25T10:00:00.000Z",
+                  metadata_json:
+                    "{\"event_type\":\"prompt.submitted\",\"session_id\":\"session-1\",\"actor_id\":\"shankha98\",\"payload\":{\"prompt\":\"Investigate empty context on project run\"}}",
+                },
+                {
+                  id: "activity-2",
+                  entry_type: "codaph_event",
+                  created_at: "2026-03-25T10:01:00.000Z",
+                  metadata_json:
+                    "{\"event_type\":\"codaph.session.summary\",\"session_id\":\"session-1\",\"payload\":{\"summary\":\"Implemented full activity replay fallback\"}}",
+                },
+              ],
+            };
+          },
+        } as Record<string, unknown>,
+      } as unknown as any,
+    });
+
+    const result = await engine.getContextBlock({
+      runId: "codaph:repo-abc",
+      query: "what should the next agent know?",
+      includeLinkedRuns: true,
+      limit: 5,
+    });
+
+    expect(contextCalls).toHaveLength(1);
+    expect(strategyCalls).toHaveLength(1);
+    expect(listActivityCalls).toHaveLength(1);
+    expect(result.fallback_used).toBe(true);
+    expect(result.context_block).toContain("Strategy signals");
+    expect(result.context_block).toContain("Use activity replay when snapshot-based context is empty");
+    expect(result.context_block).toContain("Recent activity");
+    expect(result.context_block).toContain("prompt.submitted");
+    expect(result.context_block).toContain("Implemented full activity replay fallback");
+    expect(result.evidence_candidates_considered).toBe(3);
+    expect(result.source_counts_by_retrieval_mode).toEqual({
+      strategy: 1,
+      activity: 2,
+    });
+  });
+
+  it("wraps list/export activity and run-state control APIs", async () => {
+    const listActivityCalls: Array<Record<string, unknown>> = [];
+    const exportActivityCalls: Array<Record<string, unknown>> = [];
+    const getVariableCalls: Array<Record<string, unknown>> = [];
+    const listVariableCalls: Array<Record<string, unknown>> = [];
+    const statsCalls: Array<Record<string, unknown>> = [];
+    const engine = new MubitMemoryEngine({
+      client: {
+        control: {
+          listActivity: async (payload?: Record<string, unknown>) => {
+            listActivityCalls.push(payload ?? {});
+            return { entries: [{ id: "activity-1" }], next_page_token: "next-1" };
+          },
+          exportActivity: async (payload?: Record<string, unknown>) => {
+            exportActivityCalls.push(payload ?? {});
+            return { format: "jsonl", content: "{\"id\":\"activity-1\"}\n", entry_count: 1 };
+          },
+          getVariable: async (payload?: Record<string, unknown>) => {
+            getVariableCalls.push(payload ?? {});
+            return { name: "codaph.run_state", value_json: "{\"status\":\"ok\"}" };
+          },
+          listVariables: async (payload?: Record<string, unknown>) => {
+            listVariableCalls.push(payload ?? {});
+            return { variables: [{ name: "codaph.run_state" }] };
+          },
+          getRunIngestStats: async (payload?: Record<string, unknown>) => {
+            statsCalls.push(payload ?? {});
+            return { run_id: "codaph:repo-abc", total_jobs: 3 };
+          },
+        } as Record<string, unknown>,
+      } as unknown as any,
+    });
+
+    const listResult = await engine.listActivity({
+      runId: "codaph:repo-abc",
+      entryTypes: ["handoff", "feedback"],
+      sort: "asc",
+      limit: 50,
+      pageToken: "cursor-2",
+    });
+    const exportResult = await engine.exportActivity({
+      runId: "codaph:repo-abc",
+      entryTypes: ["codaph_event"],
+      sort: "asc",
+    });
+    const variable = await engine.getRunVariable("codaph:repo-abc", "codaph.run_state");
+    const variables = await engine.listRunVariables("codaph:repo-abc");
+    const stats = await engine.getRunIngestStats("codaph:repo-abc");
+
+    expect((listResult.entries as Array<unknown>).length).toBe(1);
+    expect(exportResult.entry_count).toBe(1);
+    expect(variable.name).toBe("codaph.run_state");
+    expect((variables.variables as Array<unknown>).length).toBe(1);
+    expect(stats.total_jobs).toBe(3);
+    expect(listActivityCalls[0]).toMatchObject({
+      run_id: "codaph:repo-abc",
+      entry_types: ["handoff", "feedback"],
+      sort: "asc",
+      limit: 50,
+      page_token: "cursor-2",
+    });
+    expect(exportActivityCalls[0]).toMatchObject({
+      run_id: "codaph:repo-abc",
+      entry_types: ["codaph_event"],
+      sort: "asc",
+    });
+    expect(getVariableCalls[0]).toMatchObject({
+      run_id: "codaph:repo-abc",
+      name: "codaph.run_state",
+    });
+    expect(listVariableCalls[0]).toMatchObject({
+      run_id: "codaph:repo-abc",
+    });
+    expect(statsCalls[0]).toMatchObject({
+      run_id: "codaph:repo-abc",
+    });
+  });
+
+  it("wraps diagnostics, linking, reflection, agent registry, and handoffs", async () => {
+    const linkCalls: Array<Record<string, unknown>> = [];
+    const checkpointCalls: Array<Record<string, unknown>> = [];
+    const memoryHealthCalls: Array<Record<string, unknown>> = [];
+    const diagnoseCalls: Array<Record<string, unknown>> = [];
+    const reflectCalls: Array<Record<string, unknown>> = [];
+    const strategyCalls: Array<Record<string, unknown>> = [];
+    const registerAgentCalls: Array<Record<string, unknown>> = [];
+    const listAgentsCalls: Array<Record<string, unknown>> = [];
+    const handoffCalls: Array<Record<string, unknown>> = [];
+    const feedbackCalls: Array<Record<string, unknown>> = [];
+    const stepOutcomeCalls: Array<Record<string, unknown>> = [];
+    const outcomeCalls: Array<Record<string, unknown>> = [];
+    const engine = new MubitMemoryEngine({
+      client: {
+        control: {
+          linkRun: async (payload?: Record<string, unknown>) => {
+            linkCalls.push(payload ?? {});
+            return { success: true };
+          },
+          checkpoint: async (payload?: Record<string, unknown>) => {
+            checkpointCalls.push(payload ?? {});
+            return { success: true, checkpoint_id: "cp-1" };
+          },
+          memoryHealth: async (payload?: Record<string, unknown>) => {
+            memoryHealthCalls.push(payload ?? {});
+            return { stale_entries: 2 };
+          },
+          diagnose: async (payload?: Record<string, unknown>) => {
+            diagnoseCalls.push(payload ?? {});
+            return { summary: "same auth failure", total_failure_lessons: 1 };
+          },
+          reflect: async (payload?: Record<string, unknown>) => {
+            reflectCalls.push(payload ?? {});
+            return { lessons_stored: 2 };
+          },
+          surfaceStrategies: async (payload?: Record<string, unknown>) => {
+            strategyCalls.push(payload ?? {});
+            return { strategies: [{ strategy_id: "s-1" }] };
+          },
+          registerAgent: async (payload?: Record<string, unknown>) => {
+            registerAgentCalls.push(payload ?? {});
+            return { success: true };
+          },
+          listAgents: async (payload?: Record<string, unknown>) => {
+            listAgentsCalls.push(payload ?? {});
+            return { agents: [{ agent_id: "codex" }] };
+          },
+          createHandoff: async (payload?: Record<string, unknown>) => {
+            handoffCalls.push(payload ?? {});
+            return { success: true, handoff_id: "handoff-1" };
+          },
+          submitFeedback: async (payload?: Record<string, unknown>) => {
+            feedbackCalls.push(payload ?? {});
+            return { success: true, feedback_id: "feedback-1" };
+          },
+          recordStepOutcome: async (payload?: Record<string, unknown>) => {
+            stepOutcomeCalls.push(payload ?? {});
+            return { accepted: true, step_outcome_id: "step-1" };
+          },
+          recordOutcome: async (payload?: Record<string, unknown>) => {
+            outcomeCalls.push(payload ?? {});
+            return { success: true, reinforcement_count: 2 };
+          },
+        } as Record<string, unknown>,
+      } as unknown as any,
+    });
+
+    await engine.linkRun("codaph:repo-abc", "codaph:repo-abc:session-1");
+    const checkpoint = await engine.createCheckpoint({
+      runId: "codaph:repo-abc",
+      label: "before-migration",
+      contextSnapshot: "current context",
+      metadata: { source: "test" },
+      agentId: "codex",
+    });
+    const health = await engine.inspectMemoryHealth({
+      runId: "codaph:repo-abc",
+      staleThresholdDays: 14,
+      limit: 25,
+    });
+    const diagnosis = await engine.diagnoseFailure({
+      runId: "codaph:repo-abc",
+      errorText: "auth failure",
+      errorType: "test",
+      limit: 3,
+    });
+    const reflection = await engine.reflectRun({
+      runId: "codaph:repo-abc",
+      includeLinkedRuns: true,
+      lastNItems: 25,
+    });
+    const strategies = await engine.surfaceStrategies({
+      runId: "codaph:repo-abc",
+      lessonTypes: ["success"],
+      maxStrategies: 2,
+    });
+    await engine.registerAgent({
+      runId: "codaph:repo-abc",
+      agentId: "codex",
+      role: "implementer",
+      capabilities: ["edit", "test"],
+      sharedMemoryLanes: ["history"],
+    });
+    const agents = await engine.listAgents("codaph:repo-abc");
+    const handoff = await engine.createHandoff({
+      runId: "codaph:repo-abc",
+      taskId: "task-1",
+      fromAgentId: "claude",
+      toAgentId: "codex",
+      content: "pick up auth cleanup",
+      requestedAction: "continue",
+      metadata: { pr: 12 },
+    });
+    const feedback = await engine.submitHandoffFeedback({
+      runId: "codaph:repo-abc",
+      handoffId: "handoff-1",
+      verdict: "approve",
+      comments: "looks good",
+      fromAgentId: "gemini",
+    });
+    await engine.recordStepOutcome({
+      runId: "codaph:repo-abc",
+      stepId: "step-1",
+      stepName: "planning",
+      outcome: "success",
+      signal: 0.5,
+      rationale: "good plan",
+      directiveHint: "keep context concise",
+      agentId: "codex",
+    });
+    await engine.recordOutcome({
+      runId: "codaph:repo-abc",
+      referenceId: "lesson-1",
+      outcome: "success",
+      signal: 1,
+      rationale: "worked",
+      agentId: "codex",
+    });
+
+    expect(checkpoint.checkpoint_id).toBe("cp-1");
+    expect(health.stale_entries).toBe(2);
+    expect(diagnosis.summary).toContain("auth");
+    expect(reflection.lessons_stored).toBe(2);
+    expect((strategies.strategies as Array<unknown>).length).toBe(1);
+    expect((agents.agents as Array<unknown>).length).toBe(1);
+    expect(handoff.handoff_id).toBe("handoff-1");
+    expect(feedback.feedback_id).toBe("feedback-1");
+    expect(linkCalls[0]).toEqual({ run_id: "codaph:repo-abc", linked_run_id: "codaph:repo-abc:session-1" });
+    expect(checkpointCalls[0]).toMatchObject({
+      run_id: "codaph:repo-abc",
+      label: "before-migration",
+      context_snapshot: "current context",
+      agent_id: "codex",
+    });
+    expect(memoryHealthCalls[0]).toMatchObject({
+      run_id: "codaph:repo-abc",
+      stale_threshold_days: 14,
+      limit: 25,
+    });
+    expect(diagnoseCalls[0]).toMatchObject({
+      run_id: "codaph:repo-abc",
+      error_text: "auth failure",
+      error_type: "test",
+      limit: 3,
+    });
+    expect(reflectCalls[0]).toMatchObject({
+      run_id: "codaph:repo-abc",
+      include_linked_runs: true,
+      last_n_items: 25,
+    });
+    expect(strategyCalls[0]).toMatchObject({
+      run_id: "codaph:repo-abc",
+      lesson_types: ["success"],
+      max_strategies: 2,
+    });
+    expect(registerAgentCalls[0]).toMatchObject({
+      run_id: "codaph:repo-abc",
+      agent_id: "codex",
+      role: "implementer",
+    });
+    expect(listAgentsCalls[0]).toEqual({ run_id: "codaph:repo-abc" });
+    expect(handoffCalls[0]).toMatchObject({
+      run_id: "codaph:repo-abc",
+      task_id: "task-1",
+      from_agent_id: "claude",
+      to_agent_id: "codex",
+      requested_action: "continue",
+    });
+    expect(feedbackCalls[0]).toMatchObject({
+      run_id: "codaph:repo-abc",
+      handoff_id: "handoff-1",
+      verdict: "approve",
+      comments: "looks good",
+      from_agent_id: "gemini",
+    });
+    expect(stepOutcomeCalls[0]).toMatchObject({
+      run_id: "codaph:repo-abc",
+      step_id: "step-1",
+      step_name: "planning",
+      directive_hint: "keep context concise",
+    });
+    expect(outcomeCalls[0]).toMatchObject({
+      run_id: "codaph:repo-abc",
+      reference_id: "lesson-1",
+      outcome: "success",
+    });
+  });
 });

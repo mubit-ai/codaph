@@ -141,6 +141,26 @@ Use that template when you prefer manual JSON merge into `~/.claude.json` or rep
 
 See [MCP Setup (Claude Code)](./mcp-setup.md) for `claude mcp add` examples, JSON examples, and troubleshooting.
 
+## Optional: Use The Repo Skill With An Agent
+
+Codaph also includes a repo-shared skill that teaches an agent when to use `pull`, `mubit context`, `checkpoint`, `diagnose`, `handoff`, and `reflect`.
+
+The skill lives at:
+
+```text
+skills/codaph-observability/SKILL.md
+```
+
+When your agent supports skills, reference the local absolute path to that file in the prompt:
+
+```md
+[$codaph-observability](/absolute/path/to/codaph/skills/codaph-observability/SKILL.md)
+```
+
+This is useful when you want Codaph to be part of the normal workflow for Claude Code, Codex, or Gemini CLI instead of remembering each command manually.
+
+See [Skills](./skills.md) for the full workflow and examples.
+
 ## Run Your First Sync
 
 Run the fast daily sync path after initialization:
@@ -186,6 +206,21 @@ Codaph returns a Mubit response by default. If `OPENAI_API_KEY` is configured, C
 Use `--agent` or `--no-agent` to control OpenAI-assisted behavior for a specific query. Use `--openai-model <model>` to override the model for that command.
 
 In the TUI, press `m` to open the Mubit chat panel. OpenAI-assisted chat is optional and uses the same key/model settings when enabled.
+
+## Use Context, Checkpoints, And Handoffs (Optional Workflow)
+
+After setup, these commands are the main building blocks for cross-agent continuity:
+
+```bash
+codaph pull --full
+codaph mubit context "what should the next agent know?"
+codaph checkpoint "before-auth-refactor"
+codaph doctor mubit
+codaph mubit diagnose "auth failure in CI"
+codaph handoff list
+```
+
+Use them when you need more than the default `sync` and `tui` loop, especially when switching between Claude Code, Codex, and Gemini CLI.
 
 ## Backfill Historical Agent Sessions (Optional)
 
@@ -244,7 +279,7 @@ Start with diagnostics before resetting anything:
 
 ```bash
 codaph status
-codaph doctor --mubit
+codaph doctor mubit
 ```
 
 Then check [Troubleshooting](./troubleshooting.md).

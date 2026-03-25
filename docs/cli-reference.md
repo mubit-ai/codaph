@@ -210,8 +210,10 @@ These commands are useful for debugging, inspection, and power users.
 ### Diagnostics
 
 ```bash
-codaph doctor --mubit
+codaph doctor mubit
 ```
+
+Use `codaph doctor mubit` when you want memory-health diagnostics from Mubit.
 
 ### Session inspection
 
@@ -221,6 +223,62 @@ codaph inspect --session <session-id>
 codaph timeline --session <session-id>
 codaph diff --session <session-id>
 ```
+
+### Replay and remote pull
+
+```bash
+codaph pull
+codaph pull --full
+codaph mubit replay --mode snapshot
+codaph mubit replay --mode activity
+```
+
+Use `pull --full` or `replay --mode activity` when snapshot-based remote pull looks truncated or when you are rebuilding a local mirror on a new machine.
+
+### Context blocks
+
+```bash
+codaph mubit context "what should the next agent know?"
+codaph mubit context "what should the next agent know?" --session <session-id>
+```
+
+Use this before starting a new agent run or handing off work to another provider.
+
+### Checkpoints
+
+```bash
+codaph checkpoint "before-auth-refactor"
+codaph checkpoint "before-auth-refactor" --session <session-id>
+```
+
+Use checkpoints before risky edits, migrations, or investigations you may need to resume later.
+
+### Diagnosis and lessons
+
+```bash
+codaph doctor mubit
+codaph mubit diagnose "auth failure in CI"
+codaph mubit reflect
+codaph mubit strategies
+```
+
+Useful flags:
+
+- `--session <session-id>` narrow context to one run
+- `--json` machine-readable output
+
+Use `diagnose` when an agent is stuck on a repeated failure, and `reflect` after meaningful work so Codaph can store reusable lessons.
+
+### Agents and handoffs
+
+```bash
+codaph agents list
+codaph handoff send --task auth-cleanup --from claude-code --to codex --action continue "continue validating the auth cleanup"
+codaph handoff list
+codaph handoff feedback --handoff <handoff-id> --verdict approve --comments "looks good"
+```
+
+Use handoffs when one agent should explicitly continue the work of another instead of relying on a free-form summary.
 
 ### Mubit queries
 
