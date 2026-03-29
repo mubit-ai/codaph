@@ -241,11 +241,11 @@ Use `pull --full` or `replay --mode activity` when snapshot-based remote pull lo
 codaph mubit context "what should the next agent know?"
 codaph mubit context "what should the next agent know?" --session <session-id>
 codaph mubit snapshot
-codaph mubit activity --limit 20
+codaph mubit activity --limit 20 --exclude-derived --projection compact
 codaph mubit export --limit 20 --format jsonl
 ```
 
-Use `mubit context` before starting a new agent run or handing off work to another provider. Use `mubit snapshot` when you want assembled run state, and `mubit activity` / `export` when you want chronological audit data.
+Use `mubit context` before starting a new agent run or handing off work to another provider. Use `mubit snapshot` when you want assembled run state, and `mubit activity` / `export` when you want chronological audit data. Prefer `--exclude-derived --projection compact` when you want a cleaner audit view.
 
 ### Checkpoints
 
@@ -287,14 +287,21 @@ Use handoffs when one agent should explicitly continue the work of another inste
 
 ```bash
 codaph mubit query "what changed in auth?"
+codaph mubit query "what is the current direction of this repo?" --rank-by freshness
 codaph mubit query "what changed in auth?" --session <session-id>
 ```
 
-OpenAI-assisted synthesis is optional. Without `OPENAI_API_KEY`, Codaph falls back to the Mubit response. When the answer path is weak, Codaph can attach a clearly labeled context supplement instead of silently replacing the query result.
+OpenAI-assisted synthesis is optional. Without `OPENAI_API_KEY`, Codaph falls back to the Mubit response. When the answer path is weak, Codaph can attach a clearly labeled context supplement instead of silently replacing the query result. Use `--rank-by freshness` for “current state”, “what changed recently”, and handoff-style questions.
 
 Useful query flags:
 
 - `--limit <n>`
+- `--rank-by relevance|balanced|freshness`
+- `--explain`
+- `--lane-filter <lane>`
+- `--min-timestamp <epoch>`
+- `--max-timestamp <epoch>`
+- `--budget <value>`
 - `--raw`
 - `--agent` / `--no-agent`
 - `--openai-model <model>` (override OpenAI model for this query)

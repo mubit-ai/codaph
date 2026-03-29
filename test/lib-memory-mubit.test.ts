@@ -71,6 +71,7 @@ describe("memory-mubit", () => {
     expect(remembers).toHaveLength(1);
     expect(remembers[0].idempotency_key).toBe("evt-123");
     expect(remembers[0].session_id).toBe("codaph:repo-abc:session-def");
+    expect(remembers[0].lane).toBe("prompt");
     expect(remembers[0].content).toBe("prompt.submitted [actor:anil]: summarize current repo");
     expect(activities).toHaveLength(2);
     const eventActivityPayload = activities.find(
@@ -326,6 +327,48 @@ describe("memory-mubit", () => {
     expect(recallCalls[0].direct_lane).toBe("hdql_query");
     expect(result.codaph_query_lane).toBe("hdql_query");
     expect(result.codaph_query_mode).toBe("direct_bypass");
+  });
+
+  it("forwards MuBit recall options when provided", async () => {
+    const recallCalls: Array<Record<string, unknown>> = [];
+    const engine = new MubitMemoryEngine({
+      client: {
+        recall: async (payload: RecallOptions) => {
+          recallCalls.push(payload as unknown as Record<string, unknown>);
+          return { final_answer: "recent answer", evidence: [] };
+        },
+        control: {
+          setVariable: async () => ({ success: true }),
+        },
+      },
+    });
+
+    await engine.querySemanticContext({
+      runId: "codaph:repo:session",
+      query: "what changed recently?",
+      limit: 4,
+      includeLinkedRuns: true,
+      laneFilter: "summary",
+      minTimestamp: 1711368000,
+      maxTimestamp: 1711454400,
+      budget: "small",
+      rankBy: "freshness",
+      explain: true,
+    });
+
+    expect(recallCalls).toHaveLength(1);
+    expect(recallCalls[0]).toMatchObject({
+      session_id: "codaph:repo:session",
+      query: "what changed recently?",
+      include_linked_runs: true,
+      limit: 4,
+      lane_filter: "summary",
+      min_timestamp: 1711368000,
+      max_timestamp: 1711454400,
+      budget: "small",
+      rank_by: "freshness",
+      explain: true,
+    });
   });
 
   it("does not fall back from hdql_query lane", async () => {
@@ -741,6 +784,32 @@ describe("memory-mubit", () => {
     expect((result.promotion_samples as Array<Record<string, unknown>>)[0]?.reason).toContain("build and test");
   });
 
+  it("prefers timeline_available when snapshots expose replay support explicitly", async () => {
+    const engine = new MubitMemoryEngine({
+      client: {
+        control: {
+          contextSnapshot: async () => ({
+            scope: { run_id: "state::123::codaph:repo-abc" },
+            timeline_available: true,
+            timeline: [],
+            promotions: [],
+            agents: [],
+            snapshot: {
+              summary: "Replay state is available even though this snapshot window is empty.",
+            },
+          }),
+        } as Record<string, unknown>,
+      } as unknown as any,
+    });
+
+    const result = await engine.inspectContextSnapshot({
+      runId: "codaph:repo-abc",
+    });
+
+    expect(result.timeline_available).toBe(true);
+    expect(result.has_replayable_timeline).toBe(true);
+  });
+
   it("wraps list/export activity and run-state control APIs", async () => {
     const listActivityCalls: Array<Record<string, unknown>> = [];
     const exportActivityCalls: Array<Record<string, unknown>> = [];
@@ -780,6 +849,8 @@ describe("memory-mubit", () => {
       sort: "asc",
       limit: 50,
       pageToken: "cursor-2",
+      excludeDerived: true,
+      projection: "compact",
     });
     const exportResult = await engine.exportActivity({
       runId: "codaph:repo-abc",
@@ -801,6 +872,8 @@ describe("memory-mubit", () => {
       sort: "asc",
       limit: 50,
       page_token: "cursor-2",
+      exclude_derived: true,
+      projection: "compact",
     });
     expect(exportActivityCalls[0]).toMatchObject({
       run_id: "codaph:repo-abc",
@@ -817,6 +890,68 @@ describe("memory-mubit", () => {
     expect(statsCalls[0]).toMatchObject({
       run_id: "codaph:repo-abc",
     });
+  });
+
+  it("filters derived activity and projects compact entries when the backend does not", async () => {
+    const engine = new MubitMemoryEngine({
+      client: {
+        control: {
+          listActivity: async () => ({
+            entries: [
+              {
+                id: "derived-1",
+                entry_type: "fact",
+                content: "Very long derived content that should be removed when excludeDerived is requested.",
+                metadata_json: "{\"promotion\":true,\"source_record_id\":\"src-1\"}",
+              },
+              {
+                id: "handoff-1",
+                entry_type: "handoff",
+                source: "claude-code",
+                created_at: "2026-03-25T10:00:00.000Z",
+                content: "continue validating the new mubit integration features in codaph",
+              },
+              {
+                id: "feedback-1",
+                entry_type: "feedback",
+                source: "feedback",
+                created_at: "2026-03-25T10:01:00.000Z",
+                content:
+                  "looks good but this line is intentionally long so compact projection has to trim it down before returning it to the caller for audit-style output",
+              },
+            ],
+          }),
+        } as Record<string, unknown>,
+      } as unknown as any,
+    });
+
+    const result = await engine.listActivity({
+      runId: "codaph:repo-abc",
+      limit: 10,
+      excludeDerived: true,
+      projection: "compact",
+    });
+
+    expect(result.exclude_derived_fallback_used).toBe(true);
+    expect(result.projection_fallback_used).toBe(true);
+    expect(Array.isArray(result.entries)).toBe(true);
+    expect((result.entries as Array<Record<string, unknown>>).map((entry) => entry.id)).toEqual([
+      "handoff-1",
+      "feedback-1",
+    ]);
+    expect((result.entries as Array<Record<string, unknown>>)[0]).toEqual({
+      id: "handoff-1",
+      entry_type: "handoff",
+      source: "claude-code",
+      created_at: "2026-03-25T10:00:00.000Z",
+      content: "continue validating the new mubit integration features in codaph",
+    });
+    expect(
+      String((result.entries as Array<Record<string, unknown>>)[1]?.content ?? ""),
+    ).toContain("intentionally long");
+    expect(
+      String((result.entries as Array<Record<string, unknown>>)[1]?.content ?? "").length,
+    ).toBeLessThan(210);
   });
 
   it("wraps diagnostics, linking, reflection, agent registry, and handoffs", async () => {
@@ -1026,5 +1161,73 @@ describe("memory-mubit", () => {
       reference_id: "lesson-1",
       outcome: "success",
     });
+  });
+
+  it("assigns MuBit lanes for reasoning, tool, summary, and generic events", async () => {
+    const remembers: Array<Record<string, unknown>> = [];
+    const engine = new MubitMemoryEngine({
+      client: {
+        remember: async (payload: RememberOptions) => {
+          remembers.push(payload as unknown as Record<string, unknown>);
+          return { accepted: true };
+        },
+        control: {
+          setVariable: async () => ({ success: true }),
+          query: async () => ({ final_answer: "ok" }),
+          appendActivity: async () => ({ success: true }),
+        },
+      },
+    });
+
+    await engine.writeEvent({
+      eventId: "evt-reasoning",
+      source: "codex_exec",
+      repoId: "repo-abc",
+      actorId: "anil",
+      sessionId: "session-1",
+      threadId: "thread-1",
+      ts: "2026-03-25T10:00:00.000Z",
+      eventType: "item.completed",
+      payload: { item: { type: "reasoning", text: "thinking" } },
+      reasoningAvailability: "full",
+    });
+    await engine.writeEvent({
+      eventId: "evt-tool",
+      source: "codex_exec",
+      repoId: "repo-abc",
+      actorId: "anil",
+      sessionId: "session-1",
+      threadId: "thread-1",
+      ts: "2026-03-25T10:00:01.000Z",
+      eventType: "item.completed",
+      payload: { item: { type: "tool_call", name: "rg" } },
+      reasoningAvailability: "unavailable",
+    });
+    await engine.writeEvent({
+      eventId: "evt-summary",
+      source: "codex_exec",
+      repoId: "repo-abc",
+      actorId: "anil",
+      sessionId: "session-1",
+      threadId: "thread-1",
+      ts: "2026-03-25T10:00:02.000Z",
+      eventType: "codaph.session.summary",
+      payload: { item: { type: "codaph_session_summary", summary: "Done" } },
+      reasoningAvailability: "unavailable",
+    });
+    await engine.writeEvent({
+      eventId: "evt-event",
+      source: "codex_exec",
+      repoId: "repo-abc",
+      actorId: "anil",
+      sessionId: "session-1",
+      threadId: "thread-1",
+      ts: "2026-03-25T10:00:03.000Z",
+      eventType: "turn.started",
+      payload: {},
+      reasoningAvailability: "unavailable",
+    });
+
+    expect(remembers.map((entry) => entry.lane)).toEqual(["reasoning", "tool", "summary", "event"]);
   });
 });

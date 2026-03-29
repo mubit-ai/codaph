@@ -15,7 +15,9 @@ import { IngestPipeline } from "./lib/ingest-pipeline";
 import { CodexSdkAdapter } from "./lib/adapter-codex-sdk";
 import { CodexExecAdapter } from "./lib/adapter-codex-exec";
 import { QueryService } from "./lib/query-service";
+import { formatMubitEmptyReasonLine } from "./lib/mubit-display";
 import { loadProjectEnv } from "./lib/project-env";
+import { resolveMubitCommandRunId as resolveMubitCommandRunIdFromScope } from "./lib/mubit-run-resolution";
 import { resolveScopedProjectPathsForWorktrees } from "./lib/git-worktrees";
 import {
   MubitMemoryEngine,
@@ -613,10 +615,13 @@ function resolveMubitCommandRunId(
 ): string {
   const repoId = resolveRepoIdForProject(flags, cwd, settings);
   const projectId = resolveMubitProjectId(flags, cwd, settings) ?? repoId;
-  if (!options.preferProject && options.sessionId) {
-    return mubitRunIdForContext(flags, repoId, options.sessionId, cwd, settings);
-  }
-  return mubitRunIdForProject(projectId);
+  return resolveMubitCommandRunIdFromScope({
+    repoId,
+    projectId,
+    runScope: resolveMubitRunScope(flags, cwd, settings),
+    sessionId: options.sessionId,
+    preferProject: options.preferProject,
+  });
 }
 
 async function doctor(rest: string[]): Promise<void> {
@@ -692,14 +697,33 @@ async function doctor(rest: string[]): Promise<void> {
       timelineLimit: 20,
       refresh: false,
     }).catch(() => null);
+    const stats = await memory.getRunIngestStats(runId).catch(() => null);
     if (snapshot && snapshot.disabled !== true && snapshot.unsupported !== true) {
       const resolvedRunId =
         typeof snapshot.run_id_resolved === "string" ? snapshot.run_id_resolved : runId;
       const timelineCount = typeof snapshot.timeline_count === "number" ? snapshot.timeline_count : 0;
       const promotionCount = typeof snapshot.promotion_count === "number" ? snapshot.promotion_count : 0;
+      const timelineAvailable =
+        typeof snapshot.timeline_available === "boolean"
+          ? ` timelineAvailable=${snapshot.timeline_available ? "yes" : "no"}`
+          : "";
       console.log(
-        `Mubit snapshot status: resolved=${resolvedRunId} timeline=${timelineCount} promotions=${promotionCount} ${timelineCount === 0 && promotionCount > 0 ? "(assembled state without replayable timeline)" : ""}`.trim(),
+        `Mubit snapshot status: resolved=${resolvedRunId} timeline=${timelineCount} promotions=${promotionCount}${timelineAvailable} ${timelineCount === 0 && promotionCount > 0 ? "(assembled state without replayable timeline)" : ""}`.trim(),
       );
+    }
+    if (stats && stats.disabled !== true && stats.unsupported !== true) {
+      const statsAvailable =
+        typeof stats.stats_available === "boolean"
+          ? ` available=${stats.stats_available ? "yes" : "no"}`
+          : "";
+      const statusReason =
+        typeof stats.status_reason === "string" && stats.status_reason.trim().length > 0
+          ? ` reason=${stats.status_reason.trim()}`
+          : "";
+      const totalJobs = typeof stats.total_jobs === "number" ? ` total_jobs=${stats.total_jobs}` : "";
+      const completedJobs =
+        typeof stats.completed_jobs === "number" ? ` completed_jobs=${stats.completed_jobs}` : "";
+      console.log(`Mubit ingest stats:${statsAvailable}${statusReason}${totalJobs}${completedJobs}`);
     }
   }
 }
@@ -3952,6 +3976,10 @@ function printMubitResponse(
     const confidenceText =
       typeof confidence === "number" ? ` | confidence=${confidence.toFixed(2)}` : "";
     console.log(`evidence=${evidenceCount}${confidenceText}`);
+    const explain = summarizeExplainInfo(response);
+    if (explain) {
+      console.log(explain);
+    }
     if (supplementalContext && response.query_fallback_used === true) {
       console.log("");
       console.log("Context supplement:");
@@ -3968,6 +3996,10 @@ function printMubitResponse(
     const confidenceText =
       typeof confidence === "number" ? ` | confidence=${confidence.toFixed(2)}` : "";
     console.log(`evidence=${evidenceCount}${confidenceText}`);
+    const explain = summarizeExplainInfo(response);
+    if (explain) {
+      console.log(explain);
+    }
     if (supplementalContext && response.query_fallback_used === true) {
       console.log("");
       console.log("Context supplement:");
@@ -3988,6 +4020,10 @@ function printMubitResponse(
     console.log("");
     console.log("Context supplement:");
     console.log(clipText(stripTranscriptDump(supplementalContext).trim(), 1400));
+  }
+  const explain = summarizeExplainInfo(response);
+  if (explain) {
+    console.log(explain);
   }
 }
 
@@ -4025,6 +4061,8 @@ async function mubitQuery(rest: string[]): Promise<void> {
 
   const limitRaw = getStringFlag(flags, "limit");
   const limit = limitRaw ? Number.parseInt(limitRaw, 10) : undefined;
+  const minTimestampRaw = getStringFlag(flags, "min-timestamp");
+  const maxTimestampRaw = getStringFlag(flags, "max-timestamp");
   const rawMode = getBooleanFlag(flags, "raw", false);
   const forceDirect = getBooleanFlag(flags, "direct", false) || getBooleanFlag(flags, "hdql", false);
   const runId = resolveMubitCommandRunId(flags, cwd, settings, { sessionId, preferProject: !sessionId });
@@ -4043,6 +4081,12 @@ async function mubitQuery(rest: string[]): Promise<void> {
       contextLimit: limit,
       contextFormat: "structured",
       contextMode: "summary",
+      laneFilter: getStringFlag(flags, "lane-filter") ?? undefined,
+      minTimestamp: parseIntegerFlag(minTimestampRaw),
+      maxTimestamp: parseIntegerFlag(maxTimestampRaw),
+      budget: getStringFlag(flags, "budget") ?? undefined,
+      rankBy: parseMubitRankBy(getStringFlag(flags, "rank-by")),
+      explain: getBooleanFlag(flags, "explain", false),
     }),
     45000,
     "Mubit query",
@@ -4115,6 +4159,10 @@ async function mubitContextCommand(rest: string[]): Promise<void> {
 
   console.log(`Mubit run scope: ${runId}`);
   printStructuredMubitResult("Mubit context", response, ["context_block", "context"]);
+  const emptyReasonLine = formatMubitEmptyReasonLine(response.empty_reason);
+  if (emptyReasonLine) {
+    console.log(emptyReasonLine);
+  }
 }
 
 async function mubitSnapshotCommand(rest: string[]): Promise<void> {
@@ -4169,6 +4217,8 @@ async function mubitActivityCommand(rest: string[]): Promise<void> {
       sort: getStringFlag(flags, "sort") === "asc" ? "asc" : "desc",
       limit: limitRaw ? Number.parseInt(limitRaw, 10) : 50,
       pageToken: getStringFlag(flags, "page-token"),
+      excludeDerived: getBooleanFlag(flags, "exclude-derived", false),
+      projection: parseMubitActivityProjection(getStringFlag(flags, "projection")),
       agentId: getStringFlag(flags, "agent-id") ?? undefined,
     }),
     45000,
@@ -6575,6 +6625,9 @@ function printMubitSnapshot(payload: Record<string, unknown>): void {
   if (typeof payload.summary === "string" && payload.summary.trim().length > 0) {
     console.log(payload.summary.trim());
   }
+  if (typeof payload.timeline_available === "boolean") {
+    console.log(`timeline_available=${payload.timeline_available ? "yes" : "no"}`);
+  }
   if (typeof payload.snapshot_summary === "string" && payload.snapshot_summary.trim().length > 0) {
     console.log("");
     console.log("Snapshot summary:");
@@ -6653,6 +6706,52 @@ function printMubitActivity(payload: Record<string, unknown>): void {
   if (typeof payload.total_visible === "number") {
     console.log(`total_visible=${payload.total_visible}`);
   }
+}
+
+function parseIntegerFlag(value: string | null | undefined): number | undefined {
+  if (!value) {
+    return undefined;
+  }
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function parseMubitRankBy(value: string | null | undefined): "relevance" | "balanced" | "freshness" | undefined {
+  if (value === "relevance" || value === "balanced" || value === "freshness") {
+    return value;
+  }
+  return undefined;
+}
+
+function parseMubitActivityProjection(value: string | null | undefined): "compact" | "full" | undefined {
+  if (value === "compact" || value === "full") {
+    return value;
+  }
+  return undefined;
+}
+
+function summarizeExplainInfo(response: Record<string, unknown>): string | null {
+  const evidence = Array.isArray(response.evidence) ? response.evidence : [];
+  const first = evidence.find((entry): entry is Record<string, unknown> => isRecord(entry));
+  if (!first || !isRecord(first.explain_info)) {
+    return null;
+  }
+  const explain = first.explain_info as Record<string, unknown>;
+  const rankBy =
+    typeof explain.rank_by_mode === "string" && explain.rank_by_mode.trim().length > 0
+      ? explain.rank_by_mode.trim()
+      : null;
+  const temporalIntent = typeof explain.temporal_intent_detected === "boolean" ? explain.temporal_intent_detected : null;
+  const recencyScore =
+    typeof explain.recency_score === "number" && Number.isFinite(explain.recency_score)
+      ? explain.recency_score.toFixed(3)
+      : null;
+  const parts = [
+    rankBy ? `rank_by=${rankBy}` : null,
+    temporalIntent !== null ? `temporal_intent=${temporalIntent ? "yes" : "no"}` : null,
+    recencyScore ? `recency_score=${recencyScore}` : null,
+  ].filter((part): part is string => !!part);
+  return parts.length > 0 ? `explain: ${parts.join(" | ")}` : null;
 }
 
 function headerLine(left: string, right: string, width: number): string {
@@ -8236,6 +8335,12 @@ async function tui(rest: string[]): Promise<void> {
         contextLimit: 6,
         contextMode: "summary",
         contextFormat: "structured",
+        laneFilter: getStringFlag(flags, "lane-filter") ?? undefined,
+        minTimestamp: parseIntegerFlag(getStringFlag(flags, "min-timestamp")),
+        maxTimestamp: parseIntegerFlag(getStringFlag(flags, "max-timestamp")),
+        budget: getStringFlag(flags, "budget") ?? undefined,
+        rankBy: parseMubitRankBy(getStringFlag(flags, "rank-by")),
+        explain: getBooleanFlag(flags, "explain", false),
       }),
       45000,
       "Mubit query",

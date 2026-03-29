@@ -199,12 +199,13 @@ You can query Mubit directly from the CLI at project scope or narrow to one sess
 
 ```bash
 codaph mubit query "what changed in auth?"
+codaph mubit query "what is the current direction of this repo?" --rank-by freshness
 codaph mubit query "what changed in auth?" --session <session-id>
 ```
 
 Codaph returns a Mubit response by default. If `OPENAI_API_KEY` is configured, Codaph can synthesize a shorter answer using OpenAI (`gpt-4.1-mini` by default) on top of Mubit evidence.
 
-Use `--agent` or `--no-agent` to control OpenAI-assisted behavior for a specific query. Use `--openai-model <model>` to override the model for that command.
+Use `--agent` or `--no-agent` to control OpenAI-assisted behavior for a specific query. Use `--openai-model <model>` to override the model for that command. Use `--rank-by freshness` for “current state”, “what changed”, and handoff questions. Add `--explain` when you want MuBit ranking diagnostics and they are available on your tenant.
 
 In the TUI, press `m` to open the Mubit chat panel. OpenAI-assisted chat is optional and uses the same key/model settings when enabled.
 
@@ -216,7 +217,7 @@ After setup, these commands are the main building blocks for cross-agent continu
 codaph pull --full
 codaph mubit context "what should the next agent know?"
 codaph mubit snapshot
-codaph mubit activity --limit 20
+codaph mubit activity --limit 20 --exclude-derived --projection compact
 codaph checkpoint "before-auth-refactor"
 codaph doctor mubit
 codaph mubit diagnose "auth failure in CI"

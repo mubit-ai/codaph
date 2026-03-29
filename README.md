@@ -96,7 +96,9 @@ Optional query example (OpenAI-assisted if `OPENAI_API_KEY` is set, otherwise Mu
 
 ```bash
 codaph mubit query "what changed in auth?"
+codaph mubit query "what is the current direction of this repo?" --rank-by freshness
 codaph mubit query "what changed in auth?" --session <session-id>
+codaph mubit activity --limit 20 --exclude-derived --projection compact
 ```
 
 If you are running from source, use `bun run cli` instead of `codaph`.

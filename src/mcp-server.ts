@@ -673,6 +673,9 @@ function toolSchemas(): McpTool[] {
           sort: { type: "string", enum: ["asc", "desc"] },
           pageToken: { type: "string" },
           page_token: { type: "string" },
+          excludeDerived: { type: "boolean" },
+          exclude_derived: { type: "boolean" },
+          projection: { type: "string", enum: ["compact", "full"] },
           agentId: { type: "string" },
         },
       },
@@ -693,6 +696,10 @@ function toolSchemas(): McpTool[] {
           sort: sort === "asc" ? "asc" : "desc",
           limit: asOptionalInteger(args.limit, "limit") ?? 50,
           pageToken: asOptionalString(args.pageToken) ?? asOptionalString(args.page_token),
+          excludeDerived:
+            asOptionalBoolean(args.excludeDerived, "excludeDerived") ??
+            asOptionalBoolean(args.exclude_derived, "exclude_derived"),
+          projection: asOptionalString(args.projection) === "compact" ? "compact" : asOptionalString(args.projection) === "full" ? "full" : undefined,
           agentId: asOptionalString(args.agentId),
         });
         return {
@@ -1211,4 +1218,13 @@ export class CodaphMcpServer {
 export async function startCodaphMcpServer(options: McpServerOptions = {}): Promise<void> {
   const server = new CodaphMcpServer(options);
   await server.start();
+}
+
+export function codaphMcpToolSchemasForTest(): Array<{
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+  handler: McpTool["handler"];
+}> {
+  return toolSchemas();
 }

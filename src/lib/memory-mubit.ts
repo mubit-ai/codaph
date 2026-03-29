@@ -16,6 +16,12 @@ export interface MubitSemanticQueryOptions {
   includeLinkedRuns?: boolean;
   directLane?: "semantic_search" | "hdql_query";
   mode?: "agent_routed" | "direct_bypass";
+  laneFilter?: string;
+  minTimestamp?: number;
+  maxTimestamp?: number;
+  budget?: string;
+  rankBy?: "relevance" | "balanced" | "freshness";
+  explain?: boolean;
 }
 
 export interface MubitSemanticQueryWithFallbackOptions extends MubitSemanticQueryOptions {
@@ -26,7 +32,6 @@ export interface MubitSemanticQueryWithFallbackOptions extends MubitSemanticQuer
   contextMode?: string;
   contextFormat?: string;
   includeWorkingMemory?: boolean;
-  laneFilter?: string;
   agentId?: string;
 }
 
@@ -63,6 +68,8 @@ export interface MubitListActivityOptions {
   sort?: "asc" | "desc";
   limit?: number;
   pageToken?: string;
+  excludeDerived?: boolean;
+  projection?: "compact" | "full";
 }
 
 export interface MubitExportActivityOptions extends Omit<MubitListActivityOptions, "pageToken"> {
@@ -696,6 +703,43 @@ function summarizeActivityLine(entry: Record<string, unknown>): { line: string; 
   };
 }
 
+function isDerivedActivityEntry(entry: Record<string, unknown>): boolean {
+  if (asBoolean(entry.derived) === true || asBoolean(entry.is_derived) === true || asBoolean(entry.promotion) === true) {
+    return true;
+  }
+  const metadata = parseJsonRecord(entry.metadata_json);
+  if (asBoolean(metadata?.promotion) === true || asBoolean(metadata?.is_derived) === true) {
+    return true;
+  }
+  if (asString(metadata?.source_record_id) || asString(entry.source_record_id)) {
+    return true;
+  }
+  return false;
+}
+
+function compactActivityEntry(entry: Record<string, unknown>): Record<string, unknown> {
+  const compact: Record<string, unknown> = {
+    id: asString(entry.id) ?? null,
+    entry_type:
+      asString(entry.entry_type) ??
+      asString(entry.origin_entry_type) ??
+      asString(entry.type) ??
+      "activity",
+    source: asString(entry.source) ?? null,
+    created_at: asString(entry.created_at) ?? asString(entry.ts) ?? null,
+  };
+  const content =
+    compactString(entry.content, 200) ??
+    compactString(entry.summary, 200) ??
+    compactString(entry.message, 200) ??
+    compactString(entry.payload, 200) ??
+    compactString(entry.metadata_json, 200);
+  if (content) {
+    compact.content = content;
+  }
+  return compact;
+}
+
 function asRecordArray(value: unknown): Record<string, unknown>[] {
   if (!Array.isArray(value)) {
     return [];
@@ -814,6 +858,36 @@ function compactPromptActivityEnvelope(event: CapturedEventEnvelope): Record<str
 
 function isPromptSubmittedEvent(event: CapturedEventEnvelope): boolean {
   return event.eventType === "prompt.submitted";
+}
+
+function isToolItemType(value: unknown): boolean {
+  const type = asString(value);
+  if (!type) {
+    return false;
+  }
+  return type === "tool_call" || type === "tool_result" || type.startsWith("tool.");
+}
+
+function laneForEvent(event: CapturedEventEnvelope): string {
+  if (event.eventType === "prompt.submitted") {
+    return "prompt";
+  }
+  if (event.eventType.startsWith("codaph.") && event.eventType.includes("summary")) {
+    return "summary";
+  }
+  if (event.eventType === "codaph.prompt.diff.part") {
+    return "summary";
+  }
+
+  const item = asRecord(event.payload.item);
+  const itemType = asString(item?.type);
+  if (itemType === "reasoning" || event.reasoningAvailability !== "unavailable") {
+    return "reasoning";
+  }
+  if (isToolItemType(itemType)) {
+    return "tool";
+  }
+  return "event";
 }
 
 export function mubitRunIdForSession(
@@ -1151,6 +1225,7 @@ export class MubitMemoryEngine implements MemoryEngine {
       parallel: false,
       wait: false,
       idempotency_key: event.eventId,
+      lane: laneForEvent(event),
     };
   }
 
@@ -1487,7 +1562,49 @@ export class MubitMemoryEngine implements MemoryEngine {
     if (options.pageToken) {
       payload.page_token = options.pageToken;
     }
-    return await this.callControlMethod("listActivity", payload);
+    if (typeof options.excludeDerived === "boolean") {
+      payload.exclude_derived = options.excludeDerived;
+    }
+    if (options.projection) {
+      payload.projection = options.projection;
+    }
+    const response = await this.callControlMethod("listActivity", payload);
+    if (response.disabled === true || response.unsupported === true) {
+      return response;
+    }
+
+    const entries = asRecordArray(response.entries);
+    if (entries.length === 0) {
+      return response;
+    }
+
+    let normalizedEntries = entries;
+    let excludeDerivedFallbackUsed = false;
+    let projectionFallbackUsed = false;
+
+    if (options.excludeDerived) {
+      const filtered = normalizedEntries.filter((entry) => !isDerivedActivityEntry(entry));
+      if (filtered.length !== normalizedEntries.length) {
+        normalizedEntries = filtered;
+        excludeDerivedFallbackUsed = true;
+      }
+    }
+
+    if (options.projection === "compact") {
+      normalizedEntries = normalizedEntries.map((entry) => compactActivityEntry(entry));
+      projectionFallbackUsed = true;
+    }
+
+    if (!excludeDerivedFallbackUsed && !projectionFallbackUsed) {
+      return response;
+    }
+
+    return {
+      ...response,
+      entries: normalizedEntries,
+      exclude_derived_fallback_used: excludeDerivedFallbackUsed,
+      projection_fallback_used: projectionFallbackUsed,
+    };
   }
 
   async exportActivity(options: MubitExportActivityOptions): Promise<Record<string, unknown>> {
@@ -1551,6 +1668,7 @@ export class MubitMemoryEngine implements MemoryEngine {
     const promotions = asRecordArray(response.promotions);
     const agents = asRecordArray(response.agents);
     const timeline = asRecordArray(response.timeline);
+    const timelineAvailable = asBoolean(response.timeline_available);
     const promotionPolicyCounts: Record<string, number> = {};
 
     for (const promotion of promotions) {
@@ -1565,6 +1683,7 @@ export class MubitMemoryEngine implements MemoryEngine {
     const timelineCount = timeline.length;
     const promotionCount = promotions.length;
     const agentCount = agents.length;
+    const hasReplayableTimeline = typeof timelineAvailable === "boolean" ? timelineAvailable : timelineCount > 0;
     const summaryParts = [
       `resolved=${runIdResolved}`,
       `${timelineCount} timeline event${timelineCount === 1 ? "" : "s"}`,
@@ -1574,7 +1693,7 @@ export class MubitMemoryEngine implements MemoryEngine {
     if (linkedRunIds.length > 0) {
       summaryParts.push(`${linkedRunIds.length} linked run${linkedRunIds.length === 1 ? "" : "s"}`);
     }
-    if (timelineCount === 0 && promotionCount > 0) {
+    if (hasReplayableTimeline === false && promotionCount > 0) {
       summaryParts.push("assembled state available without replayable timeline");
     }
 
@@ -1587,13 +1706,14 @@ export class MubitMemoryEngine implements MemoryEngine {
           ? scope.owner_user_id
           : null,
       control_status: asRecord(response.control_status) ?? null,
+      timeline_available: typeof timelineAvailable === "boolean" ? timelineAvailable : null,
       timeline_count: timelineCount,
       agent_count: agentCount,
       agents: agents.slice(0, 10),
       promotion_count: promotionCount,
       promotion_policy_counts: promotionPolicyCounts,
       promotion_samples: promotions.slice(0, 5).map((entry) => summarizePromotionSample(entry)),
-      has_replayable_timeline: timelineCount > 0,
+      has_replayable_timeline: hasReplayableTimeline,
       has_promotions: promotionCount > 0,
       has_snapshot_state: Object.keys(snapshot).length > 0,
       snapshot_summary: compactString(snapshot.summary, 1600),
@@ -1858,9 +1978,27 @@ export class MubitMemoryEngine implements MemoryEngine {
     if (mode === "direct_bypass") {
       payload.direct_lane = directLane;
     }
+    if (options.laneFilter) {
+      payload.lane_filter = options.laneFilter;
+    }
+    if (typeof options.minTimestamp === "number" && Number.isFinite(options.minTimestamp)) {
+      payload.min_timestamp = options.minTimestamp;
+    }
+    if (typeof options.maxTimestamp === "number" && Number.isFinite(options.maxTimestamp)) {
+      payload.max_timestamp = options.maxTimestamp;
+    }
+    if (options.budget) {
+      payload.budget = options.budget;
+    }
+    if (options.rankBy) {
+      payload.rank_by = options.rankBy;
+    }
+    if (typeof options.explain === "boolean") {
+      payload.explain = options.explain;
+    }
     let result: unknown;
     if (this.client.recall) {
-      result = await this.client.recall({
+      const recallPayload: RecallOptions & Record<string, unknown> = {
         session_id: options.runId,
         query: options.query,
         mode,
@@ -1868,7 +2006,26 @@ export class MubitMemoryEngine implements MemoryEngine {
         include_linked_runs: options.includeLinkedRuns ?? false,
         limit,
         embedding: [],
-      });
+      };
+      if (options.laneFilter) {
+        recallPayload.lane_filter = options.laneFilter;
+      }
+      if (typeof options.minTimestamp === "number" && Number.isFinite(options.minTimestamp)) {
+        recallPayload.min_timestamp = options.minTimestamp;
+      }
+      if (typeof options.maxTimestamp === "number" && Number.isFinite(options.maxTimestamp)) {
+        recallPayload.max_timestamp = options.maxTimestamp;
+      }
+      if (options.budget) {
+        recallPayload.budget = options.budget;
+      }
+      if (options.rankBy) {
+        recallPayload.rank_by = options.rankBy;
+      }
+      if (typeof options.explain === "boolean") {
+        recallPayload.explain = options.explain;
+      }
+      result = await this.client.recall(recallPayload);
     } else if (this.client.control.query) {
       result = await this.client.control.query(payload);
     } else {
