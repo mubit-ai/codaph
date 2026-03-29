@@ -5448,6 +5448,10 @@ function formatDateCell(ts: string): string {
   const day = String(date.getDate()).padStart(2, "0");
   const hh = String(date.getHours()).padStart(2, "0");
   const mm = String(date.getMinutes()).padStart(2, "0");
+  const ago = formatTimeAgo(ts);
+  if (ago) {
+    return `${month} ${day} ${hh}:${mm} (${ago})`;
+  }
   return `${month} ${day} ${hh}:${mm}`;
 }
 
@@ -7013,7 +7017,7 @@ function renderBrowseView(
   const groupingLabel = state.browseGrouping === "day" ? "day" : "session";
   const innerWidth = Math.max(14, width - 2);
   const idxWidth = Math.max(2, String(state.rows.length).length);
-  const dateWidth = 16;
+  const dateWidth = Math.max(16, ...rows.map((row) => formatDateCell(row.to).length));
   const promptWidth = Math.max(4, ...rows.map((row) => String(row.promptCount).length));
   const fileWidth = Math.max(5, ...rows.map((row) => String(row.fileCount).length));
   const tokenWidth = Math.max(6, ...rows.map((row) => formatTokenEstimate(row.tokenEstimate).length));
@@ -7068,7 +7072,7 @@ function renderBrowseView(
 
   const sessionsBox = boxLines(`Sessions  group:${groupingLabel}`, width, tableHeight, sessionLines, true);
   const footer =
-    "[↑/↓] sessions  [enter] inspect  [g] group  [s] sync  [r] pull  [p] next project  [P] projects  [a] add  [o] settings  [q] quit";
+    "[↑/↓] select   [enter] inspect   [s] sync   [r] pull   [g] group   [p] project   [o] settings   [?] help   [q] quit";
   return [header, headerRule, ...(busyRail ? [busyRail] : []), ...sessionsBox, "", paint(clipPlain(footer, width), TUI_COLORS.dim)].join("\n");
 }
 
@@ -7122,10 +7126,16 @@ function buildPromptOverlayContent(data: FullPromptOverlayData, wrapWidth: numbe
 
   // Metadata header
   const timePart = data.ts ? new Date(data.ts).toLocaleString() : "unknown time";
-  const actorPart = data.actorId ? `  actor: ${data.actorId}` : "";
-  const providerPart = data.provider ? `  provider: ${data.provider}` : "";
-  lines.push({ text: `${timePart}${actorPart}${providerPart}`, color: TUI_COLORS.dim });
-  lines.push({ text: `${data.thoughtCount} thought(s), ${data.fileCount} file(s) changed`, color: TUI_COLORS.dim });
+  const metaParts = [timePart];
+  if (data.actorId) metaParts.push(`actor: ${data.actorId}`);
+  if (data.provider) metaParts.push(`provider: ${data.provider}`);
+  lines.push({ text: metaParts.join("  "), color: TUI_COLORS.dim });
+  if (data.thoughtCount > 0 || data.fileCount > 0) {
+    const statParts: string[] = [];
+    if (data.thoughtCount > 0) statParts.push(`${data.thoughtCount} thought(s)`);
+    if (data.fileCount > 0) statParts.push(`${data.fileCount} file(s) changed`);
+    lines.push({ text: statParts.join(", "), color: TUI_COLORS.dim });
+  }
   lines.push({ text: "─".repeat(Math.min(w, 60)), color: TUI_COLORS.dim });
   lines.push({ text: "" });
 
@@ -7462,10 +7472,16 @@ function renderInspectView(
   }
 
   const footer = state.chatOpen
-    ? "[tab/←/→] focus pane   [esc] close chat   [↑/↓] navigate/scroll"
-    : threePaneMode
-      ? "[enter] prompt -> thoughts   [e] expand prompt   [↑/↓] select/scroll   [tab/←/→] focus pane   [d] full diff   [m] Mubit chat   [f] actor filter   [c] contributors   [o] settings   [esc] back"
-      : "[↑/↓] prompts/scroll pane   [e] expand prompt   [tab/←/→] focus pane   [d] full diff   [m] Mubit chat   [f] actor filter   [c] contributors   [o] settings   [esc] back";
+    ? "[tab/←/→] pane   [esc] close chat   [↑/↓] scroll"
+    : (() => {
+        // Context-sensitive footer: show pane-relevant hints first, then common ones
+        const paneHint =
+          state.inspectPane === "prompts" ? "[↑/↓] select   [e] expand   [enter] thoughts"
+          : state.inspectPane === "thoughts" ? "[↑/↓] select   [e] expand"
+          : "[↑/↓] scroll";
+        const common = "[tab/←/→] pane   [d] diff   [m] chat   [esc] back   [?] help";
+        return `${paneHint}   ${common}`;
+      })();
 
   composed.push("");
   composed.push(paint(clipPlain(footer, width), TUI_COLORS.dim));
@@ -7491,7 +7507,7 @@ function renderHelpOverlay(width: number, height: number): string {
     { text: "" },
     { text: "Inspect", color: TUI_COLORS.muted },
     { text: "enter   from prompts -> focus thoughts" },
-    { text: "e       expand full prompt (scroll with up/down, esc to close)" },
+    { text: "e       expand full prompt or thought (scroll with up/down, esc to close)" },
     { text: "up/down (or arrows) navigate prompts/thoughts or scroll pane" },
     { text: "tab     cycle pane focus" },
     { text: "d       toggle full diff overlay" },
@@ -8652,9 +8668,11 @@ async function tui(rest: string[]): Promise<void> {
   await refreshRows("Indexing sessions");
   await refreshSyncIndicators();
   const memoryEnabled = memory?.isEnabled() ?? false;
+  const sessionCount = state.rows.length;
+  const welcomeStats = sessionCount > 0 ? `${sessionCount} session(s)` : "no sessions yet — press [s] to sync";
   state.statusLine = memoryEnabled
-    ? `Project: ${state.projectPath}`
-    : `Local mode | ${state.projectPath} | Connect Mubit for team memory: codaph setup --mubit-api-key <key>`;
+    ? `${welcomeStats} | [enter] inspect  [e] expand  [?] help`
+    : `${welcomeStats} | local mode — connect Mubit for team memory: codaph setup --mubit-api-key <key>`;
 
   const onResize = (): void => {
     render();
@@ -9449,24 +9467,46 @@ async function tui(rest: string[]): Promise<void> {
       return;
     }
 
-    if (str === "e" && state.inspectPane === "prompts") {
+    if (str === "e" && (state.inspectPane === "prompts" || state.inspectPane === "thoughts")) {
       const promptSelection = selectedPromptFromAnalysis(analysis, state.selectedPromptIndex, state.actorFilter);
       const p = promptSelection.prompt;
-      if (!p || p.prompt === "(No prompt captured)") {
-        state.statusLine = "No prompt to expand.";
-        render();
-        return;
+
+      if (state.inspectPane === "prompts") {
+        if (!p || p.prompt === "(No prompt captured)") {
+          state.statusLine = "No prompt to expand.";
+          render();
+          return;
+        }
+        state.fullPromptData = {
+          promptId: p.id,
+          title: `Prompt #${p.id}`,
+          rawPrompt: p.prompt,
+          actorId: p.actorId,
+          provider: p.provider,
+          ts: p.ts,
+          thoughtCount: p.thoughts.length,
+          fileCount: p.files.size,
+        };
+      } else {
+        const ts = selectedThoughtFromPrompt(p, state.selectedThoughtIndex);
+        const thought = ts.selected;
+        if (!thought || !thought.text || thought.text.trim().length === 0) {
+          state.statusLine = "No thought to expand.";
+          render();
+          return;
+        }
+        state.fullPromptData = {
+          promptId: thought.id,
+          title: `Thought #${thought.id} (from Prompt #${p.id})`,
+          rawPrompt: thought.text,
+          actorId: thought.actorId,
+          provider: thought.provider,
+          ts: thought.ts,
+          thoughtCount: 0,
+          fileCount: thought.diffLines.length > 0 ? 1 : 0,
+        };
       }
-      state.fullPromptData = {
-        promptId: p.id,
-        title: `Prompt #${p.id}`,
-        rawPrompt: p.prompt,
-        actorId: p.actorId,
-        provider: p.provider,
-        ts: p.ts,
-        thoughtCount: p.thoughts.length,
-        fileCount: p.files.size,
-      };
+
       state.fullPromptOpen = true;
       state.fullPromptScroll = 0;
       render();

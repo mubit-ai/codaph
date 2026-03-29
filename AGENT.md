@@ -1202,3 +1202,13 @@ Do not rewrite history; append a new snapshot each run.
 - unstaged: 0
 - untracked: 0
 - files: README.md, docs/quickstart.md, package.json, src/index.ts, src/lib/core-types.ts, src/lib/ingest-pipeline.ts, src/lib/memory-mubit.ts, src/lib/query-service.ts, src/mcp-server.ts, src/settings-store.ts, test/lib-ingest-pipeline.test.ts, test/mcp-server.test.ts
+
+## Status Snapshot — 2026-03-29T16:59:10.214Z
+- source: pre-commit
+- repo: /Users/anilp/Code/codaph
+- branch: core/tree
+- head: 739513b
+- staged: 1
+- unstaged: 0
+- untracked: 0
+- files: src/index.ts
