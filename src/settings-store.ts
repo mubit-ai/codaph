@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { execFileSync } from "node:child_process";
@@ -155,7 +155,7 @@ export function loadCodaphSettings(): CodaphSettings {
 
 export function saveCodaphSettings(settings: CodaphSettings): void {
   const path = getSettingsPath();
-  mkdirSync(dirname(path), { recursive: true });
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const normalizedProjects: Record<string, ProjectSettings> = {};
   for (const [projectPath, projectSettings] of Object.entries(settings.projects ?? {})) {
     const normalized = normalizeProjectSettings(projectSettings);
@@ -170,7 +170,8 @@ export function saveCodaphSettings(settings: CodaphSettings): void {
     mubitActorId: asString(settings.mubitActorId),
     projects: normalizedProjects,
   };
-  writeFileSync(path, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+  writeFileSync(path, `${JSON.stringify(payload, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+  chmodSync(path, 0o600);
 }
 
 export function getProjectSettings(settings: CodaphSettings, projectPath: string): ProjectSettings {

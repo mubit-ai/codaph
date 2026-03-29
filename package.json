@@ -1,15 +1,20 @@
 {
   "name": "@codaph/codaph",
   "version": "0.1.17",
-  "description": "Codex-first CLI/TUI for prompts, thoughts, diffs, and collaborative MuBit memory.",
+  "description": "CLI/TUI for coding-agent activity with shared Mubit memory. Supports Claude Code, Codex, and Gemini CLI.",
   "license": "MIT OR Apache-2.0",
   "type": "module",
   "keywords": [
     "codex",
+    "claude-code",
+    "gemini-cli",
     "cli",
     "tui",
     "mubit",
-    "agent"
+    "agent",
+    "agent-memory",
+    "mcp",
+    "coding-agent"
   ],
   "repository": {
     "type": "git",

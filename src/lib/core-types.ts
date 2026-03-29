@@ -96,6 +96,7 @@ export interface TimelineFilter {
   from?: string;
   to?: string;
   itemType?: string;
+  semanticQuery?: string;
 }
 
 export interface AgentStatusSnapshot {

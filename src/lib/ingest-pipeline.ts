@@ -50,6 +50,34 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: str
   }
 }
 
+function isTransientError(error: unknown): boolean {
+  if (!(error instanceof Error)) return true;
+  const msg = error.message.toLowerCase();
+  if (msg.includes("timed out")) return true;
+  if (msg.includes("econnreset") || msg.includes("econnrefused") || msg.includes("epipe")) return true;
+  if (msg.includes("fetch failed") || msg.includes("network")) return true;
+  if (/\b(429|500|502|503|504)\b/.test(msg)) return true;
+  if (/\b(401|403|404|400|422)\b/.test(msg)) return false;
+  return true;
+}
+
+async function retryWithBackoff<T>(fn: () => Promise<T>, maxRetries = 3, baseDelayMs = 500): Promise<T> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (error) {
+      lastError = error;
+      if (attempt >= maxRetries || !isTransientError(error)) {
+        throw error;
+      }
+      const delayMs = baseDelayMs * 2 ** attempt;
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+  throw lastError;
+}
+
 function getReasoningAvailability(payload: Record<string, unknown>): ReasoningAvailability {
   const item = payload.item as { type?: string; text?: string } | undefined;
   if (!item || item.type !== "reasoning") {
@@ -124,7 +152,11 @@ export class IngestPipeline {
 
     try {
       const timeoutMs = this.options.memoryWriteTimeoutMs ?? 15000;
-      await withTimeout(this.options.memoryEngine.writeEvent(event), timeoutMs, "Mubit write");
+      await retryWithBackoff(
+        () => withTimeout(this.options.memoryEngine!.writeEvent(event), timeoutMs, "Mubit write"),
+        3,
+        500,
+      );
       this.consecutiveMemoryErrors = 0;
     } catch (error) {
       this.handleMemoryWriteError(error, event);
@@ -146,7 +178,11 @@ export class IngestPipeline {
 
     try {
       const timeoutMs = this.getMemoryWriteTimeoutMsForBatch(events.length);
-      await withTimeout(this.options.memoryEngine.writeEventsBatch(events), timeoutMs, "Mubit write");
+      await retryWithBackoff(
+        () => withTimeout(this.options.memoryEngine!.writeEventsBatch!(events), timeoutMs, "Mubit write"),
+        3,
+        500,
+      );
       this.consecutiveMemoryErrors = 0;
     } catch (error) {
       this.handleMemoryWriteError(error, representativeEvent);

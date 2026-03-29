@@ -388,7 +388,10 @@ function providerListText(providers: AgentProviderId[]): string {
 
 function help(): string {
   return [
-    "Codaph CLI/TUI (Mubit-first project memory)",
+    "Codaph — agent activity + shared Mubit memory for your team",
+    "",
+    "Quick Start:",
+    "  npm i -g @codaph/codaph && codaph enable",
     "",
     "Defaults:",
     "  codaph                              (opens TUI)",
@@ -396,6 +399,7 @@ function help(): string {
     "  codaph --version                    (show version)",
     "",
     "Onboarding:",
+    "  codaph enable [--cwd <path>]        (one-command setup: detect agents, install hooks, pull from cloud)",
     "  codaph setup [--mubit-api-key <key>] [--mubit-actor-id <id>] [--json]",
     "  codaph init [--cwd <path>] [--yes] [--force] [--no-auto-sync] [--providers <csv|auto>] [--agent-hooks <csv|all|none>] [--json]",
     "",
@@ -423,7 +427,7 @@ function help(): string {
     "  codaph doctor, codaph hooks run ..., codaph mubit query|context|snapshot|activity|export|diagnose|replay|reflect|strategies ...",
     "  codaph agents list, codaph handoff send|list|feedback ...",
     "",
-    "Tip: run `codaph init`, then `codaph pull` and `codaph tui`.",
+    "Tip: run `codaph enable` to get started, then `codaph tui` to explore.",
   ].join("\n");
 }
 
@@ -590,6 +594,12 @@ function createMubitMemory(flags: Flags, cwd: string, settings?: CodaphSettings)
     runScope: resolveMubitRunScope(flags, cwd, loaded),
     linkRuns: resolveMubitLinkedRuns(flags, cwd, loaded),
   });
+}
+
+function throwMubitDisabled(): never {
+  throw new Error(
+    "Mubit is not configured. Run `codaph setup --mubit-api-key <key>` to add your key. Get a free key at console.mubit.ai",
+  );
 }
 
 function mubitRunIdForContext(
@@ -905,6 +915,7 @@ interface SyncPushPhaseResult {
   providers?: ProviderImportSummaryMap;
   mubitRequested: boolean;
   mubitEnabled: boolean;
+  mubitDiagnostics?: { eventsSucceeded: number; eventsFailed: number; activitiesSucceeded: number; activitiesFailed: number; lastError: string | null };
 }
 
 interface SyncPullPhaseResult {
@@ -1623,6 +1634,7 @@ async function runSyncPushPhase(options: {
     providers: providerSummaries,
     mubitRequested: shouldEnableMubit(syncFlags, settings),
     mubitEnabled: Boolean(memory?.isEnabled()),
+    mubitDiagnostics: memory?.getDiagnostics(),
   };
 }
 
@@ -1641,9 +1653,9 @@ async function runSyncPullPhase(options: {
   const engine = createMubitMemory(flags, cwd, settings);
   if (!engine || !engine.isEnabled()) {
     if (requireMubit) {
-      throw new Error("Mubit is disabled. Set MUBIT_API_KEY (or MUBIT_APIKEY) and use --mubit.");
+      throwMubitDisabled();
     }
-    return { skipped: true, reason: "Mubit is disabled or not configured." };
+    return { skipped: true, reason: "Mubit not configured. Run `codaph setup --mubit-api-key <key>` to connect." };
   }
 
   const mirror = new JsonlMirror(resolveMirrorRoot(cwd), {
@@ -2495,6 +2507,13 @@ async function importCommand(rest: string[]): Promise<void> {
     return;
   }
   console.log(formatPushPhaseLine(result));
+  if (result.mubitDiagnostics) {
+    const d = result.mubitDiagnostics;
+    const totalFailed = d.eventsFailed + d.activitiesFailed;
+    if (totalFailed > 0) {
+      console.warn(`Mubit sync: ${d.eventsSucceeded} events synced, ${totalFailed} failed. Run \`codaph mubit diagnose\` for details.`);
+    }
+  }
   console.log("Push complete. Daily `codaph pull` does not replay local agent history.");
 }
 
@@ -2660,6 +2679,106 @@ async function syncSetupCommand(rest: string[]): Promise<void> {
     "enable-auto": true,
   };
   await maybeOfferSyncAutomationSetup(cwd, setupFlags, settings, "all");
+}
+
+async function enableCommand(rest: string[]): Promise<void> {
+  const { flags } = parseArgs(rest);
+  const requestedCwd = resolve(getStringFlag(flags, "cwd") ?? process.cwd());
+  const cwd = resolveGitRepoRootOrCwd(requestedCwd);
+
+  console.log(`${paint("codaph enable", TUI_COLORS.brand)} ${paint(cwd, TUI_COLORS.dim)}`);
+
+  // Step 1: Ensure Mubit API key (prompt if interactive, skip otherwise)
+  let settings = loadCodaphSettings();
+  const existingKey = resolveMubitApiKey(flags, settings);
+  if (!existingKey && isInteractiveTerminal() && !getBooleanFlag(flags, "yes", false)) {
+    console.log(`\n${paint("Mubit cloud memory lets your team share context across agents.", TUI_COLORS.dim)}`);
+    console.log(`${paint("Get a free API key at:", TUI_COLORS.dim)} ${paint("https://console.mubit.ai", TUI_COLORS.cyan)}`);
+    const entered = (await promptInput("Paste Mubit API key (or press Enter for local-only):")).trim();
+    if (entered.length > 0) {
+      settings = updateGlobalSettings(settings, { mubitApiKey: entered });
+      saveCodaphSettings(settings);
+      console.log(`${cliBadge("Saved Mubit API key", "ok")}`);
+    } else {
+      console.log(`${cliBadge("Local-only mode", "info")} Connect Mubit later with \`codaph setup --mubit-api-key <key>\``);
+    }
+  } else if (existingKey) {
+    console.log(`${cliBadge("Mubit API key", "ok")} already configured`);
+  }
+
+  // Step 2: Auto-detect actor
+  const detected = detectGitHubDefaults(cwd);
+  if (!settings.mubitActorId && detected.actorId) {
+    settings = updateGlobalSettings(settings, { mubitActorId: detected.actorId });
+    saveCodaphSettings(settings);
+  }
+
+  // Step 3: Init project (non-interactive, auto-detect providers)
+  const recognizedAgentProviders = await detectProvidersForRepo(cwd);
+  const selectedAgentProviders: AgentProviderId[] =
+    recognizedAgentProviders.length > 0 ? recognizedAgentProviders : ["codex"];
+  const inferredProjectId = detected.projectId ?? null;
+  const inferredRunScope: MubitRunScope = inferredProjectId ? "project" : "session";
+
+  settings = updateProjectSettings(settings, cwd, {
+    projectName: basename(cwd),
+    mubitProjectId: inferredProjectId,
+    mubitRunScope: inferredRunScope,
+    agentProviders: selectedAgentProviders,
+  });
+  saveCodaphSettings(settings);
+  await addProjectToRegistry(cwd);
+
+  // Step 4: Install sync automation (hooks)
+  const auto = resolveSyncAutomationConfig(settings, cwd);
+  if (!auto.enabled) {
+    const hookProviders = normalizeAgentHookProviderSelection(settings, cwd, selectedAgentProviders);
+    const enabled = await enableSyncAutomationForProject(cwd, settings, hookProviders);
+    settings = enabled.settings;
+    if (enabled.installed.warnings.length > 0) {
+      for (const warning of enabled.installed.warnings) {
+        console.log(`${cliBadge("Warning", "warn")} ${warning}`);
+      }
+    }
+  }
+
+  // Step 5: Write config files
+  await writeLocalProjectConfigSnapshot(cwd, flags, settings);
+  await writeClaudeCodeMcpTemplateSnapshot(cwd);
+
+  // Step 6: Initial pull (if Mubit configured)
+  const hasMubitKey = resolveMubitApiKey(flags, settings) !== null;
+  if (hasMubitKey) {
+    console.log(`\n${paint("Pulling from Mubit...", TUI_COLORS.dim)}`);
+    try {
+      const pull = await runSyncPullPhase({
+        cwd,
+        flags: { ...flags, mubit: true },
+        settings,
+        triggerSource: "sync-manual",
+        requireMubit: false,
+      });
+      if (!isSyncPullPhaseSkipped(pull)) {
+        console.log(`${cliBadge("Pull", "ok")} ${pull.summary.imported} events from cloud`);
+      }
+    } catch {
+      console.log(`${cliBadge("Pull skipped", "warn")} Could not reach Mubit (will retry on next sync)`);
+    }
+  }
+
+  // Summary
+  const repoId = resolveRepoIdForProject(flags, cwd, settings);
+  const autoConfig = resolveSyncAutomationConfig(settings, cwd);
+  console.log(`\n${paint("─".repeat(50), TUI_COLORS.dim)}`);
+  console.log(`${cliBadge("Codaph enabled", "ok")} ${paint(cwd, TUI_COLORS.dim)}`);
+  console.log(`  ${paint("Repo:", TUI_COLORS.dim)}    ${paint(repoId, TUI_COLORS.cyan)}`);
+  console.log(`  ${paint("Agents:", TUI_COLORS.dim)}  ${providerListText(selectedAgentProviders)}`);
+  console.log(`  ${paint("Mubit:", TUI_COLORS.dim)}   ${hasMubitKey ? cliBadge("connected", "ok") : cliBadge("local-only", "warn")}`);
+  console.log(`  ${paint("Hooks:", TUI_COLORS.dim)}   ${autoConfig.enabled ? cliBadge("installed", "ok") : cliBadge("off", "dim")}`);
+  console.log(`\n${paint("Next:", TUI_COLORS.dim)} Run ${paint("codaph tui", TUI_COLORS.cyan)} to explore your agent activity.`);
+  if (!hasMubitKey) {
+    console.log(`${paint("Tip:", TUI_COLORS.dim)}  Run ${paint("codaph setup --mubit-api-key <key>", TUI_COLORS.cyan)} to enable team memory.`);
+  }
 }
 
 async function setupCommand(rest: string[]): Promise<void> {
@@ -4056,7 +4175,7 @@ async function mubitQuery(rest: string[]): Promise<void> {
   const sessionId = getStringFlag(flags, "session");
   const engine = createMubitMemory(flags, cwd, settings);
   if (!engine || !engine.isEnabled()) {
-    throw new Error("Mubit is disabled. Set MUBIT_API_KEY (or MUBIT_APIKEY) and use --mubit.");
+    throwMubitDisabled();
   }
 
   const limitRaw = getStringFlag(flags, "limit");
@@ -4127,7 +4246,7 @@ async function mubitContextCommand(rest: string[]): Promise<void> {
   const sessionId = getStringFlag(flags, "session");
   const engine = createMubitMemory(flags, cwd, settings);
   if (!engine || !engine.isEnabled()) {
-    throw new Error("Mubit is disabled. Set MUBIT_API_KEY (or MUBIT_APIKEY) and use --mubit.");
+    throwMubitDisabled();
   }
 
   const limitRaw = getStringFlag(flags, "limit");
@@ -4174,7 +4293,7 @@ async function mubitSnapshotCommand(rest: string[]): Promise<void> {
   const runId = resolveMubitCommandRunId(flags, cwd, settings, { sessionId, preferProject: !sessionId });
   const engine = createMubitMemory(flags, cwd, settings);
   if (!engine || !engine.isEnabled()) {
-    throw new Error("Mubit is disabled. Set MUBIT_API_KEY (or MUBIT_APIKEY) and use --mubit.");
+    throwMubitDisabled();
   }
 
   const timelineLimitRaw = getStringFlag(flags, "timeline-limit") ?? getStringFlag(flags, "limit");
@@ -4206,7 +4325,7 @@ async function mubitActivityCommand(rest: string[]): Promise<void> {
   const runId = resolveMubitCommandRunId(flags, cwd, settings, { sessionId, preferProject: !sessionId });
   const engine = createMubitMemory(flags, cwd, settings);
   if (!engine || !engine.isEnabled()) {
-    throw new Error("Mubit is disabled. Set MUBIT_API_KEY (or MUBIT_APIKEY) and use --mubit.");
+    throwMubitDisabled();
   }
 
   const limitRaw = getStringFlag(flags, "limit");
@@ -4243,7 +4362,7 @@ async function mubitExportCommand(rest: string[]): Promise<void> {
   const runId = resolveMubitCommandRunId(flags, cwd, settings, { sessionId, preferProject: !sessionId });
   const engine = createMubitMemory(flags, cwd, settings);
   if (!engine || !engine.isEnabled()) {
-    throw new Error("Mubit is disabled. Set MUBIT_API_KEY (or MUBIT_APIKEY) and use --mubit.");
+    throwMubitDisabled();
   }
 
   const limitRaw = getStringFlag(flags, "limit");
@@ -4287,7 +4406,7 @@ async function mubitDiagnoseCommand(rest: string[]): Promise<void> {
   const runId = resolveMubitCommandRunId(flags, cwd, settings, { sessionId, preferProject: !sessionId });
   const engine = createMubitMemory(flags, cwd, settings);
   if (!engine || !engine.isEnabled()) {
-    throw new Error("Mubit is disabled. Set MUBIT_API_KEY (or MUBIT_APIKEY) and use --mubit.");
+    throwMubitDisabled();
   }
 
   const limitRaw = getStringFlag(flags, "limit");
@@ -4321,7 +4440,7 @@ async function mubitReflectCommand(rest: string[]): Promise<void> {
   const runId = resolveMubitCommandRunId(flags, cwd, settings, { sessionId, preferProject: !sessionId });
   const engine = createMubitMemory(flags, cwd, settings);
   if (!engine || !engine.isEnabled()) {
-    throw new Error("Mubit is disabled. Set MUBIT_API_KEY (or MUBIT_APIKEY) and use --mubit.");
+    throwMubitDisabled();
   }
 
   const lastNItemsRaw = getStringFlag(flags, "last-n-items") ?? getStringFlag(flags, "limit");
@@ -4354,7 +4473,7 @@ async function mubitStrategiesCommand(rest: string[]): Promise<void> {
   const runId = resolveMubitCommandRunId(flags, cwd, settings, { sessionId, preferProject: !sessionId });
   const engine = createMubitMemory(flags, cwd, settings);
   if (!engine || !engine.isEnabled()) {
-    throw new Error("Mubit is disabled. Set MUBIT_API_KEY (or MUBIT_APIKEY) and use --mubit.");
+    throwMubitDisabled();
   }
 
   const maxStrategiesRaw = getStringFlag(flags, "max-strategies") ?? getStringFlag(flags, "limit");
@@ -4393,7 +4512,7 @@ async function checkpointCommand(rest: string[]): Promise<void> {
   const metadata = parseJsonObjectFlag(getStringFlag(flags, "metadata-json"), "--metadata-json");
   const engine = createMubitMemory(flags, cwd, settings);
   if (!engine || !engine.isEnabled()) {
-    throw new Error("Mubit is disabled. Set MUBIT_API_KEY (or MUBIT_APIKEY) and use --mubit.");
+    throwMubitDisabled();
   }
 
   const response = await withTimeout(
@@ -4425,7 +4544,7 @@ async function agentsListCommand(rest: string[]): Promise<void> {
   const runId = resolveMubitCommandRunId(flags, cwd, settings, { preferProject: true });
   const engine = createMubitMemory(flags, cwd, settings);
   if (!engine || !engine.isEnabled()) {
-    throw new Error("Mubit is disabled. Set MUBIT_API_KEY (or MUBIT_APIKEY) and use --mubit.");
+    throwMubitDisabled();
   }
 
   const response = await withTimeout(engine.listAgents(runId), 45000, "Mubit list agents");
@@ -4460,7 +4579,7 @@ async function handoffSendCommand(rest: string[]): Promise<void> {
   const metadata = parseJsonObjectFlag(getStringFlag(flags, "metadata-json"), "--metadata-json");
   const engine = createMubitMemory(flags, cwd, settings);
   if (!engine || !engine.isEnabled()) {
-    throw new Error("Mubit is disabled. Set MUBIT_API_KEY (or MUBIT_APIKEY) and use --mubit.");
+    throwMubitDisabled();
   }
 
   const response = await withTimeout(
@@ -4495,7 +4614,7 @@ async function handoffListCommand(rest: string[]): Promise<void> {
   const runId = resolveMubitCommandRunId(flags, cwd, settings, { sessionId, preferProject: !sessionId });
   const engine = createMubitMemory(flags, cwd, settings);
   if (!engine || !engine.isEnabled()) {
-    throw new Error("Mubit is disabled. Set MUBIT_API_KEY (or MUBIT_APIKEY) and use --mubit.");
+    throwMubitDisabled();
   }
 
   const limitRaw = getStringFlag(flags, "limit");
@@ -4538,7 +4657,7 @@ async function handoffFeedbackCommand(rest: string[]): Promise<void> {
   const runId = resolveMubitCommandRunId(flags, cwd, settings, { sessionId, preferProject: !sessionId });
   const engine = createMubitMemory(flags, cwd, settings);
   if (!engine || !engine.isEnabled()) {
-    throw new Error("Mubit is disabled. Set MUBIT_API_KEY (or MUBIT_APIKEY) and use --mubit.");
+    throwMubitDisabled();
   }
 
   const response = await withTimeout(
@@ -4588,7 +4707,7 @@ async function runMubitBackfill(options: {
   const { cwd, flags, settings, sessionId, verbose, json } = options;
   const engine = createMubitMemory(flags, cwd, settings);
   if (!engine || !engine.isEnabled()) {
-    throw new Error("Mubit is disabled. Set MUBIT_API_KEY (or MUBIT_APIKEY) and use --mubit.");
+    throwMubitDisabled();
   }
 
   const repoId = resolveRepoIdForProject(flags, cwd, settings);
@@ -4747,7 +4866,7 @@ async function repairCloud(rest: string[]): Promise<void> {
 
   const memory = createMubitMemory(flags, cwd, settings);
   if (!memory || !memory.isEnabled()) {
-    throw new Error("Mubit is disabled. Set MUBIT_API_KEY (or MUBIT_APIKEY) and use --mubit.");
+    throwMubitDisabled();
   }
   const repoId = resolveRepoIdForProject(flags, cwd, settings);
   const actorId = resolveMubitActorId(flags, cwd, settings);
@@ -4911,6 +5030,17 @@ interface FullDiffOverlayData {
   lines: string[];
 }
 
+interface FullPromptOverlayData {
+  promptId: number;
+  title: string;
+  rawPrompt: string;
+  actorId: string | null;
+  provider: string | null;
+  ts: string | null;
+  thoughtCount: number;
+  fileCount: number;
+}
+
 interface PaneLine {
   text: string;
   color?: string;
@@ -4963,6 +5093,9 @@ interface TuiState {
   fullDiffOpen: boolean;
   fullDiffScroll: number;
   fullDiffData: FullDiffOverlayData | null;
+  fullPromptOpen: boolean;
+  fullPromptScroll: number;
+  fullPromptData: FullPromptOverlayData | null;
   helpOpen: boolean;
   settingsOpen: boolean;
   contributorsOpen: boolean;
@@ -5096,6 +5229,35 @@ function clipPlain(text: string, width: number): string {
     return truncateToWidth(text, width);
   }
   return `${truncateToWidth(text, width - 3)}...`;
+}
+
+function wrapTextToWidth(text: string, maxWidth: number): string[] {
+  if (maxWidth <= 0) return [text];
+  const result: string[] = [];
+  for (const rawLine of text.split("\n")) {
+    if (rawLine.length === 0) {
+      result.push("");
+      continue;
+    }
+    const words = rawLine.split(/(\s+)/);
+    let current = "";
+    let currentWidth = 0;
+    for (const word of words) {
+      const wordWidth = displayWidth(word);
+      if (currentWidth + wordWidth > maxWidth && current.length > 0) {
+        result.push(current);
+        current = word.replace(/^\s+/, "");
+        currentWidth = displayWidth(current);
+      } else {
+        current += word;
+        currentWidth += wordWidth;
+      }
+    }
+    if (current.length > 0) {
+      result.push(current);
+    }
+  }
+  return result.length > 0 ? result : [""];
 }
 
 function padPlain(text: string, width: number): string {
@@ -6954,6 +7116,68 @@ function renderDiffOverlay(
   ].join("\n");
 }
 
+function buildPromptOverlayContent(data: FullPromptOverlayData, wrapWidth: number): PaneLine[] {
+  const lines: PaneLine[] = [];
+  const w = Math.max(10, wrapWidth);
+
+  // Metadata header
+  const timePart = data.ts ? new Date(data.ts).toLocaleString() : "unknown time";
+  const actorPart = data.actorId ? `  actor: ${data.actorId}` : "";
+  const providerPart = data.provider ? `  provider: ${data.provider}` : "";
+  lines.push({ text: `${timePart}${actorPart}${providerPart}`, color: TUI_COLORS.dim });
+  lines.push({ text: `${data.thoughtCount} thought(s), ${data.fileCount} file(s) changed`, color: TUI_COLORS.dim });
+  lines.push({ text: "─".repeat(Math.min(w, 60)), color: TUI_COLORS.dim });
+  lines.push({ text: "" });
+
+  // Word-wrapped prompt body
+  const wrapped = wrapTextToWidth(data.rawPrompt, w);
+  for (const line of wrapped) {
+    lines.push({ text: line });
+  }
+
+  return lines;
+}
+
+function renderPromptOverlay(
+  state: TuiState,
+  projectLabel: string,
+  width: number,
+  height: number,
+): string {
+  const data = state.fullPromptData;
+  if (!data) {
+    return "";
+  }
+  const innerWidth = Math.max(10, width - 4);
+  const allLines = buildPromptOverlayContent(data, innerWidth);
+
+  const contentHeight = Math.max(8, height - 4);
+  const bodyHeight = Math.max(1, contentHeight - 2);
+  const maxScroll = Math.max(0, allLines.length - bodyHeight);
+  const scroll = Math.max(0, Math.min(state.fullPromptScroll, maxScroll));
+  const visible = allLines.slice(scroll, scroll + bodyHeight);
+
+  const top = headerLine(
+    `${paint("●", TUI_COLORS.accentDot)} ${paint("codaph", TUI_COLORS.brand)} ${paint("::", TUI_COLORS.muted)} ${paint(projectLabel, TUI_COLORS.panelTitleInactive)} ${paint("::", TUI_COLORS.muted)} ${paint("full prompt", TUI_COLORS.panelTitleInactive)}`,
+    paint("[esc] close", TUI_COLORS.dim),
+    width,
+  );
+  const topRule = horizontalRule(width);
+  const busyRail = renderTuiBusyRail(state.statusLine, state.busy, state.busySinceMs, width);
+  const box = boxLines(data.title, width, contentHeight, visible, true);
+  const scrollHint = allLines.length > bodyHeight
+    ? `[↑/↓] scroll (${scroll + 1}-${Math.min(scroll + bodyHeight, allLines.length)}/${allLines.length} lines)  [esc] close`
+    : "[esc] close";
+  return [
+    top,
+    topRule,
+    ...(busyRail ? [busyRail] : []),
+    ...box,
+    "",
+    paint(scrollHint, TUI_COLORS.dim),
+  ].join("\n");
+}
+
 function renderInspectView(
   state: TuiState,
   projectLabel: string,
@@ -6965,6 +7189,10 @@ function renderInspectView(
 ): string {
   if (state.fullDiffOpen) {
     return renderDiffOverlay(state, projectLabel, selectedSession, analysis, width, height);
+  }
+
+  if (state.fullPromptOpen && state.fullPromptData) {
+    return renderPromptOverlay(state, projectLabel, width, height);
   }
 
   const promptSelection = selectedPromptFromAnalysis(analysis, state.selectedPromptIndex, state.actorFilter);
@@ -7236,8 +7464,8 @@ function renderInspectView(
   const footer = state.chatOpen
     ? "[tab/←/→] focus pane   [esc] close chat   [↑/↓] navigate/scroll"
     : threePaneMode
-      ? "[enter] prompt -> thoughts   [↑/↓] select/scroll   [tab/←/→] focus pane   [d] full diff   [m] Mubit chat   [f] actor filter   [c] contributors   [o] settings   [esc] back"
-      : "[↑/↓] prompts/scroll pane   [tab/←/→] focus pane   [d] full diff   [m] Mubit chat   [f] actor filter   [c] contributors   [o] settings   [esc] back";
+      ? "[enter] prompt -> thoughts   [e] expand prompt   [↑/↓] select/scroll   [tab/←/→] focus pane   [d] full diff   [m] Mubit chat   [f] actor filter   [c] contributors   [o] settings   [esc] back"
+      : "[↑/↓] prompts/scroll pane   [e] expand prompt   [tab/←/→] focus pane   [d] full diff   [m] Mubit chat   [f] actor filter   [c] contributors   [o] settings   [esc] back";
 
   composed.push("");
   composed.push(paint(clipPlain(footer, width), TUI_COLORS.dim));
@@ -7263,6 +7491,7 @@ function renderHelpOverlay(width: number, height: number): string {
     { text: "" },
     { text: "Inspect", color: TUI_COLORS.muted },
     { text: "enter   from prompts -> focus thoughts" },
+    { text: "e       expand full prompt (scroll with up/down, esc to close)" },
     { text: "up/down (or arrows) navigate prompts/thoughts or scroll pane" },
     { text: "tab     cycle pane focus" },
     { text: "d       toggle full diff overlay" },
@@ -7673,6 +7902,9 @@ async function tui(rest: string[]): Promise<void> {
     fullDiffOpen: false,
     fullDiffScroll: 0,
     fullDiffData: null,
+    fullPromptOpen: false,
+    fullPromptScroll: 0,
+    fullPromptData: null,
     helpOpen: false,
     settingsOpen: false,
     contributorsOpen: false,
@@ -8310,10 +8542,10 @@ async function tui(rest: string[]): Promise<void> {
     if (!memory || !memory.isEnabled()) {
       chat.push({
         role: "mubit",
-        text: "Mubit is disabled. Set MUBIT_API_KEY and restart with --mubit.",
+        text: "Mubit is not configured. Run `codaph setup --mubit-api-key <key>` to connect. Get a free key at console.mubit.ai",
         ts: new Date().toISOString(),
       });
-      state.statusLine = "Mubit is disabled.";
+      state.statusLine = "Mubit not configured — local mode.";
       return;
     }
 
@@ -8419,7 +8651,10 @@ async function tui(rest: string[]): Promise<void> {
 
   await refreshRows("Indexing sessions");
   await refreshSyncIndicators();
-  state.statusLine = `Project: ${state.projectPath}`;
+  const memoryEnabled = memory?.isEnabled() ?? false;
+  state.statusLine = memoryEnabled
+    ? `Project: ${state.projectPath}`
+    : `Local mode | ${state.projectPath} | Connect Mubit for team memory: codaph setup --mubit-api-key <key>`;
 
   const onResize = (): void => {
     render();
@@ -9134,6 +9369,32 @@ async function tui(rest: string[]): Promise<void> {
       return;
     }
 
+    if (state.fullPromptOpen && state.fullPromptData) {
+      const size = getSize();
+      const innerWidth = Math.max(10, size.width - 4);
+      const allLines = buildPromptOverlayContent(state.fullPromptData, innerWidth);
+      const bodyHeight = Math.max(1, size.height - 6);
+      const maxScroll = Math.max(0, allLines.length - bodyHeight);
+
+      if (key.name === "up") {
+        state.fullPromptScroll = Math.max(0, state.fullPromptScroll - 1);
+        render();
+        return;
+      }
+      if (key.name === "down") {
+        state.fullPromptScroll = Math.min(maxScroll, state.fullPromptScroll + 1);
+        render();
+        return;
+      }
+      if (key.name === "escape" || str === "e" || key.name === "left") {
+        state.fullPromptOpen = false;
+        state.fullPromptData = null;
+        state.fullPromptScroll = 0;
+        render();
+      }
+      return;
+    }
+
     if (key.name === "left") {
       const includeFilesPane = getSize().width < 126;
       const panes = inspectPaneCycle(state.chatOpen, includeFilesPane);
@@ -9163,6 +9424,8 @@ async function tui(rest: string[]): Promise<void> {
         state.contributorsOpen = false;
         state.fullDiffOpen = false;
         state.fullDiffData = null;
+        state.fullPromptOpen = false;
+        state.fullPromptData = null;
       }
       render();
       return;
@@ -9182,6 +9445,30 @@ async function tui(rest: string[]): Promise<void> {
       state.chatOpen = !state.chatOpen;
       state.inspectPane = state.chatOpen ? "chat" : "thoughts";
       state.chatScroll = 0;
+      render();
+      return;
+    }
+
+    if (str === "e" && state.inspectPane === "prompts") {
+      const promptSelection = selectedPromptFromAnalysis(analysis, state.selectedPromptIndex, state.actorFilter);
+      const p = promptSelection.prompt;
+      if (!p || p.prompt === "(No prompt captured)") {
+        state.statusLine = "No prompt to expand.";
+        render();
+        return;
+      }
+      state.fullPromptData = {
+        promptId: p.id,
+        title: `Prompt #${p.id}`,
+        rawPrompt: p.prompt,
+        actorId: p.actorId,
+        provider: p.provider,
+        ts: p.ts,
+        thoughtCount: p.thoughts.length,
+        fileCount: p.files.size,
+      };
+      state.fullPromptOpen = true;
+      state.fullPromptScroll = 0;
       render();
       return;
     }
@@ -9301,6 +9588,11 @@ async function main(): Promise<void> {
 
   if (cmd === "exec") {
     await runCapture("exec", [sub, ...rest].filter(Boolean) as string[]);
+    return;
+  }
+
+  if (cmd === "enable") {
+    await enableCommand([sub, ...rest].filter(Boolean) as string[]);
     return;
   }
 

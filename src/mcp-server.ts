@@ -255,6 +255,10 @@ function buildTimelineFilter(args: Record<string, unknown>, repoId: string): Tim
   if (itemType) {
     filter.itemType = itemType;
   }
+  const semanticQuery = asOptionalString(args.query) ?? asOptionalString(args.semantic_query);
+  if (semanticQuery) {
+    filter.semanticQuery = semanticQuery;
+  }
   return filter;
 }
 
@@ -429,7 +433,7 @@ function toolSchemas(): McpTool[] {
     },
     {
       name: "codaph_timeline_get",
-      description: "Read timeline events from the local Codaph mirror (supports repo/session/thread/actor/time filters).",
+      description: "Read timeline events from the local Codaph mirror. Supports repo/session/thread/actor/time filters, and optional semantic search via Mubit.",
       inputSchema: {
         type: "object",
         additionalProperties: false,
@@ -448,6 +452,8 @@ function toolSchemas(): McpTool[] {
           to: { type: "string", description: "ISO timestamp upper bound" },
           itemType: { type: "string" },
           item_type: { type: "string" },
+          query: { type: "string", description: "Semantic search query — uses Mubit to rank events by relevance (e.g. 'what changed in auth?')" },
+          semantic_query: { type: "string" },
           offset: { type: "integer", minimum: 0 },
           limit: { type: "integer", minimum: 1, maximum: MAX_TIMELINE_LIMIT },
           includePayload: { type: "boolean", description: "If false, strips event.payload to reduce response size." },
@@ -455,7 +461,8 @@ function toolSchemas(): McpTool[] {
       },
       handler: async (args, ctx) => {
         const project = await resolveProjectContext(args, ctx);
-        const query = new QueryService(resolve(project.cwd, ".codaph"));
+        const engine = createMubitMemoryForProject(project.cwd, project.settings);
+        const query = new QueryService(resolve(project.cwd, ".codaph"), engine);
         const filter = buildTimelineFilter(args, project.repoId);
         const offset = clamp(asOptionalInteger(args.offset, "offset"), 0, 0, Number.MAX_SAFE_INTEGER);
         const limit = clamp(asOptionalInteger(args.limit, "limit"), DEFAULT_TIMELINE_LIMIT, 1, MAX_TIMELINE_LIMIT);
@@ -541,7 +548,7 @@ function toolSchemas(): McpTool[] {
         const project = await resolveProjectContext(args, ctx);
         const engine = createMubitMemoryForProject(project.cwd, project.settings);
         if (!engine?.isEnabled()) {
-          throw new Error("Mubit is not configured for this environment.");
+          return { error: "mubit_not_configured", message: "Mubit is not configured. Run `codaph setup --mubit-api-key <key>` to connect. Get a free key at console.mubit.ai", setup_instructions: "codaph setup --mubit-api-key <YOUR_KEY>" };
         }
         const sessionId = asOptionalString(args.sessionId) ?? asOptionalString(args.session_id);
         const runId = resolveMubitRunIdForProjectContext(project, sessionId);
@@ -588,7 +595,7 @@ function toolSchemas(): McpTool[] {
         const project = await resolveProjectContext(args, ctx);
         const engine = createMubitMemoryForProject(project.cwd, project.settings);
         if (!engine?.isEnabled()) {
-          throw new Error("Mubit is not configured for this environment.");
+          return { error: "mubit_not_configured", message: "Mubit is not configured. Run `codaph setup --mubit-api-key <key>` to connect. Get a free key at console.mubit.ai", setup_instructions: "codaph setup --mubit-api-key <YOUR_KEY>" };
         }
         const sessionId = asOptionalString(args.sessionId) ?? asOptionalString(args.session_id);
         const runId = resolveMubitRunIdForProjectContext(project, sessionId);
@@ -634,7 +641,7 @@ function toolSchemas(): McpTool[] {
         const project = await resolveProjectContext(args, ctx);
         const engine = createMubitMemoryForProject(project.cwd, project.settings);
         if (!engine?.isEnabled()) {
-          throw new Error("Mubit is not configured for this environment.");
+          return { error: "mubit_not_configured", message: "Mubit is not configured. Run `codaph setup --mubit-api-key <key>` to connect. Get a free key at console.mubit.ai", setup_instructions: "codaph setup --mubit-api-key <YOUR_KEY>" };
         }
         const sessionId = asOptionalString(args.sessionId) ?? asOptionalString(args.session_id);
         const runId = resolveMubitRunIdForProjectContext(project, sessionId);
@@ -683,7 +690,7 @@ function toolSchemas(): McpTool[] {
         const project = await resolveProjectContext(args, ctx);
         const engine = createMubitMemoryForProject(project.cwd, project.settings);
         if (!engine?.isEnabled()) {
-          throw new Error("Mubit is not configured for this environment.");
+          return { error: "mubit_not_configured", message: "Mubit is not configured. Run `codaph setup --mubit-api-key <key>` to connect. Get a free key at console.mubit.ai", setup_instructions: "codaph setup --mubit-api-key <YOUR_KEY>" };
         }
         const sessionId = asOptionalString(args.sessionId) ?? asOptionalString(args.session_id);
         const runId = resolveMubitRunIdForProjectContext(project, sessionId);
@@ -735,7 +742,7 @@ function toolSchemas(): McpTool[] {
         const project = await resolveProjectContext(args, ctx);
         const engine = createMubitMemoryForProject(project.cwd, project.settings);
         if (!engine?.isEnabled()) {
-          throw new Error("Mubit is not configured for this environment.");
+          return { error: "mubit_not_configured", message: "Mubit is not configured. Run `codaph setup --mubit-api-key <key>` to connect. Get a free key at console.mubit.ai", setup_instructions: "codaph setup --mubit-api-key <YOUR_KEY>" };
         }
         const sessionId = asOptionalString(args.sessionId) ?? asOptionalString(args.session_id);
         const runId = resolveMubitRunIdForProjectContext(project, sessionId);
@@ -780,7 +787,7 @@ function toolSchemas(): McpTool[] {
         const project = await resolveProjectContext(args, ctx);
         const engine = createMubitMemoryForProject(project.cwd, project.settings);
         if (!engine?.isEnabled()) {
-          throw new Error("Mubit is not configured for this environment.");
+          return { error: "mubit_not_configured", message: "Mubit is not configured. Run `codaph setup --mubit-api-key <key>` to connect. Get a free key at console.mubit.ai", setup_instructions: "codaph setup --mubit-api-key <YOUR_KEY>" };
         }
         const sessionId = asOptionalString(args.sessionId) ?? asOptionalString(args.session_id);
         const runId = resolveMubitRunIdForProjectContext(project, sessionId);
@@ -821,7 +828,7 @@ function toolSchemas(): McpTool[] {
         const project = await resolveProjectContext(args, ctx);
         const engine = createMubitMemoryForProject(project.cwd, project.settings);
         if (!engine?.isEnabled()) {
-          throw new Error("Mubit is not configured for this environment.");
+          return { error: "mubit_not_configured", message: "Mubit is not configured. Run `codaph setup --mubit-api-key <key>` to connect. Get a free key at console.mubit.ai", setup_instructions: "codaph setup --mubit-api-key <YOUR_KEY>" };
         }
         const sessionId = asOptionalString(args.sessionId) ?? asOptionalString(args.session_id);
         const runId = resolveMubitRunIdForProjectContext(project, sessionId);

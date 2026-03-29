@@ -4,16 +4,28 @@ layout: docs
 
 # Quickstart
 
-Codaph lets you inspect coding-agent activity in a terminal UI and share project memory through Mubit.
-This quickstart gets a new project working in a few minutes, including Mubit setup and optional OpenAI-assisted query/chat.
+Codaph captures agent prompts, reasoning, and file diffs from your coding agents into shared Mubit memory.
 
-## What You Need
+## Fast Path (2 commands)
+
+```bash
+npm i -g @codaph/codaph
+codaph enable
+```
+
+`codaph enable` auto-detects your agents, installs hooks, and prompts for a Mubit key (optional -- works local-only too). Then run `codaph tui` to explore.
+
+## Detailed Setup
+
+The rest of this guide covers manual setup for those who want more control.
+
+### What You Need
 
 Required:
 
 - A repository you want to inspect
 - A coding agent CLI you use (Codex, Claude Code, or Gemini CLI)
-- A Mubit API key (you can create one in [console.mubit.ai](https://console.mubit.ai))
+- A Mubit API key for team memory (get one at [console.mubit.ai](https://console.mubit.ai), or skip for local-only)
 
 Only needed for source/development install:
 

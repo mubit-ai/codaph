@@ -7,6 +7,7 @@ import {
   type SparseActorIndex,
   type SparseSessionIndex,
 } from "./mirror-jsonl";
+import type { MubitMemoryEngine } from "./memory-mubit";
 
 export interface SessionSummary {
   sessionId: string;
@@ -22,6 +23,34 @@ export interface ContributorSummary {
   to: string;
   eventCount: number;
   sessionCount: number;
+}
+
+function extractSemanticEventIds(result: Record<string, unknown>): Set<string> {
+  const ids = new Set<string>();
+  const entries = result.entries ?? result.results ?? result.items ?? [];
+  if (!Array.isArray(entries)) return ids;
+  for (const entry of entries) {
+    const record = typeof entry === "object" && entry !== null ? (entry as Record<string, unknown>) : null;
+    if (!record) continue;
+    const outputRef = record.output_ref ?? record.eventId ?? record.event_id;
+    if (typeof outputRef === "string" && outputRef.length > 0) {
+      ids.add(outputRef);
+    }
+    // Also check nested payload for eventId
+    const payload = record.payload;
+    if (typeof payload === "string") {
+      try {
+        const parsed = JSON.parse(payload) as Record<string, unknown>;
+        const nestedId = parsed.eventId ?? parsed.event_id;
+        if (typeof nestedId === "string" && nestedId.length > 0) ids.add(nestedId);
+      } catch { /* ignore parse errors */ }
+    } else if (typeof payload === "object" && payload !== null) {
+      const p = payload as Record<string, unknown>;
+      const nestedId = p.eventId ?? p.event_id;
+      if (typeof nestedId === "string" && nestedId.length > 0) ids.add(nestedId);
+    }
+  }
+  return ids;
 }
 
 function filterEvents(events: CapturedEventEnvelope[], filter: TimelineFilter): CapturedEventEnvelope[] {
@@ -54,7 +83,10 @@ function filterEvents(events: CapturedEventEnvelope[], filter: TimelineFilter): 
 }
 
 export class QueryService {
-  constructor(private readonly rootDir: string = ".codaph") {}
+  constructor(
+    private readonly rootDir: string = ".codaph",
+    private readonly mubitEngine?: MubitMemoryEngine | null,
+  ) {}
 
   async listSessions(repoId: string): Promise<SessionSummary[]> {
     const sparse = await readSparseIndex(this.rootDir, repoId);
@@ -110,9 +142,62 @@ export class QueryService {
       segments = Object.values(manifest.segments).map((seg) => seg.relativePath);
     }
 
-    const events = await readEventsFromSegments(this.rootDir, segments);
-    // TODO(MUBIT): merge semantic context from Mubit query results here.
-    return filterEvents(events, filter);
+    const localEvents = await readEventsFromSegments(this.rootDir, segments);
+    const filtered = filterEvents(localEvents, filter);
+
+    if (!filter.semanticQuery || !this.mubitEngine?.isEnabled()) {
+      return filtered;
+    }
+
+    return this.mergeSemanticResults(filtered, filter);
+  }
+
+  private async mergeSemanticResults(
+    localEvents: CapturedEventEnvelope[],
+    filter: TimelineFilter,
+  ): Promise<CapturedEventEnvelope[]> {
+    if (!this.mubitEngine || !filter.semanticQuery) {
+      return localEvents;
+    }
+
+    try {
+      const runId = this.mubitEngine.runIdForSession(filter.repoId, filter.sessionId ?? "");
+      const result = await this.mubitEngine.querySemanticContext({
+        runId,
+        query: filter.semanticQuery,
+        limit: 20,
+        includeLinkedRuns: true,
+        rankBy: "relevance",
+      });
+
+      if (result.disabled === true || result.unsupported === true) {
+        return localEvents;
+      }
+
+      const semanticEventIds = extractSemanticEventIds(result);
+      if (semanticEventIds.size === 0) {
+        return localEvents;
+      }
+
+      // Enrich local events with relevance scores
+      const enriched = localEvents.map((event) => {
+        if (semanticEventIds.has(event.eventId)) {
+          return { ...event, _semanticMatch: true } as CapturedEventEnvelope;
+        }
+        return event;
+      });
+
+      // Sort: semantic matches first, then chronological
+      return enriched.sort((a, b) => {
+        const aMatch = (a as CapturedEventEnvelope & { _semanticMatch?: boolean })._semanticMatch ? 1 : 0;
+        const bMatch = (b as CapturedEventEnvelope & { _semanticMatch?: boolean })._semanticMatch ? 1 : 0;
+        if (aMatch !== bMatch) return bMatch - aMatch;
+        return a.ts.localeCompare(b.ts);
+      });
+    } catch {
+      // Fail open: return local events if semantic query fails
+      return localEvents;
+    }
   }
 
   async *getTimelineStream(filter: TimelineFilter): AsyncGenerator<CapturedEventEnvelope> {

@@ -926,6 +926,14 @@ export function mubitDiffRunIdForProject(
   return `${runIdPrefix}:${repoId}`;
 }
 
+export interface SyncDiagnostics {
+  eventsSucceeded: number;
+  eventsFailed: number;
+  activitiesSucceeded: number;
+  activitiesFailed: number;
+  lastError: string | null;
+}
+
 export class MubitMemoryEngine implements MemoryEngine {
   private readonly client: MubitClientLike;
 
@@ -939,6 +947,13 @@ export class MubitMemoryEngine implements MemoryEngine {
   private readonly linkRuns: boolean;
   private readonly resolvedTransport: ResolvedTransportLike | null;
   private readonly linkedRunPairs = new Set<string>();
+  private _diagnostics: SyncDiagnostics = {
+    eventsSucceeded: 0,
+    eventsFailed: 0,
+    activitiesSucceeded: 0,
+    activitiesFailed: 0,
+    lastError: null,
+  };
 
   constructor(options: MubitMemoryOptions = {}) {
     this.enabled = options.enabled ?? true;
@@ -974,6 +989,38 @@ export class MubitMemoryEngine implements MemoryEngine {
 
   isEnabled(): boolean {
     return this.enabled && this.configured;
+  }
+
+  getDiagnostics(): SyncDiagnostics {
+    return { ...this._diagnostics };
+  }
+
+  resetDiagnostics(): void {
+    this._diagnostics = {
+      eventsSucceeded: 0,
+      eventsFailed: 0,
+      activitiesSucceeded: 0,
+      activitiesFailed: 0,
+      lastError: null,
+    };
+  }
+
+  private recordEventSuccess(count = 1): void {
+    this._diagnostics.eventsSucceeded += count;
+  }
+
+  private recordEventFailure(error: unknown): void {
+    this._diagnostics.eventsFailed += 1;
+    this._diagnostics.lastError = error instanceof Error ? error.message : String(error);
+  }
+
+  private recordActivitySuccess(): void {
+    this._diagnostics.activitiesSucceeded += 1;
+  }
+
+  private recordActivityFailure(error: unknown): void {
+    this._diagnostics.activitiesFailed += 1;
+    this._diagnostics.lastError = error instanceof Error ? error.message : String(error);
   }
 
   runIdForSession(repoId: string, sessionId: string): string {
@@ -1334,6 +1381,7 @@ export class MubitMemoryEngine implements MemoryEngine {
 
     try {
       await this.client.control.appendActivity(appendPayload);
+      this.recordActivitySuccess();
     } catch (firstError) {
       try {
         await this.client.control.appendActivity({
@@ -1348,7 +1396,9 @@ export class MubitMemoryEngine implements MemoryEngine {
             output_ref: event.eventId,
           },
         });
-      } catch {
+        this.recordActivitySuccess();
+      } catch (retryError) {
+        this.recordActivityFailure(firstError);
         if (process.env.CODAPH_DEBUG === "1") {
           const message = firstError instanceof Error ? firstError.message : "unknown appendActivity error";
           console.warn(`[codaph] appendActivity failed for ${event.eventId}: ${message}`);
@@ -1375,7 +1425,9 @@ export class MubitMemoryEngine implements MemoryEngine {
           output_ref: event.eventId,
         },
       });
+      this.recordActivitySuccess();
     } catch (promptError) {
+      this.recordActivityFailure(promptError);
       if (process.env.CODAPH_DEBUG === "1") {
         const message = promptError instanceof Error ? promptError.message : "unknown prompt appendActivity error";
         console.warn(`[codaph] prompt appendActivity failed for ${event.eventId}: ${message}`);
@@ -1438,7 +1490,14 @@ export class MubitMemoryEngine implements MemoryEngine {
     }
 
     const runId = this.runIdForEvent(event);
-    const result = await this.ingestEvents(runId, [event]);
+    let result: unknown;
+    try {
+      result = await this.ingestEvents(runId, [event]);
+      this.recordEventSuccess();
+    } catch (error) {
+      this.recordEventFailure(error);
+      throw error;
+    }
     const record = asRecord(result);
     await this.appendActivitiesForEvent(event, runId);
     await this.maybeLinkRunForSession(event.repoId, runId).catch(() => {});
@@ -1467,7 +1526,13 @@ export class MubitMemoryEngine implements MemoryEngine {
     }
 
     for (const [runId, group] of byRun.entries()) {
-      await this.ingestEvents(runId, group);
+      try {
+        await this.ingestEvents(runId, group);
+        this.recordEventSuccess(group.length);
+      } catch (error) {
+        this.recordEventFailure(error);
+        throw error;
+      }
       const repoId = group[0]?.repoId;
       if (repoId) {
         await this.maybeLinkRunForSession(repoId, runId).catch(() => {});

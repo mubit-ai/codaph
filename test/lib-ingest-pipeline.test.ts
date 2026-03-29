@@ -89,7 +89,7 @@ describe("ingest pipeline", () => {
     const appendEvent = vi.fn(async () => ({ segment: "x", offset: 1, checksum: "abc", deduplicated: false }));
     const appendRawLine = vi.fn(async () => {});
     const writeEvent = vi.fn(async () => {
-      throw new Error("mubit write failed");
+      throw new Error("mubit write failed (401 unauthorized)");
     });
 
     const pipeline = new IngestPipeline(
