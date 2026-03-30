@@ -1,6 +1,6 @@
 {
   "name": "@codaph/codaph",
-  "version": "0.1.17",
+  "version": "0.1.18",
   "description": "CLI/TUI for coding-agent activity with shared Mubit memory. Supports Claude Code, Codex, and Gemini CLI.",
   "license": "MIT OR Apache-2.0",
   "type": "module",
