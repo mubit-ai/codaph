@@ -2,7 +2,7 @@
 
 Replay how your codebase was built. Codaph captures agent prompts, reasoning, and file diffs from Claude Code, Codex, and Gemini CLI into a shared [Mubit](https://mubit.ai) memory that your whole team can search semantically.
 
-Unlike git-local session logs, Codaph gives your team shared semantic memory across agents and contributors.
+Unlike git-local session logs, Codaph gives your team shared semantic memory across agents and contributors. 
 
 > [!WARNING]
 > Codaph is in beta. Be mindful.
