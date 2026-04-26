@@ -4,7 +4,9 @@ import {
   readEventsFromSegments,
   readManifest,
   readSparseIndex,
+  type RepoManifest,
   type SparseActorIndex,
+  type SparseIndex,
   type SparseSessionIndex,
 } from "./mirror-jsonl";
 import type { MubitMemoryEngine } from "./memory-mubit";
@@ -82,14 +84,55 @@ function filterEvents(events: CapturedEventEnvelope[], filter: TimelineFilter): 
     .sort((a, b) => a.ts.localeCompare(b.ts));
 }
 
+interface RepoIndexCacheEntry {
+  sparse?: Promise<SparseIndex>;
+  manifest?: Promise<RepoManifest>;
+}
+
 export class QueryService {
+  private readonly indexCache = new Map<string, RepoIndexCacheEntry>();
+
   constructor(
     private readonly rootDir: string = ".codaph",
     private readonly mubitEngine?: MubitMemoryEngine | null,
   ) {}
 
+  /** Drop cached sparse-index/manifest so the next read sees fresh data. */
+  invalidate(repoId?: string): void {
+    if (repoId === undefined) {
+      this.indexCache.clear();
+    } else {
+      this.indexCache.delete(repoId);
+    }
+  }
+
+  private getCacheEntry(repoId: string): RepoIndexCacheEntry {
+    let entry = this.indexCache.get(repoId);
+    if (!entry) {
+      entry = {};
+      this.indexCache.set(repoId, entry);
+    }
+    return entry;
+  }
+
+  private getSparseIndex(repoId: string): Promise<SparseIndex> {
+    const entry = this.getCacheEntry(repoId);
+    if (!entry.sparse) {
+      entry.sparse = readSparseIndex(this.rootDir, repoId);
+    }
+    return entry.sparse;
+  }
+
+  private getManifest(repoId: string): Promise<RepoManifest> {
+    const entry = this.getCacheEntry(repoId);
+    if (!entry.manifest) {
+      entry.manifest = readManifest(this.rootDir, repoId);
+    }
+    return entry.manifest;
+  }
+
   async listSessions(repoId: string): Promise<SessionSummary[]> {
-    const sparse = await readSparseIndex(this.rootDir, repoId);
+    const sparse = await this.getSparseIndex(repoId);
     const out: SessionSummary[] = Object.entries(sparse.sessions).map(([sessionId, data]: [string, SparseSessionIndex]) => ({
       sessionId,
       from: data.from,
@@ -103,7 +146,7 @@ export class QueryService {
   }
 
   async listContributors(repoId: string, sessionId?: string): Promise<ContributorSummary[]> {
-    const sparse = await readSparseIndex(this.rootDir, repoId);
+    const sparse = await this.getSparseIndex(repoId);
     const out: ContributorSummary[] = [];
     const actors = sparse.actors ?? {};
 
@@ -130,8 +173,10 @@ export class QueryService {
   }
 
   async getTimeline(filter: TimelineFilter): Promise<CapturedEventEnvelope[]> {
-    const sparse = await readSparseIndex(this.rootDir, filter.repoId);
-    const manifest = await readManifest(this.rootDir, filter.repoId);
+    const [sparse, manifest] = await Promise.all([
+      this.getSparseIndex(filter.repoId),
+      this.getManifest(filter.repoId),
+    ]);
 
     let segments: string[] = [];
     if (filter.sessionId && sparse.sessions[filter.sessionId]) {

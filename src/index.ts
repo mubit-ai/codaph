@@ -8277,40 +8277,57 @@ async function tui(rest: string[]): Promise<void> {
     repoId = resolveRepoIdForProject(flags, state.projectPath, settings);
 
     const sessions = await query.listSessions(repoId) as QuerySessionSummary[];
-    const rows: SessionBrowseRow[] = [];
+    const rows: SessionBrowseRow[] = new Array(sessions.length);
     const previousRow = selectedRow();
     let lastRefreshAt = 0;
 
-    for (let i = 0; i < sessions.length; i += 1) {
-      const session = sessions[i] as QuerySessionSummary;
-      state.statusLine = `${progressLabel} (${i + 1}/${sessions.length})`;
-      const now = Date.now();
-      if (i === 0 || now - lastRefreshAt > 180) {
-        lastRefreshAt = now;
-        render();
-      }
-
-      const analysis = await ensureAnalysis(session);
-      const promptCount =
-        analysis.canonicalPromptCount ??
-        analysis.prompts.filter((entry) => entry.prompt !== "(No prompt captured)").length;
-      const fileCount = analysis.canonicalFileCount ?? analysis.files.length;
-      rows.push({
-        sessionId: session.sessionId,
-        kind: "session",
-        dayKey: localDayKey(session.to),
-        providers: analysis.providers,
-        from: session.from,
-        to: session.to,
-        eventCount: session.eventCount,
-        threadCount: session.threadCount,
-        promptCount,
-        fileCount,
-        tokenEstimate: analysis.tokenEstimate,
-        status: fileCount > 0 ? "synced" : "no_files",
-        summary: browseSummaryFromAnalysis(analysis),
-      });
+    state.statusLine = `${progressLabel} (0/${sessions.length})`;
+    if (sessions.length > 0) {
+      lastRefreshAt = Date.now();
+      render();
     }
+
+    const concurrency = Math.min(8, Math.max(1, sessions.length));
+    let nextIndex = 0;
+    let completed = 0;
+    const workers = Array.from({ length: concurrency }, async () => {
+      while (true) {
+        const i = nextIndex;
+        nextIndex += 1;
+        if (i >= sessions.length) {
+          return;
+        }
+        const session = sessions[i] as QuerySessionSummary;
+        const analysis = await ensureAnalysis(session);
+        const promptCount =
+          analysis.canonicalPromptCount ??
+          analysis.prompts.filter((entry) => entry.prompt !== "(No prompt captured)").length;
+        const fileCount = analysis.canonicalFileCount ?? analysis.files.length;
+        rows[i] = {
+          sessionId: session.sessionId,
+          kind: "session",
+          dayKey: localDayKey(session.to),
+          providers: analysis.providers,
+          from: session.from,
+          to: session.to,
+          eventCount: session.eventCount,
+          threadCount: session.threadCount,
+          promptCount,
+          fileCount,
+          tokenEstimate: analysis.tokenEstimate,
+          status: fileCount > 0 ? "synced" : "no_files",
+          summary: browseSummaryFromAnalysis(analysis),
+        };
+        completed += 1;
+        state.statusLine = `${progressLabel} (${completed}/${sessions.length})`;
+        const now = Date.now();
+        if (now - lastRefreshAt > 180) {
+          lastRefreshAt = now;
+          render();
+        }
+      }
+    });
+    await Promise.all(workers);
 
     state.canonicalRows = rows;
     setDisplayedRowsFromCanonical(previousRow);
@@ -8431,7 +8448,6 @@ async function tui(rest: string[]): Promise<void> {
       },
     });
     state.lastLocalSyncAt = new Date().toISOString();
-    analysisCache.clear();
     await refreshRows("Refreshing sessions");
     await refreshSyncIndicators();
     const pushLine = formatPushPhaseLine(summary.push);
@@ -8457,7 +8473,6 @@ async function tui(rest: string[]): Promise<void> {
         }
       },
     });
-    analysisCache.clear();
     await refreshRows("Refreshing sessions");
     await refreshSyncIndicators();
     state.statusLine = formatPullPhaseLine(workflow.pull as SyncPullPhaseOutcome);
