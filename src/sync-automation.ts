@@ -480,50 +480,88 @@ function commandHookExistsInClaudeStopEntry(value: unknown, command: string): bo
   return false;
 }
 
-export async function installClaudeCodeAgentCompleteHookBestEffort(
+// One Claude Code hook entry to install: which event, the matcher, and the
+// command to run. `event` is the Claude settings.json key (e.g. "Stop",
+// "SessionStart", "UserPromptSubmit", "PreToolUse", "SessionEnd").
+export interface ClaudeHookSpec {
+  event: string;
+  matcher: string;
+  command: string;
+}
+
+export interface InstallClaudeHooksResult {
+  ok: boolean;
+  installedPath?: string;
+  warning?: string;
+  installedEvents: string[];
+  manualSnippets: string[];
+}
+
+// Idempotently insert one or more hook entries into .claude/settings.json,
+// preserving any existing hooks (including the user's own). An entry is skipped
+// if its exact command already exists under that event.
+export async function installClaudeCodeHooksBestEffort(
   repoRoot: string,
-  commandLine: string | string[] = "codaph hooks run agent-complete --provider claude-code --quiet",
-): Promise<{ ok: boolean; installedPath?: string; warning?: string; manualSnippet: string }> {
+  specs: ClaudeHookSpec[],
+): Promise<InstallClaudeHooksResult> {
   const settingsPath = join(repoRoot, ".claude", "settings.json");
-  const manualSnippet = firstCommandSnippet(commandLine) || "codaph hooks run agent-complete --provider claude-code --quiet";
+  const manualSnippets = specs.map((spec) => spec.command);
   const existing = await readJsonObjectOrDefault(settingsPath);
   if (!existing.ok) {
     return {
       ok: false,
       warning: `Claude Code settings update failed: ${existing.reason}`,
-      manualSnippet,
+      installedEvents: [],
+      manualSnippets,
     };
   }
 
   const next = { ...existing.value };
-  const hooks = isRecord(next.hooks) ? { ...next.hooks } : {};
-  const stopRaw = hooks.Stop;
-  const stopEntries: unknown[] = Array.isArray(stopRaw) ? [...stopRaw] : isRecord(stopRaw) ? [stopRaw] : [];
-  const alreadyPresent = stopEntries.some((entry) => commandHookExistsInClaudeStopEntry(entry, manualSnippet));
-  if (!alreadyPresent) {
-    stopEntries.push({
-      matcher: "*",
-      hooks: [
-        {
-          type: "command",
-          command: manualSnippet,
-        },
-      ],
-    });
+  const hooks: Record<string, unknown> = isRecord(next.hooks) ? { ...next.hooks } : {};
+  const installedEvents: string[] = [];
+
+  for (const spec of specs) {
+    const raw = hooks[spec.event];
+    const entries: unknown[] = Array.isArray(raw) ? [...raw] : isRecord(raw) ? [raw] : [];
+    const alreadyPresent = entries.some((entry) => commandHookExistsInClaudeStopEntry(entry, spec.command));
+    if (!alreadyPresent) {
+      entries.push({
+        matcher: spec.matcher,
+        hooks: [{ type: "command", command: spec.command }],
+      });
+      installedEvents.push(spec.event);
+    }
+    hooks[spec.event] = entries;
   }
-  hooks.Stop = stopEntries;
   next.hooks = hooks;
 
   try {
     await writeJsonFile(settingsPath, next);
-    return { ok: true, installedPath: settingsPath, manualSnippet };
+    return { ok: true, installedPath: settingsPath, installedEvents, manualSnippets };
   } catch (error) {
     return {
       ok: false,
       warning: `unable to update Claude Code settings: ${error instanceof Error ? error.message : String(error)}`,
-      manualSnippet,
+      installedEvents: [],
+      manualSnippets,
     };
   }
+}
+
+export async function installClaudeCodeAgentCompleteHookBestEffort(
+  repoRoot: string,
+  commandLine: string | string[] = "codaph hooks run agent-complete --provider claude-code --quiet",
+): Promise<{ ok: boolean; installedPath?: string; warning?: string; manualSnippet: string }> {
+  const manualSnippet = firstCommandSnippet(commandLine) || "codaph hooks run agent-complete --provider claude-code --quiet";
+  const result = await installClaudeCodeHooksBestEffort(repoRoot, [
+    { event: "Stop", matcher: "*", command: manualSnippet },
+  ]);
+  return {
+    ok: result.ok,
+    installedPath: result.installedPath,
+    warning: result.warning,
+    manualSnippet,
+  };
 }
 
 function geminiHookCommandExists(value: unknown, command: string): boolean {

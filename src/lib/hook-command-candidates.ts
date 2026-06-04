@@ -2,7 +2,14 @@ import { dirname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { AgentProviderId } from "./agent-providers";
 
-export type ManagedHookName = "post-commit" | "post-push" | "agent-complete";
+export type ManagedHookName =
+  | "post-commit"
+  | "post-push"
+  | "agent-complete"
+  | "session-start"
+  | "user-prompt-submit"
+  | "pre-tool-use"
+  | "session-end";
 
 function shellQuote(text: string): string {
   return `'${text.replace(/'/g, `'\\''`)}'`;

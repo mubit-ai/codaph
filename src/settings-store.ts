@@ -21,6 +21,25 @@ export interface SyncAutomationSettings {
   lastSetupVersion?: number | null;
 }
 
+// Token-reducing memory injection into Claude Code sessions. All optional; an
+// unset field falls back to the built-in default in resolveInjectionConfig.
+// `enabled` is the master switch and defaults OFF — injection only runs when a
+// user opts in (e.g. via `codaph hooks install claude-code --injection`).
+export type PreToolUseInjectionMode = "off" | "augment" | "shortcircuit";
+
+export interface InjectionSettings {
+  enabled?: boolean | null;
+  timeoutMs?: number | null;
+  sessionStartEnabled?: boolean | null;
+  sessionStartMaxTokens?: number | null;
+  userPromptEnabled?: boolean | null;
+  userPromptMaxTokens?: number | null;
+  userPromptMinLength?: number | null;
+  preToolUseMode?: PreToolUseInjectionMode | null;
+  preToolUseMaxTokens?: number | null;
+  preToolUseMaxDenials?: number | null;
+}
+
 export interface ProjectSettings {
   projectName?: string | null;
   mubitProjectId?: string | null;
@@ -28,6 +47,7 @@ export interface ProjectSettings {
   mubitLinkedRuns?: boolean | null;
   agentProviders?: AgentProviderId[] | null;
   syncAutomation?: SyncAutomationSettings | null;
+  injection?: InjectionSettings | null;
 }
 
 export interface CodaphSettings {
@@ -105,6 +125,33 @@ function normalizeSyncAutomation(value: unknown): SyncAutomationSettings | null 
   return normalized;
 }
 
+function normalizePreToolUseMode(value: unknown): PreToolUseInjectionMode | null {
+  const raw = asString(value)?.toLowerCase();
+  if (raw === "off" || raw === "augment" || raw === "shortcircuit") {
+    return raw;
+  }
+  return null;
+}
+
+function normalizeInjectionSettings(value: unknown): InjectionSettings | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  return {
+    enabled: asBoolean(record.enabled),
+    timeoutMs: asInteger(record.timeoutMs),
+    sessionStartEnabled: asBoolean(record.sessionStartEnabled),
+    sessionStartMaxTokens: asInteger(record.sessionStartMaxTokens),
+    userPromptEnabled: asBoolean(record.userPromptEnabled),
+    userPromptMaxTokens: asInteger(record.userPromptMaxTokens),
+    userPromptMinLength: asInteger(record.userPromptMinLength),
+    preToolUseMode: normalizePreToolUseMode(record.preToolUseMode),
+    preToolUseMaxTokens: asInteger(record.preToolUseMaxTokens),
+    preToolUseMaxDenials: asInteger(record.preToolUseMaxDenials),
+  };
+}
+
 function normalizeProjectSettings(value: unknown): ProjectSettings | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return null;
@@ -117,6 +164,7 @@ function normalizeProjectSettings(value: unknown): ProjectSettings | null {
     mubitLinkedRuns: asBoolean(record.mubitLinkedRuns),
     agentProviders: normalizeAgentProviders(record.agentProviders),
     syncAutomation: normalizeSyncAutomation(record.syncAutomation),
+    injection: normalizeInjectionSettings(record.injection),
   };
 }
 

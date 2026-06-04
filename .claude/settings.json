@@ -1,0 +1,59 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "codaph hooks run agent-complete --provider 'claude-code' --quiet"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bun run --cwd '/Users/anilperi/Code/codaph' cli hooks run session-end --quiet"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bun run --cwd '/Users/anilperi/Code/codaph' cli hooks run session-start --quiet"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bun run --cwd '/Users/anilperi/Code/codaph' cli hooks run user-prompt-submit --quiet"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Read|Grep|Glob",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bun run --cwd '/Users/anilperi/Code/codaph' cli hooks run pre-tool-use --quiet"
+          }
+        ]
+      }
+    ]
+  }
+}

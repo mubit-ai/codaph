@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { clearLine, clearScreenDown, createInterface, cursorTo, emitKeypressEvents } from "node:readline";
 import { stdin as input, stdout as output } from "node:process";
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { mkdir, readdir, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -15,6 +15,41 @@ import { IngestPipeline } from "./lib/ingest-pipeline";
 import { CodexSdkAdapter } from "./lib/adapter-codex-sdk";
 import { CodexExecAdapter } from "./lib/adapter-codex-exec";
 import { QueryService } from "./lib/query-service";
+import {
+  DEFAULT_PRICE_TABLE,
+  SESSION_TOKENS_EVENT_TYPE,
+  buildSessionTokensPayload,
+  estimateTranscriptCost,
+  latestSessionTokenRecords,
+  parseSessionTokensPayload,
+  parseTranscriptUsage,
+  summarizeSessionTokens,
+  averageCostPerSession,
+  emptyUsage,
+  addUsage,
+  totalTokens,
+  totalCostByType,
+  type PriceTable,
+  type SessionInjectionTag,
+  type SessionTokensPayload,
+  type SessionTokenCohort,
+} from "./lib/token-accounting";
+import {
+  PROJECT_OVERVIEW_QUERY,
+  buildHookOutput,
+  buildPreToolHookOutput,
+  buildPromptContext,
+  buildSessionStartContext,
+  buildToolMemoryQuery,
+  decidePreToolAction,
+  distillFactsBlock,
+  estimateTokens,
+  extractContextBlockText,
+  fetchToolMemoryAnswer,
+  toolSignature,
+} from "./lib/context-injection";
+import { resolveInjectionConfig } from "./lib/injection-config";
+import { attributeContextCost, type ContextAttribution } from "./lib/token-attribution";
 import { formatMubitEmptyReasonLine } from "./lib/mubit-display";
 import { loadProjectEnv } from "./lib/project-env";
 import { resolveMubitCommandRunId as resolveMubitCommandRunIdFromScope } from "./lib/mubit-run-resolution";
@@ -70,7 +105,7 @@ import {
   parseProvidersFlag,
   type AgentProviderId,
 } from "./lib/agent-providers";
-import { buildHookCommandCandidates } from "./lib/hook-command-candidates";
+import { buildHookCommandCandidates, type ManagedHookName } from "./lib/hook-command-candidates";
 import {
   addProjectToRegistry,
   loadRegistry,
@@ -97,7 +132,9 @@ import {
   getSyncAutomationLogPath,
   getSyncLockPath,
   installAgentCompleteHookBestEffort,
+  installClaudeCodeHooksBestEffort,
   installProviderAgentCompleteHookBestEffort,
+  type ClaudeHookSpec,
   installGitPostCommitHook,
   installGitPostPushHook,
   markPendingSyncTrigger,
@@ -211,7 +248,7 @@ function shellQuote(text: string): string {
 }
 
 function hookCommandCandidates(
-  hookName: "post-commit" | "post-push" | "agent-complete",
+  hookName: ManagedHookName,
   provider?: AgentProviderId,
 ): string[] {
   return buildHookCommandCandidates({
@@ -3294,23 +3331,40 @@ async function readOptionalStdinJson(): Promise<Record<string, unknown> | null> 
     return null;
   }
 
-  // Git hooks frequently inherit an open stdin with no payload. Wait briefly
-  // for actual bytes instead of blocking the hook forever on an idle stream.
-  const firstChunk = await readFirstStdinChunkWithin();
-  if (firstChunk === null) {
-    return null;
+  const chunks: Buffer[] = [];
+  let totalBytes = 0;
+
+  // Reading stdin must never throw out of this function: hooks are fail-open,
+  // and a stream error (notably Bun's "Premature close" when the parent process
+  // tears down the hook's stdin pipe ungracefully) would otherwise propagate to
+  // main()'s catch and exit the hook with code 1, which Claude Code surfaces as
+  // a hook error on every SessionStart / UserPromptSubmit. Swallow the error and
+  // parse whatever bytes arrived — the payload is usually fully delivered before
+  // the close races in.
+  try {
+    // Git hooks frequently inherit an open stdin with no payload. Wait briefly
+    // for actual bytes instead of blocking the hook forever on an idle stream.
+    const firstChunk = await readFirstStdinChunkWithin();
+    if (firstChunk === null) {
+      return null;
+    }
+    chunks.push(stdinChunkToBuffer(firstChunk));
+    totalBytes = chunks[0].length;
+
+    for await (const chunk of input) {
+      const buffer = stdinChunkToBuffer(chunk);
+      chunks.push(buffer);
+      totalBytes += buffer.length;
+      if (totalBytes > 512 * 1024) {
+        break;
+      }
+    }
+  } catch {
+    // Fall through and parse whatever we managed to read.
   }
 
-  const chunks: Buffer[] = [stdinChunkToBuffer(firstChunk)];
-  let totalBytes = chunks[0].length;
-
-  for await (const chunk of input) {
-    const buffer = stdinChunkToBuffer(chunk);
-    chunks.push(buffer);
-    totalBytes += buffer.length;
-    if (totalBytes > 512 * 1024) {
-      break;
-    }
+  if (chunks.length === 0) {
+    return null;
   }
 
   try {
@@ -3375,6 +3429,296 @@ function sessionIdFromHookPayload(payload: Record<string, unknown> | null): stri
     }
   }
   return null;
+}
+
+function transcriptPathFromHookPayload(payload: Record<string, unknown> | null): string | null {
+  if (!payload) {
+    return null;
+  }
+  for (const key of ["transcript_path", "transcriptPath", "transcript"] as const) {
+    const value = payload[key];
+    if (typeof value === "string" && value.trim().length > 0) {
+      return value.trim();
+    }
+  }
+  return null;
+}
+
+function hookSourceFromPayload(payload: Record<string, unknown> | null): string | null {
+  if (!payload) {
+    return null;
+  }
+  for (const key of ["source", "trigger", "reason"] as const) {
+    const value = payload[key];
+    if (typeof value === "string" && value.trim().length > 0) {
+      return value.trim();
+    }
+  }
+  return null;
+}
+
+// Per-session scratch file written by the injection hooks (Phases 1-3) recording
+// whether injection ran and roughly how many tokens it added. Read here so the
+// token record can be tagged for A/B (`codaph tokens --compare`). Absent until
+// injection is enabled, in which case the session counts as injection-off.
+function injectionStateDir(cwd: string): string {
+  return join(resolveMirrorRoot(cwd), "injection");
+}
+
+function injectionSessionStatePath(cwd: string, sessionId: string): string {
+  const safe = createHash("sha1").update(sessionId).digest("hex").slice(0, 16);
+  return join(injectionStateDir(cwd), `session-${safe}.json`);
+}
+
+function readSessionInjectionTag(cwd: string, sessionId: string): SessionInjectionTag | undefined {
+  try {
+    const raw = readFileSync(injectionSessionStatePath(cwd, sessionId), "utf8");
+    const parsed = JSON.parse(raw) as unknown;
+    if (typeof parsed !== "object" || parsed === null) {
+      return undefined;
+    }
+    const record = parsed as Record<string, unknown>;
+    const injectedTokens = typeof record.injectedTokens === "number" ? record.injectedTokens : 0;
+    return {
+      active: record.active === true || injectedTokens > 0,
+      injectedTokens,
+      config: typeof record.config === "string" ? record.config : null,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+// Resolve the per-token price table, preferring a user override in settings.
+function resolveTokenPriceTable(settings?: CodaphSettings): PriceTable {
+  const override = (settings as { tokenPrices?: PriceTable } | undefined)?.tokenPrices;
+  if (override && typeof override === "object") {
+    return { ...DEFAULT_PRICE_TABLE, ...override };
+  }
+  return DEFAULT_PRICE_TABLE;
+}
+
+// SessionEnd hook: parse the Claude Code transcript for exact token usage and
+// record one `codaph.session.tokens` event per session (mirror + Mubit) so
+// `codaph tokens` can report cost and prove/disprove injection savings.
+// This hook never writes to stdout that Claude consumes — it is measurement only.
+async function runTokenAccountingHook(options: {
+  payload: Record<string, unknown> | null;
+  flags: Flags;
+  cwd: string;
+  settings: CodaphSettings;
+  quiet?: boolean;
+}): Promise<void> {
+  const { payload, flags, cwd, settings, quiet = false } = options;
+  try {
+    const transcriptPath = transcriptPathFromHookPayload(payload);
+    if (!transcriptPath) {
+      return;
+    }
+    let content: string;
+    try {
+      content = readFileSync(transcriptPath, "utf8");
+    } catch {
+      return;
+    }
+    const usage = parseTranscriptUsage(content);
+    const sessionId = usage.sessionId ?? sessionIdFromHookPayload(payload);
+    if (!sessionId || usage.totals.messages === 0) {
+      return;
+    }
+
+    const cost = estimateTranscriptCost(usage, resolveTokenPriceTable(settings));
+    const injection = readSessionInjectionTag(cwd, sessionId);
+    const tokenPayload = buildSessionTokensPayload({ sessionId, usage, cost, transcriptPath, injection });
+
+    const repoId = resolveRepoIdForProject(flags, cwd, settings);
+    const actorId = resolveMubitActorId(flags, cwd, settings);
+    const { pipeline } = createPipeline(cwd, flags, settings);
+    try {
+      await pipeline.ingest(SESSION_TOKENS_EVENT_TYPE, tokenPayload as unknown as Record<string, unknown>, {
+        // Deterministic: same transcript (same message count + final ts) yields
+        // the same eventId, so re-running the hook dedupes in the mirror.
+        eventId: createHash("sha1").update(`${sessionId}:${usage.totals.messages}`).digest("hex").slice(0, 24),
+        source: "claude_code_history",
+        repoId,
+        actorId: actorId ?? undefined,
+        sessionId,
+        threadId: null,
+        sequence: usage.totals.messages,
+        ts: usage.lastTimestamp ?? new Date().toISOString(),
+      });
+    } finally {
+      await pipeline.flush();
+    }
+  } catch (error) {
+    if (!quiet) {
+      console.warn(`Token accounting failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+}
+
+// Per-session injection scratch state: how much context we injected (for A/B
+// tagging) plus PreToolUse denial bookkeeping (for the short-circuit loop guard).
+interface InjectionSessionState {
+  active?: boolean;
+  injectedTokens?: number;
+  deniedSignatures?: string[];
+  denialCount?: number;
+  updatedAt?: string;
+}
+
+function readInjectionSessionState(cwd: string, sessionId: string): InjectionSessionState {
+  try {
+    const parsed = JSON.parse(readFileSync(injectionSessionStatePath(cwd, sessionId), "utf8")) as unknown;
+    return typeof parsed === "object" && parsed !== null ? (parsed as InjectionSessionState) : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeInjectionSessionState(cwd: string, sessionId: string, state: InjectionSessionState): void {
+  try {
+    mkdirSync(injectionStateDir(cwd), { recursive: true });
+    writeFileSync(
+      injectionSessionStatePath(cwd, sessionId),
+      JSON.stringify({ ...state, updatedAt: new Date().toISOString() }),
+      "utf8",
+    );
+  } catch {
+    // injection state is best-effort
+  }
+}
+
+// Accumulate the per-session injected-token estimate so SessionEnd can tag the
+// token record for A/B (`codaph tokens --compare`). Best-effort; never throws.
+function recordSessionInjection(cwd: string, sessionId: string, injectedTokens: number): void {
+  const state = readInjectionSessionState(cwd, sessionId);
+  writeInjectionSessionState(cwd, sessionId, {
+    ...state,
+    active: true,
+    injectedTokens: (state.injectedTokens ?? 0) + injectedTokens,
+  });
+}
+
+// Injection hooks (SessionStart / UserPromptSubmit / PreToolUse). Builds the
+// memory context to inject and writes ONLY the hook JSON to stdout (Claude
+// parses stdout). Always fail-open: disabled, unconfigured, timed-out, or
+// errored => "{}" no-op, never a thrown hook that would disrupt the session.
+async function runContextInjectionHook(
+  hookName: "session-start" | "user-prompt-submit",
+  options: { payload: Record<string, unknown> | null; flags: Flags; cwd: string; settings: CodaphSettings },
+): Promise<void> {
+  const { payload, flags, cwd, settings } = options;
+  let output = "{}";
+  try {
+    const config = resolveInjectionConfig(getProjectSettings(settings, cwd).injection, process.env);
+    const engine = config.enabled ? createMubitMemory(flags, cwd, settings) : null;
+    if (config.enabled && engine && engine.isEnabled()) {
+      const projectRunId = resolveMubitCommandRunId(flags, cwd, settings, { preferProject: true });
+      const sessionId = sessionIdFromHookPayload(payload);
+
+      let hookEventName = "";
+      let additionalContext: string | null = null;
+
+      if (hookName === "session-start") {
+        hookEventName = "SessionStart";
+        additionalContext = await withTimeout(
+          buildSessionStartContext(engine, projectRunId, hookSourceFromPayload(payload), config),
+          config.timeoutMs,
+          "Codaph SessionStart injection",
+        ).catch(() => null);
+      } else {
+        hookEventName = "UserPromptSubmit";
+        const prompt = typeof payload?.prompt === "string" ? payload.prompt : "";
+        additionalContext = await withTimeout(
+          buildPromptContext(engine, projectRunId, prompt, config),
+          config.timeoutMs,
+          "Codaph UserPromptSubmit injection",
+        ).catch(() => null);
+      }
+
+      output = buildHookOutput(hookEventName, additionalContext);
+      if (additionalContext && sessionId) {
+        recordSessionInjection(cwd, sessionId, estimateTokens(additionalContext));
+      }
+    }
+  } catch (error) {
+    output = "{}";
+    if (process.env.CODAPH_DEBUG === "1") {
+      console.error(`Codaph injection hook failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  process.stdout.write(output);
+}
+
+// PreToolUse short-circuit (experimental, opt-in via preToolUse.mode). For
+// Read/Grep/Glob calls, query Mubit for an answer and either augment (add a
+// hint, let the tool run) or — in shortcircuit mode, for search tools only —
+// deny with the answer so Claude skips the read. Guarded by a per-session
+// denial cap + signature dedupe so a stale/insufficient answer can't loop.
+// Always fail-open: any problem => "{}" (allow the tool).
+async function runPreToolUseHook(options: {
+  payload: Record<string, unknown> | null;
+  flags: Flags;
+  cwd: string;
+  settings: CodaphSettings;
+}): Promise<void> {
+  const { payload, flags, cwd, settings } = options;
+  let output = "{}";
+  try {
+    const config = resolveInjectionConfig(getProjectSettings(settings, cwd).injection, process.env);
+    const mode = config.preToolUse.mode;
+    const engine = config.enabled && mode !== "off" ? createMubitMemory(flags, cwd, settings) : null;
+    const toolName = typeof payload?.tool_name === "string" ? payload.tool_name : "";
+    const toolHandled = config.preToolUse.tools.some((tool) => tool.toLowerCase() === toolName.toLowerCase());
+
+    if (config.enabled && mode !== "off" && engine && engine.isEnabled() && toolHandled) {
+      const toolInput = isRecord(payload?.tool_input) ? (payload?.tool_input as Record<string, unknown>) : {};
+      const query = buildToolMemoryQuery(toolName, toolInput);
+      if (query) {
+        const projectRunId = resolveMubitCommandRunId(flags, cwd, settings, { preferProject: true });
+        // PreToolUse blocks every matched tool call, so use a tighter timeout.
+        const answer = await withTimeout(
+          fetchToolMemoryAnswer(engine, projectRunId, query, config.preToolUse.maxTokens),
+          Math.min(config.timeoutMs, 2000),
+          "Codaph PreToolUse memory",
+        ).catch(() => null);
+
+        const sessionId = sessionIdFromHookPayload(payload);
+        const state = sessionId ? readInjectionSessionState(cwd, sessionId) : {};
+        const signature = toolSignature(toolName, toolInput);
+        const alreadyDenied = (state.deniedSignatures ?? []).includes(signature);
+        const denialCount = state.denialCount ?? 0;
+
+        const decision = decidePreToolAction({
+          mode,
+          toolName,
+          answer,
+          alreadyDenied,
+          denialCount,
+          maxDenials: config.preToolUse.maxDenials,
+        });
+        output = buildPreToolHookOutput(decision);
+
+        if (sessionId && decision.text && (decision.kind === "augment" || decision.kind === "deny")) {
+          writeInjectionSessionState(cwd, sessionId, {
+            ...state,
+            active: true,
+            injectedTokens: (state.injectedTokens ?? 0) + estimateTokens(decision.text),
+            deniedSignatures:
+              decision.kind === "deny" ? [...(state.deniedSignatures ?? []), signature] : state.deniedSignatures,
+            denialCount: decision.kind === "deny" ? denialCount + 1 : denialCount,
+          });
+        }
+      }
+    }
+  } catch (error) {
+    output = "{}";
+    if (process.env.CODAPH_DEBUG === "1") {
+      console.error(`Codaph PreToolUse hook failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  process.stdout.write(output);
 }
 
 function providerFromHookContext(flags: Flags, payload: Record<string, unknown> | null): AgentProviderId | null {
@@ -3466,10 +3810,71 @@ async function runAgentCompleteMubitAutomation(options: {
   }
 }
 
+// Claude Code hook entries Codaph manages, paired with their matchers. The
+// measurement hook (SessionEnd) is always installed; the injection hooks are
+// only included when injection is requested, and only those whose `hooksRun`
+// handler is implemented — so a half-wired hook is never written into settings.
+function claudeManagedHookSpecs(options: { injection: boolean }): ClaudeHookSpec[] {
+  const cmd = (name: ManagedHookName): string =>
+    hookCommandCandidates(name)[0] ?? `codaph hooks run ${name} --quiet`;
+  const specs: ClaudeHookSpec[] = [
+    // Measurement — token accounting from the transcript.
+    { event: "SessionEnd", matcher: "*", command: cmd("session-end") },
+  ];
+  if (options.injection) {
+    // Phase 1 — SessionStart project digest.
+    specs.push({ event: "SessionStart", matcher: "*", command: cmd("session-start") });
+    // Phase 2 — per-prompt targeted retrieval.
+    specs.push({ event: "UserPromptSubmit", matcher: "*", command: cmd("user-prompt-submit") });
+    // Phase 3 — short-circuit repeated exploration (no-op unless preToolUse.mode != "off").
+    specs.push({ event: "PreToolUse", matcher: "Read|Grep|Glob", command: cmd("pre-tool-use") });
+  }
+  return specs;
+}
+
+async function hooksInstall(rest: string[]): Promise<void> {
+  const { positionals, flags } = parseArgs(rest);
+  const target = positionals[0] ?? "claude-code";
+  if (target !== "claude-code" && target !== "claude") {
+    throw new Error(`Unsupported hooks install target: ${target}. Supported: claude-code`);
+  }
+  const cwd = resolve(getStringFlag(flags, "cwd") ?? process.cwd());
+  const repoRoot = resolveGitRepoRootOrCwd(cwd);
+  const settings = loadCodaphSettings();
+
+  // Injection is opt-in: --injection enables it (and persists enabled=true), or
+  // it's already enabled in project settings from a prior run.
+  const enableInjection = getBooleanFlag(flags, "injection", false);
+  const wantInjection = enableInjection || getProjectSettings(settings, cwd).injection?.enabled === true;
+
+  const result = await installClaudeCodeHooksBestEffort(repoRoot, claudeManagedHookSpecs({ injection: wantInjection }));
+  if (!result.ok) {
+    console.warn(result.warning ?? "Failed to update Claude Code settings.");
+    console.log("Add these hooks to .claude/settings.json manually:");
+    for (const snippet of result.manualSnippets) {
+      console.log(`  ${snippet}`);
+    }
+    return;
+  }
+
+  if (enableInjection) {
+    const current = getProjectSettings(settings, cwd).injection ?? {};
+    saveCodaphSettings(updateProjectSettings(settings, cwd, { injection: { ...current, enabled: true } }));
+    console.log("Memory injection enabled for this project (set CODAPH_INJECT=0 to disable at runtime).");
+  }
+
+  if (result.installedEvents.length === 0) {
+    console.log(`Claude Code hooks already present in ${result.installedPath}.`);
+  } else {
+    console.log(`Installed Claude Code hooks (${result.installedEvents.join(", ")}) in ${result.installedPath}.`);
+  }
+  console.log("Run a Claude Code session, then `codaph tokens` to see token usage and cost.");
+}
+
 async function hooksRun(rest: string[]): Promise<void> {
   const [hookName, ...args] = rest;
   if (!hookName) {
-    throw new Error("Hook name is required (post-commit | post-push | agent-complete)");
+    throw new Error("Hook name is required (post-commit | post-push | agent-complete | session-end)");
   }
   const { flags } = parseArgs(args);
   const providerFlag = getStringFlag(flags, "provider");
@@ -3481,6 +3886,20 @@ async function hooksRun(rest: string[]): Promise<void> {
   const cwd = hookName === "post-commit" || hookName === "post-push" ? resolveGitRepoRootOrCwd(requestedCwd) : requestedCwd;
   const settings = loadCodaphSettings();
   const quiet = getBooleanFlag(flags, "quiet", false);
+
+  // Measurement / injection hooks do not run the sync workflow.
+  if (hookName === "session-end") {
+    await runTokenAccountingHook({ payload, flags, cwd, settings, quiet });
+    return;
+  }
+  if (hookName === "session-start" || hookName === "user-prompt-submit") {
+    await runContextInjectionHook(hookName, { payload, flags, cwd, settings });
+    return;
+  }
+  if (hookName === "pre-tool-use") {
+    await runPreToolUseHook({ payload, flags, cwd, settings });
+    return;
+  }
 
   let mode: "all" | "push" | "pull";
   let pushMode: SyncPushMode | undefined;
@@ -4160,6 +4579,331 @@ function printStructuredMubitResult(
     }
   }
   console.log(JSON.stringify(payload, null, 2));
+}
+
+function formatTokenInt(value: number): string {
+  return Math.round(value).toLocaleString("en-US");
+}
+
+function formatUsd(value: number): string {
+  if (value >= 1) {
+    return `$${value.toFixed(2)}`;
+  }
+  return `$${value.toFixed(4)}`;
+}
+
+// Resolve a --since value: ISO timestamp/date, or a relative span like "7d"/"24h"/"30m".
+function resolveSinceIso(value: string | undefined): string | null {
+  if (!value) {
+    return null;
+  }
+  const relative = /^(\d+)\s*([dhm])$/i.exec(value.trim());
+  if (relative) {
+    const amount = Number.parseInt(relative[1], 10);
+    const unitMs = relative[2].toLowerCase() === "d" ? 86_400_000 : relative[2].toLowerCase() === "h" ? 3_600_000 : 60_000;
+    return new Date(Date.now() - amount * unitMs).toISOString();
+  }
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
+}
+
+function printTokenCohort(label: string, cohort: SessionTokenCohort): void {
+  if (cohort.sessions === 0) {
+    console.log(`${label}: no sessions`);
+    return;
+  }
+  const u = cohort.usage;
+  console.log(
+    `${label}: ${cohort.sessions} session${cohort.sessions === 1 ? "" : "s"}  ` +
+      `${formatUsd(cohort.costUsd)} total  ` +
+      `${formatUsd(averageCostPerSession(cohort))}/session`,
+  );
+  console.log(
+    `  tokens: input ${formatTokenInt(u.input)}  cache-write ${formatTokenInt(u.cacheCreate)}  ` +
+      `cache-read ${formatTokenInt(u.cacheRead)}  output ${formatTokenInt(u.output)}  ` +
+      `(total ${formatTokenInt(totalTokens(u))})`,
+  );
+  // Cost-by-type is where reduction effort should aim: output is priced ~50x
+  // cache-read, so it usually dominates COST despite being a sliver of TOKENS.
+  const c = cohort.costByType;
+  const denom = totalCostByType(c) || 1;
+  const pct = (value: number): string => `${Math.round((value / denom) * 100)}%`;
+  console.log(
+    `  cost:   output ${formatUsd(c.output)} (${pct(c.output)})  cache-read ${formatUsd(c.cacheRead)} (${pct(c.cacheRead)})  ` +
+      `cache-write ${formatUsd(c.cacheWrite)} (${pct(c.cacheWrite)})  input ${formatUsd(c.input)} (${pct(c.input)})`,
+  );
+  if (u.messages > 0) {
+    console.log(`  per-message: ${formatUsd(cohort.costUsd / u.messages)} over ${formatTokenInt(u.messages)} message(s)`);
+  }
+  if (cohort.injectedTokens > 0) {
+    console.log(`  injected context: ~${formatTokenInt(cohort.injectedTokens)} tokens`);
+  }
+}
+
+// `codaph tokens` — report per-session Claude Code token usage and cost from the
+// local mirror. With --compare, splits sessions into injection-on vs injection-off
+// cohorts so the savings from memory injection are quantifiable.
+function printAttribution(a: ContextAttribution, opts: { session: string | null; limit: number }): void {
+  console.log(`Context-cost attribution${opts.session ? ` — session ${opts.session}` : ""}`);
+  console.log(
+    `Model ${a.model}${a.unpriced ? " (unpriced — USD = 0)" : ""}  ·  ${a.assistantTurns} assistant turns  ·  ` +
+      `${a.toolResults} tool results (${formatTokenInt(a.totalResultTokens)} tok)`,
+  );
+  console.log(`Actual cache cost: read ${formatUsd(a.cacheReadUsdActual)}  write ${formatUsd(a.cacheWriteUsdActual)}`);
+  const cacheTotal = a.cacheReadUsdActual + a.cacheWriteUsdActual;
+  const offloadPct = cacheTotal > 0 ? Math.min(100, Math.round((a.offloadableUsd / cacheTotal) * 100)) : 0;
+  console.log(
+    `Tool results drive ~${formatUsd(a.attributableUsd)} of context tax; ~${formatUsd(a.offloadableUsd)} is offloadable ` +
+      `to subagents (~${offloadPct}% of cache cost).`,
+  );
+
+  const shown = a.drivers.slice(0, opts.limit);
+  if (shown.length > 0) {
+    console.log(`\nTop ${shown.length} context-cost drivers (⤴ = offloadable):`);
+    for (const d of shown) {
+      const mark = d.offloadable ? "⤴" : " ";
+      const target = d.target ? `  ${d.target}` : "";
+      console.log(`  ${mark} ${formatUsd(d.totalUsd).padStart(8)}  ${d.toolName}${target}`);
+      console.log(
+        `      ${formatTokenInt(d.resultTokens)} tok · issued turn ${d.turnIssued}/${a.assistantTurns} · re-read ${d.rereadTurns}×`,
+      );
+    }
+  }
+  if (a.offloadableUsd > 0) {
+    console.log(
+      "\nOffloading the ⤴ calls to subagents reads the same files but keeps their bulk out of the main " +
+        "context — quality-safe, and it removes most of that compounding tax.",
+    );
+  }
+}
+
+// `codaph tokens attribution` — attribute a session's compounding cache-read
+// cost to the tool results that drive it, and estimate the quality-safe share
+// that subagent offloading could remove. Reads the latest session transcript by
+// default; --session <id> or --transcript <path> to target one.
+async function tokensAttribution(flags: Flags): Promise<void> {
+  const cwd = resolve(getStringFlag(flags, "cwd") ?? process.cwd());
+  const settings = loadCodaphSettings();
+  const priceTable = resolveTokenPriceTable(settings);
+  const limitRaw = Number.parseInt(getStringFlag(flags, "limit") ?? "12", 10);
+  const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? limitRaw : 12;
+  const sessionFilter = getStringFlag(flags, "session");
+
+  let transcriptPath = getStringFlag(flags, "transcript") ? resolve(getStringFlag(flags, "transcript") as string) : null;
+  let sessionLabel = sessionFilter ?? null;
+
+  if (!transcriptPath) {
+    const repoId = resolveRepoIdForProject(flags, cwd, settings);
+    const query = new QueryService(resolve(cwd, ".codaph"));
+    const events = await query.getTimeline({ repoId });
+    const chosen = events
+      .filter((event) => event.eventType === SESSION_TOKENS_EVENT_TYPE)
+      .map((event) => ({ ts: event.ts, payload: parseSessionTokensPayload(event.payload) }))
+      .filter((entry): entry is { ts: string; payload: SessionTokensPayload } => entry.payload !== null)
+      .filter((entry) => !sessionFilter || entry.payload.session_id === sessionFilter)
+      .sort((a, b) => (a.ts < b.ts ? 1 : -1))[0];
+    if (!chosen) {
+      console.log(
+        sessionFilter
+          ? `No token record for session ${sessionFilter}.`
+          : "No token records yet. Install the SessionEnd hook and run a Claude Code session.",
+      );
+      return;
+    }
+    transcriptPath = chosen.payload.transcript_path;
+    sessionLabel = chosen.payload.session_id;
+    if (!transcriptPath) {
+      console.log("That session record has no transcript path; pass --transcript <path>.");
+      return;
+    }
+  }
+
+  let content: string;
+  try {
+    content = readFileSync(transcriptPath, "utf8");
+  } catch {
+    console.log(`Could not read transcript: ${transcriptPath}`);
+    return;
+  }
+
+  const attribution = attributeContextCost(content, priceTable);
+  if (!attribution) {
+    console.log("No assistant turns found in that transcript.");
+    return;
+  }
+
+  if (flags.json === true) {
+    console.log(JSON.stringify({ session: sessionLabel, transcriptPath, attribution }, null, 2));
+    return;
+  }
+  printAttribution(attribution, { session: sessionLabel, limit });
+}
+
+async function tokensCommand(rest: string[]): Promise<void> {
+  const { positionals, flags } = parseArgs(rest);
+  if (positionals[0] === "attribution" || positionals[0] === "drivers") {
+    await tokensAttribution(flags);
+    return;
+  }
+  const cwd = resolve(getStringFlag(flags, "cwd") ?? process.cwd());
+  const settings = loadCodaphSettings();
+  const repoId = resolveRepoIdForProject(flags, cwd, settings);
+  const sinceIso = resolveSinceIso(getStringFlag(flags, "since"));
+
+  const query = new QueryService(resolve(cwd, ".codaph"));
+  const events = await query.getTimeline({ repoId });
+  const records = events
+    .filter((event) => event.eventType === SESSION_TOKENS_EVENT_TYPE)
+    .filter((event) => !sinceIso || event.ts >= sinceIso)
+    .map((event) => parseSessionTokensPayload(event.payload))
+    .filter((record): record is SessionTokensPayload => record !== null);
+
+  const report = summarizeSessionTokens(records, resolveTokenPriceTable(settings));
+
+  if (flags.json === true) {
+    console.log(JSON.stringify({ cwd, repoId, since: sinceIso, report }, null, 2));
+    return;
+  }
+
+  if (report.all.sessions === 0) {
+    console.log(
+      "No token records yet. Install the SessionEnd hook (`codaph hooks install claude-code`) and run a Claude Code session.",
+    );
+    return;
+  }
+
+  console.log(`Token usage${sinceIso ? ` since ${sinceIso}` : ""} (repo ${repoId})`);
+  printTokenCohort("Overall", report.all);
+
+  if (getBooleanFlag(flags, "by-model", false)) {
+    const byModel = new Map<string, ReturnType<typeof emptyUsage>>();
+    for (const record of latestSessionTokenRecords(records)) {
+      for (const [model, usage] of Object.entries(record.by_model)) {
+        const existing = byModel.get(model) ?? emptyUsage();
+        addUsage(existing, usage);
+        byModel.set(model, existing);
+      }
+    }
+    console.log("By model:");
+    for (const [model, usage] of [...byModel.entries()].sort((a, b) => totalTokens(b[1]) - totalTokens(a[1]))) {
+      console.log(`  ${model}: ${formatTokenInt(totalTokens(usage))} tokens across ${usage.messages} message(s)`);
+    }
+  }
+
+  if (getBooleanFlag(flags, "compare", false)) {
+    console.log("");
+    printTokenCohort("Injection ON ", report.injectionOn);
+    printTokenCohort("Injection OFF", report.injectionOff);
+    const onAvg = averageCostPerSession(report.injectionOn);
+    const offAvg = averageCostPerSession(report.injectionOff);
+    if (report.injectionOn.sessions > 0 && report.injectionOff.sessions > 0 && offAvg > 0) {
+      const delta = offAvg - onAvg;
+      const pct = (delta / offAvg) * 100;
+      const verb = delta >= 0 ? "saved" : "added";
+      console.log(
+        `\nWith injection: ${formatUsd(Math.abs(delta))}/session ${verb} (${pct >= 0 ? "-" : "+"}${Math.abs(pct).toFixed(1)}% vs off).`,
+      );
+    } else {
+      console.log("\nNeed sessions in both cohorts (injection on and off) to compute savings.");
+    }
+  }
+}
+
+// `codaph inject preview` — show exactly what the memory-injection hooks WOULD
+// inject into a Claude Code session, without running one. The fastest way to
+// judge (and harden) injection quality: see the SessionStart digest and a
+// sample per-prompt retrieval with token estimates. With --raw, also dumps the
+// pre-filter overview block so you can see how much activity-narration the
+// distiller stripped (narration injected blindly is pure cache-read tax).
+async function injectCommand(rest: string[]): Promise<void> {
+  const { positionals, flags } = parseArgs(rest);
+  const action = positionals[0] ?? "preview";
+  if (action !== "preview") {
+    throw new Error(`Unsupported inject subcommand: ${action}. Supported: preview`);
+  }
+  const cwd = resolve(getStringFlag(flags, "cwd") ?? process.cwd());
+  const settings = loadCodaphSettings();
+  const engine = createMubitMemory(flags, cwd, settings);
+  if (!engine || !engine.isEnabled()) {
+    throwMubitDisabled();
+  }
+
+  // Preview behaves as if injection were enabled so output is inspectable even
+  // before the project switch is flipped on.
+  const config = {
+    ...resolveInjectionConfig(getProjectSettings(settings, cwd).injection, process.env),
+    enabled: true,
+  };
+  const projectRunId = resolveMubitCommandRunId(flags, cwd, settings, { preferProject: true });
+  const source = getStringFlag(flags, "source") ?? "startup";
+  const prompt = getStringFlag(flags, "prompt");
+  const showRaw = getBooleanFlag(flags, "raw", false);
+  const timeoutMs = Math.max(config.timeoutMs, 15000);
+
+  console.log(`Injection preview — run scope ${projectRunId}`);
+  console.log(
+    `Budgets: sessionStart ${config.sessionStart.maxTokens} · userPrompt ${config.userPrompt.maxTokens} · preToolUse ${config.preToolUse.maxTokens} tok`,
+  );
+
+  console.log(`\n=== SessionStart (source=${source}) ===`);
+  const digest = await withTimeout(
+    buildSessionStartContext(engine, projectRunId, source, config),
+    timeoutMs,
+    "inject preview SessionStart",
+  ).catch((error) => {
+    console.log(`(failed: ${error instanceof Error ? error.message : String(error)})`);
+    return null;
+  });
+  if (digest) {
+    console.log(digest);
+    console.log(`\n[~${estimateTokens(digest)} tokens would be injected at SessionStart]`);
+  } else {
+    console.log("(nothing — no durable memory survived filtering; injecting nothing is correct here)");
+  }
+
+  if (showRaw && source !== "compact") {
+    const overviewBudget = Math.max(200, Math.floor(config.sessionStart.maxTokens * 0.6));
+    const rawResp = await engine
+      .getContextBlock({
+        runId: projectRunId,
+        query: PROJECT_OVERVIEW_QUERY,
+        maxTokenBudget: overviewBudget,
+        includeWorkingMemory: true,
+        format: "structured",
+      })
+      .catch(() => ({}) as Record<string, unknown>);
+    const rawText = [rawResp.context_block, rawResp.context, rawResp.summary].find(
+      (value): value is string => typeof value === "string" && value.trim().length > 0,
+    );
+    console.log("\n=== Raw overview block (pre-filter) ===");
+    if (rawText) {
+      console.log(rawText.trim());
+      const filtered = distillFactsBlock(rawText);
+      const bulletCount = (text: string): number => text.split("\n").filter((line) => /^\s*([-*]|\d+[.)])\s/.test(line)).length;
+      console.log(
+        `\n[distiller kept ${bulletCount(filtered)}/${bulletCount(rawText)} bullet(s); ~${estimateTokens(rawText)} → ~${estimateTokens(filtered)} tokens]`,
+      );
+    } else {
+      console.log("(empty)");
+    }
+  }
+
+  if (prompt) {
+    console.log(`\n=== UserPromptSubmit (prompt: ${JSON.stringify(prompt)}) ===`);
+    const promptCtx = await withTimeout(
+      buildPromptContext(engine, projectRunId, prompt, config),
+      timeoutMs,
+      "inject preview UserPromptSubmit",
+    ).catch(() => null);
+    if (promptCtx) {
+      console.log(promptCtx);
+      console.log(`\n[~${estimateTokens(promptCtx)} tokens would be injected for this prompt]`);
+    } else {
+      console.log("(nothing — prompt gated out or no relevant memory found)");
+    }
+  } else {
+    console.log("\nTip: pass --prompt \"<your prompt>\" to preview per-prompt retrieval; --raw to see pre-filter facts.");
+  }
 }
 
 async function mubitQuery(rest: string[]): Promise<void> {
@@ -9718,6 +10462,11 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (cmd === "hooks" && sub === "install") {
+    await hooksInstall(rest);
+    return;
+  }
+
   if (cmd === "hooks" && sub === "run") {
     await hooksRun(rest);
     return;
@@ -9725,6 +10474,16 @@ async function main(): Promise<void> {
 
   if (cmd === "sessions" && sub === "list") {
     await listSessions(rest);
+    return;
+  }
+
+  if (cmd === "tokens") {
+    await tokensCommand([sub, ...rest].filter(Boolean) as string[]);
+    return;
+  }
+
+  if (cmd === "inject") {
+    await injectCommand([sub, ...rest].filter(Boolean) as string[]);
     return;
   }
 

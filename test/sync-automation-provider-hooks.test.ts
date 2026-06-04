@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   installClaudeCodeAgentCompleteHookBestEffort,
+  installClaudeCodeHooksBestEffort,
   installGeminiCliAgentCompleteHookBestEffort,
   normalizeSyncAutomationSettings,
 } from "../src/sync-automation";
@@ -84,6 +85,57 @@ describe("sync-automation provider hooks", () => {
         (entry) => typeof entry === "string" && entry.includes("codaph hooks run agent-complete --provider gemini-cli"),
       );
       expect(codaphEntries).toHaveLength(1);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("installs multiple Claude Code hook events idempotently and preserves existing hooks", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codaph-claude-multi-hook-"));
+    try {
+      const settingsPath = join(root, ".claude", "settings.json");
+      await mkdir(join(root, ".claude"), { recursive: true });
+      // Pre-existing user hook on a managed event must be preserved.
+      await writeFile(
+        settingsPath,
+        `${JSON.stringify(
+          { hooks: { SessionEnd: [{ matcher: "*", hooks: [{ type: "command", command: "echo bye" }] }] }, mySetting: 7 },
+          null,
+          2,
+        )}\n`,
+        "utf8",
+      );
+
+      const specs = [
+        { event: "SessionEnd", matcher: "*", command: "codaph hooks run session-end --quiet" },
+        { event: "SessionStart", matcher: "*", command: "codaph hooks run session-start --quiet" },
+        { event: "PreToolUse", matcher: "Read|Grep|Glob", command: "codaph hooks run pre-tool-use --quiet" },
+      ];
+
+      const first = await installClaudeCodeHooksBestEffort(root, specs);
+      expect(first.ok).toBe(true);
+      expect(first.installedEvents.sort()).toEqual(["PreToolUse", "SessionEnd", "SessionStart"]);
+
+      // Re-running installs nothing new.
+      const second = await installClaudeCodeHooksBestEffort(root, specs);
+      expect(second.ok).toBe(true);
+      expect(second.installedEvents).toEqual([]);
+
+      const parsed = JSON.parse(await readFile(settingsPath, "utf8")) as Record<string, unknown>;
+      expect(parsed.mySetting).toBe(7);
+      const hooks = parsed.hooks as Record<string, Array<Record<string, unknown>>>;
+
+      // Existing user hook preserved alongside the Codaph one.
+      const sessionEnd = hooks.SessionEnd;
+      expect(sessionEnd).toHaveLength(2);
+      const commands = sessionEnd
+        .flatMap((entry) => entry.hooks as Array<Record<string, unknown>>)
+        .map((hook) => hook.command);
+      expect(commands).toContain("echo bye");
+      expect(commands).toContain("codaph hooks run session-end --quiet");
+
+      // PreToolUse matcher is scoped to read/search tools.
+      expect(hooks.PreToolUse[0]?.matcher).toBe("Read|Grep|Glob");
     } finally {
       await rm(root, { recursive: true, force: true });
     }
