@@ -1,0 +1,497 @@
+{
+  "model": "claude-sonnet-4-6",
+  "reps": 2,
+  "rows": [
+    {
+      "task": "resume-focus",
+      "arm": "on",
+      "rep": 1,
+      "sessionId": "35704e9c-0eef-496b-a5e4-4e54c011ea04",
+      "ok": true,
+      "error": null,
+      "billedUsd": 0.0581898,
+      "codaphUsd": 0.1758621,
+      "usage": {
+        "input": 13,
+        "cacheCreate": 33114,
+        "cacheRead": 99652,
+        "output": 1450,
+        "messages": 5
+      },
+      "numTurns": 3,
+      "durationMs": 15525,
+      "injected": true
+    },
+    {
+      "task": "resume-focus",
+      "arm": "off",
+      "rep": 1,
+      "sessionId": "8655a06a-8e63-42ba-9372-b30e373dfc12",
+      "ok": true,
+      "error": null,
+      "billedUsd": 0.05372175,
+      "codaphUsd": 0.09922575,
+      "usage": {
+        "input": 992,
+        "cacheCreate": 2939,
+        "cacheRead": 155445,
+        "output": 2573,
+        "messages": 6
+      },
+      "numTurns": 4,
+      "durationMs": 25779,
+      "injected": false
+    },
+    {
+      "task": "resume-focus",
+      "arm": "off",
+      "rep": 2,
+      "sessionId": "dd935398-6515-4d4b-ae7e-baa7d05562b1",
+      "ok": true,
+      "error": null,
+      "billedUsd": 0.08886975000000001,
+      "codaphUsd": 0.21459104999999998,
+      "usage": {
+        "input": 16,
+        "cacheCreate": 35023,
+        "cacheRead": 180856,
+        "output": 1930,
+        "messages": 8
+      },
+      "numTurns": 6,
+      "durationMs": 24597,
+      "injected": false
+    },
+    {
+      "task": "resume-focus",
+      "arm": "on",
+      "rep": 2,
+      "sessionId": "e192c71f-fc04-4a1a-8b86-45665ddfe6b8",
+      "ok": true,
+      "error": null,
+      "billedUsd": 0.07317855,
+      "codaphUsd": 0.2035608,
+      "usage": {
+        "input": 15,
+        "cacheCreate": 35618,
+        "cacheRead": 153361,
+        "output": 1596,
+        "messages": 7
+      },
+      "numTurns": 5,
+      "durationMs": 18353,
+      "injected": true
+    },
+    {
+      "task": "circuit-threshold",
+      "arm": "off",
+      "rep": 1,
+      "sessionId": "63c9f416-b928-4c94-89ac-9a9000b3dbe9",
+      "ok": true,
+      "error": null,
+      "billedUsd": 0.06189075,
+      "codaphUsd": 0.13322895,
+      "usage": {
+        "input": 10,
+        "cacheCreate": 26297,
+        "cacheRead": 80834,
+        "output": 689,
+        "messages": 4
+      },
+      "numTurns": 2,
+      "durationMs": 10169,
+      "injected": false
+    },
+    {
+      "task": "circuit-threshold",
+      "arm": "on",
+      "rep": 1,
+      "sessionId": "766ba625-74d7-4567-8f07-d33abe5401a9",
+      "ok": true,
+      "error": null,
+      "billedUsd": 0.06752190000000001,
+      "codaphUsd": 0.14427510000000002,
+      "usage": {
+        "input": 11,
+        "cacheCreate": 25840,
+        "cacheRead": 108007,
+        "output": 996,
+        "messages": 5
+      },
+      "numTurns": 3,
+      "durationMs": 14953,
+      "injected": true
+    },
+    {
+      "task": "circuit-threshold",
+      "arm": "on",
+      "rep": 2,
+      "sessionId": "534b0f88-da62-4601-a240-4441f70aa164",
+      "ok": true,
+      "error": null,
+      "billedUsd": 0.06621540000000001,
+      "codaphUsd": 0.1429086,
+      "usage": {
+        "input": 11,
+        "cacheCreate": 25350,
+        "cacheRead": 108077,
+        "output": 1026,
+        "messages": 5
+      },
+      "numTurns": 3,
+      "durationMs": 13475,
+      "injected": true
+    },
+    {
+      "task": "circuit-threshold",
+      "arm": "off",
+      "rep": 2,
+      "sessionId": "205f862b-ab96-496d-af37-4432636ba3cc",
+      "ok": true,
+      "error": null,
+      "billedUsd": 0.03595305,
+      "codaphUsd": 0.05589585,
+      "usage": {
+        "input": 10,
+        "cacheCreate": 3903,
+        "cacheRead": 103232,
+        "output": 684,
+        "messages": 4
+      },
+      "numTurns": 2,
+      "durationMs": 10720,
+      "injected": false
+    },
+    {
+      "task": "dedup-index",
+      "arm": "on",
+      "rep": 1,
+      "sessionId": "764482cc-e3ee-4942-9bf0-ad63647e2b48",
+      "ok": true,
+      "error": null,
+      "billedUsd": 0.119559,
+      "codaphUsd": 0.20622870000000001,
+      "usage": {
+        "input": 16,
+        "cacheCreate": 27344,
+        "cacheRead": 246669,
+        "output": 1976,
+        "messages": 10
+      },
+      "numTurns": 8,
+      "durationMs": 29793,
+      "injected": true
+    },
+    {
+      "task": "dedup-index",
+      "arm": "off",
+      "rep": 1,
+      "sessionId": "846e6463-7aac-4802-aa52-0f5616f1b85c",
+      "ok": true,
+      "error": null,
+      "billedUsd": 0.0705519,
+      "codaphUsd": 0.1415226,
+      "usage": {
+        "input": 10,
+        "cacheCreate": 27790,
+        "cacheRead": 80817,
+        "output": 869,
+        "messages": 4
+      },
+      "numTurns": 2,
+      "durationMs": 14117,
+      "injected": false
+    },
+    {
+      "task": "dedup-index",
+      "arm": "off",
+      "rep": 2,
+      "sessionId": "0ffa3558-b721-4897-8458-ddcb25de5d5f",
+      "ok": true,
+      "error": null,
+      "billedUsd": 0.0419871,
+      "codaphUsd": 0.052373399999999994,
+      "usage": {
+        "input": 8,
+        "cacheCreate": 2224,
+        "cacheRead": 104198,
+        "output": 850,
+        "messages": 4
+      },
+      "numTurns": 3,
+      "durationMs": 14174,
+      "injected": false
+    },
+    {
+      "task": "dedup-index",
+      "arm": "on",
+      "rep": 2,
+      "sessionId": "ce787322-044f-44df-a026-d411bb9c8771",
+      "ok": true,
+      "error": null,
+      "billedUsd": 0.08526285,
+      "codaphUsd": 0.20715645000000002,
+      "usage": {
+        "input": 15,
+        "cacheCreate": 29587,
+        "cacheRead": 215634,
+        "output": 2098,
+        "messages": 9
+      },
+      "numTurns": 5,
+      "durationMs": 21561,
+      "injected": true
+    },
+    {
+      "task": "ingest-batching",
+      "arm": "off",
+      "rep": 1,
+      "sessionId": "fdb28102-f397-42c0-8407-4cf01667909d",
+      "ok": true,
+      "error": null,
+      "billedUsd": 0.06508875,
+      "codaphUsd": 0.13610445000000002,
+      "usage": {
+        "input": 10,
+        "cacheCreate": 26245,
+        "cacheRead": 80819,
+        "output": 894,
+        "messages": 4
+      },
+      "numTurns": 2,
+      "durationMs": 13607,
+      "injected": false
+    },
+    {
+      "task": "ingest-batching",
+      "arm": "on",
+      "rep": 1,
+      "sessionId": "58f22944-2e86-4ea4-981f-0982f07eee85",
+      "ok": true,
+      "error": null,
+      "billedUsd": 0.06874515,
+      "codaphUsd": 0.14612835000000002,
+      "usage": {
+        "input": 10,
+        "cacheCreate": 28693,
+        "cacheRead": 81632,
+        "output": 934,
+        "messages": 4
+      },
+      "numTurns": 2,
+      "durationMs": 14386,
+      "injected": true
+    },
+    {
+      "task": "ingest-batching",
+      "arm": "on",
+      "rep": 2,
+      "sessionId": "b791be61-ec58-4995-b76a-3e8995a54789",
+      "ok": true,
+      "error": null,
+      "billedUsd": 0.0949725,
+      "codaphUsd": 0.2597457,
+      "usage": {
+        "input": 17,
+        "cacheCreate": 40742,
+        "cacheRead": 212724,
+        "output": 2873,
+        "messages": 9
+      },
+      "numTurns": 6,
+      "durationMs": 23380,
+      "injected": true
+    },
+    {
+      "task": "ingest-batching",
+      "arm": "off",
+      "rep": 2,
+      "sessionId": "08ca2ee0-da75-4c33-90a8-9b7e6ef495e6",
+      "ok": true,
+      "error": null,
+      "billedUsd": 0.0606834,
+      "codaphUsd": 0.11358,
+      "usage": {
+        "input": 16,
+        "cacheCreate": 3720,
+        "cacheRead": 209190,
+        "output": 2455,
+        "messages": 8
+      },
+      "numTurns": 6,
+      "durationMs": 23011,
+      "injected": false
+    },
+    {
+      "task": "arch-overview",
+      "arm": "on",
+      "rep": 1,
+      "sessionId": "5a6f390f-2092-4214-b17f-42196202196b",
+      "ok": true,
+      "error": null,
+      "billedUsd": 0.04057035,
+      "codaphUsd": 0.0811407,
+      "usage": {
+        "input": 6,
+        "cacheCreate": 16026,
+        "cacheRead": 36684,
+        "output": 668,
+        "messages": 2
+      },
+      "numTurns": 1,
+      "durationMs": 6440,
+      "injected": true
+    },
+    {
+      "task": "arch-overview",
+      "arm": "off",
+      "rep": 1,
+      "sessionId": "94566038-dc88-4197-87ca-0a7efd06a85c",
+      "ok": true,
+      "error": null,
+      "billedUsd": 0.0381366,
+      "codaphUsd": 0.0381366,
+      "usage": {
+        "input": 3,
+        "cacheCreate": 7456,
+        "cacheRead": 18342,
+        "output": 311,
+        "messages": 1
+      },
+      "numTurns": 1,
+      "durationMs": 7257,
+      "injected": false
+    },
+    {
+      "task": "arch-overview",
+      "arm": "off",
+      "rep": 2,
+      "sessionId": "8eceb0fe-4a25-49ea-ab92-a1eec2274ece",
+      "ok": true,
+      "error": null,
+      "billedUsd": 0.0117984,
+      "codaphUsd": 0.011798399999999999,
+      "usage": {
+        "input": 3,
+        "cacheCreate": 0,
+        "cacheRead": 25798,
+        "output": 270,
+        "messages": 1
+      },
+      "numTurns": 1,
+      "durationMs": 7390,
+      "injected": false
+    },
+    {
+      "task": "arch-overview",
+      "arm": "on",
+      "rep": 2,
+      "sessionId": "d9a98ba7-4535-4b77-a1cf-2b61c3d7ef41",
+      "ok": true,
+      "error": null,
+      "billedUsd": 0.0415866,
+      "codaphUsd": 0.0831732,
+      "usage": {
+        "input": 6,
+        "cacheCreate": 16064,
+        "cacheRead": 36684,
+        "output": 794,
+        "messages": 2
+      },
+      "numTurns": 1,
+      "durationMs": 9218,
+      "injected": true
+    }
+  ],
+  "summary": {
+    "off": {
+      "runs": 10,
+      "meanBilledUsd": 0.052868145,
+      "meanCodaphUsd": 0.099645705,
+      "meanTokens": 118773.1,
+      "meanCacheRead": 103953.1,
+      "meanOutput": 1152.5,
+      "meanTurns": 2.9,
+      "meanDurationMs": 15082.1,
+      "injectedRate": 0,
+      "usage": {
+        "input": 1078,
+        "cacheCreate": 135597,
+        "cacheRead": 1039531,
+        "output": 11525,
+        "messages": 44
+      }
+    },
+    "on": {
+      "runs": 10,
+      "meanBilledUsd": 0.07158021,
+      "meanCodaphUsd": 0.16501797,
+      "meanTokens": 159203.3,
+      "meanCacheRead": 129912.4,
+      "meanOutput": 1441.1,
+      "meanTurns": 3.7,
+      "meanDurationMs": 16708.4,
+      "injectedRate": 1,
+      "usage": {
+        "input": 120,
+        "cacheCreate": 278378,
+        "cacheRead": 1299124,
+        "output": 14411,
+        "messages": 58
+      }
+    },
+    "savedPerSession": -0.018712065000000007,
+    "savedPct": -0.353938368747381,
+    "savedTokens": -40430.19999999998,
+    "savedTokensPct": -0.34039862561472234,
+    "perTask": [
+      {
+        "task": "resume-focus",
+        "offTok": 189887,
+        "onTok": 162409.5,
+        "tokDelta": 27477.5,
+        "offCost": 0.07129575,
+        "onCost": 0.065684175,
+        "costDelta": 0.0056115750000000075
+      },
+      {
+        "task": "circuit-threshold",
+        "offTok": 107829.5,
+        "onTok": 134659,
+        "tokDelta": -26829.5,
+        "offCost": 0.048921900000000004,
+        "onCost": 0.06686865,
+        "costDelta": -0.017946749999999997
+      },
+      {
+        "task": "dedup-index",
+        "offTok": 108383,
+        "onTok": 261669.5,
+        "tokDelta": -153286.5,
+        "offCost": 0.0562695,
+        "onCost": 0.102410925,
+        "costDelta": -0.046141425
+      },
+      {
+        "task": "ingest-batching",
+        "offTok": 161674.5,
+        "onTok": 183812.5,
+        "tokDelta": -22138,
+        "offCost": 0.062886075,
+        "onCost": 0.081858825,
+        "costDelta": -0.018972749999999997
+      },
+      {
+        "task": "arch-overview",
+        "offTok": 26091.5,
+        "onTok": 53466,
+        "tokDelta": -27374.5,
+        "offCost": 0.0249675,
+        "onCost": 0.041078475,
+        "costDelta": -0.016110975000000003
+      }
+    ],
+    "okRuns": 20,
+    "totalRuns": 20
+  }
+}

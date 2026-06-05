@@ -1,0 +1,101 @@
+{
+  "model": "claude-sonnet-4-6",
+  "reps": 1,
+  "rows": [
+    {
+      "task": "resume-focus",
+      "arm": "on",
+      "rep": 1,
+      "sessionId": "dea3b781-0c80-427c-b8b7-c65c599bb680",
+      "ok": true,
+      "error": null,
+      "billedUsd": 0.07892745000000001,
+      "codaphUsd": 0.2142903,
+      "usage": {
+        "input": 15,
+        "cacheCreate": 37140,
+        "cacheRead": 154201,
+        "output": 1914,
+        "messages": 7
+      },
+      "numTurns": 5,
+      "durationMs": 22859,
+      "injected": true
+    },
+    {
+      "task": "resume-focus",
+      "arm": "off",
+      "rep": 1,
+      "sessionId": "142e2fe7-7be6-4bc3-9d42-3f66c196e401",
+      "ok": true,
+      "error": null,
+      "billedUsd": 0.07200435,
+      "codaphUsd": 0.20028615,
+      "usage": {
+        "input": 15,
+        "cacheCreate": 33813,
+        "cacheRead": 152458,
+        "output": 1847,
+        "messages": 7
+      },
+      "numTurns": 5,
+      "durationMs": 20454,
+      "injected": false
+    }
+  ],
+  "summary": {
+    "off": {
+      "runs": 1,
+      "meanBilledUsd": 0.07200435,
+      "meanCodaphUsd": 0.20028615,
+      "meanTokens": 188133,
+      "meanCacheRead": 152458,
+      "meanOutput": 1847,
+      "meanTurns": 5,
+      "meanDurationMs": 20454,
+      "injectedRate": 0,
+      "usage": {
+        "input": 15,
+        "cacheCreate": 33813,
+        "cacheRead": 152458,
+        "output": 1847,
+        "messages": 7
+      }
+    },
+    "on": {
+      "runs": 1,
+      "meanBilledUsd": 0.07892745000000001,
+      "meanCodaphUsd": 0.2142903,
+      "meanTokens": 193270,
+      "meanCacheRead": 154201,
+      "meanOutput": 1914,
+      "meanTurns": 5,
+      "meanDurationMs": 22859,
+      "injectedRate": 1,
+      "usage": {
+        "input": 15,
+        "cacheCreate": 37140,
+        "cacheRead": 154201,
+        "output": 1914,
+        "messages": 7
+      }
+    },
+    "savedPerSession": -0.006923100000000015,
+    "savedPct": -0.09614835770338898,
+    "savedTokens": -5137,
+    "savedTokensPct": -0.027305151143074316,
+    "perTask": [
+      {
+        "task": "resume-focus",
+        "offTok": 188133,
+        "onTok": 193270,
+        "tokDelta": -5137,
+        "offCost": 0.07200435,
+        "onCost": 0.07892745000000001,
+        "costDelta": -0.006923100000000015
+      }
+    ],
+    "okRuns": 2,
+    "totalRuns": 2
+  }
+}
