@@ -17,7 +17,11 @@ export interface ResolvedInjectionConfig {
 // smaller than the exploration it replaces to be net-positive on tokens.
 export const DEFAULT_INJECTION_CONFIG: ResolvedInjectionConfig = {
   enabled: false,
-  timeoutMs: 2500,
+  // The SessionStart digest fans out several Mubit retrievals and observed ~4-5s
+  // cold; 2500ms silently timed it out every session (injected nothing). 7000ms
+  // lets it land. Tradeoff: SessionStart blocks up to this long — a cached/async
+  // digest is the longer-term fix if the wait is felt.
+  timeoutMs: 7000,
   sessionStart: { enabled: true, maxTokens: 1500 },
   userPrompt: { enabled: true, maxTokens: 800, minLength: 24 },
   preToolUse: { mode: "off", maxTokens: 400, maxDenials: 8, tools: ["Read", "Grep", "Glob"] },

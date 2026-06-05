@@ -12,6 +12,7 @@ import {
   estimateTokens,
   extractContextBlockText,
   isActivityNarration,
+  isStructuredTrace,
   extractPromptAnswer,
   extractSnapshotText,
   extractStrategyLines,
@@ -94,6 +95,44 @@ describe("pure helpers", () => {
       "- The agent inspected the test suite.",
     ].join("\n");
     expect(distillFactsBlock(block)).toBe("");
+  });
+
+  it("flags raw event-stream traces / working-memory dumps as structured noise", () => {
+    expect(isStructuredTrace("item.completed [actor:anil]: The policy check reads a token file.")).toBe(true);
+    expect(isStructuredTrace("prompt.submitted [actor:anil]: Running bun report.ts")).toBe(true);
+    expect(isStructuredTrace('[Working Memory] ingest.text.abc = {"content":"x"}')).toBe(true);
+    expect(isStructuredTrace("ingest.text.03451934 = {\"content\":\"REPORT READY\"}")).toBe(true);
+    expect(isStructuredTrace('tool:Read {"file_path":"/x/policy.ts"}')).toBe(true);
+    expect(isStructuredTrace('{"file_path":"/x/policy.ts"}')).toBe(true);
+    expect(isStructuredTrace("File created successfully at /x/.codaph-fixture-token (file state is current in your context — no need to Read it back)")).toBe(true);
+    expect(isStructuredTrace("The file /x/policy.ts has been updated successfully.")).toBe(true);
+    // Durable facts / distilled lessons must survive.
+    expect(isStructuredTrace("Create a .codaph-fixture-token file containing CODAPH-OK before running.")).toBe(false);
+    expect(isStructuredTrace("The mirror lives in src/lib/mirror-jsonl.ts.")).toBe(false);
+  });
+
+  it("distils away activity traces + working-memory dumps, keeping the reflected lesson", () => {
+    // Mirrors the real noisy SessionStart digest: the actionable lesson buried
+    // under raw 'item.completed [actor:]' traces and a working-memory JSON blob.
+    const block = [
+      "### Lessons Learned",
+      "- Before modifying code to fix a failure, examine the validation logic; the gotcha was a required .codaph-fixture-token file containing CODAPH-OK.",
+      "### Current State",
+      '- [Working Memory] ingest.text.0345 = {"content":"item.completed [actor:anil]: [tool_result] REPORT READY","metadata":{"x":1}}',
+      "### Activity Traces",
+      "- item.completed [actor:anil]: The policy check reads `.codaph-fixture-token` and expects CODAPH-OK.",
+      '- item.completed [actor:anil]: tool:Read {"file_path":"/x/bench-fixture/lib/policy.ts"}',
+      "- prompt.submitted [actor:anil]: Running `bun bench-fixture/report.ts` currently fails.",
+    ].join("\n");
+    const out = distillFactsBlock(block);
+    expect(out).toContain("### Lessons Learned");
+    expect(out).toContain(".codaph-fixture-token");
+    expect(out).not.toContain("Activity Traces");
+    expect(out).not.toContain("Current State");
+    expect(out).not.toContain("Working Memory");
+    expect(out).not.toContain("item.completed");
+    expect(out).not.toContain("prompt.submitted");
+    expect(out).not.toContain("tool:Read");
   });
 
   it("extractContextBlockText strips narration and returns null when nothing durable remains", () => {
@@ -187,18 +226,21 @@ describe("buildSessionStartContext", () => {
     expect(out).toContain("Was wiring the SessionEnd hook.");
   });
 
-  it("on startup composes overview + snapshot + lessons", async () => {
+  it("on startup leads with actionable lessons, then project map + snapshot", async () => {
     const memory = makeMemory({
+      // Lessons now come from the gotchas query (synthesized, specific, imperative).
+      queryWithContextFallback: async () => ({
+        final_answer: "To make report.ts pass, create .codaph-fixture-token containing CODAPH-OK, then run it.",
+      }),
       getContextBlock: async () => ({ context_block: "Auth lives in src/auth; CLI in src/index.ts." }),
       inspectContextSnapshot: async () => ({ snapshot_summary: "Refactoring sync." }),
-      surfaceStrategies: async () => ({ strategies: [{ description: "Mubit writes are fail-open." }] }),
     });
     const out = await buildSessionStartContext(memory, "run:proj", "startup", ENABLED);
-    expect(out).toContain("Project overview");
+    expect(out).toContain("Lessons & gotchas");
+    expect(out).toContain("create .codaph-fixture-token containing CODAPH-OK");
+    expect(out).toContain("Project map");
     expect(out).toContain("Auth lives in src/auth");
     expect(out).toContain("Where recent work left off");
-    expect(out).toContain("Lessons & gotchas");
-    expect(out).toContain("Mubit writes are fail-open");
   });
 
   it("is fail-open: a rejecting Mubit call does not throw and other parts still render", async () => {
@@ -210,7 +252,7 @@ describe("buildSessionStartContext", () => {
     });
     const out = await buildSessionStartContext(memory, "run:proj", "startup", ENABLED);
     expect(out).toContain("Still have a snapshot.");
-    expect(out).not.toContain("Project overview");
+    expect(out).not.toContain("Project map");
   });
 });
 

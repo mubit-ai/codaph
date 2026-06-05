@@ -16,12 +16,14 @@ export interface InjectionPart {
   body: string;
 }
 
-// Shown atop every injection so the model treats memory as hints, not truth —
-// stale memory that is trusted blindly costs MORE tokens (chasing wrong leads).
+// Shown atop every injection. Framed to make the model ACT on the memory rather
+// than re-derive it: a hint that merely invites re-verification saves no tokens
+// (the agent re-explores anyway). We keep a light staleness caveat — trust the
+// CODE only where it conflicts — instead of a blanket "verify before relying",
+// which measurably pushes capable models back onto the expensive verify path.
 export const INJECTION_TRUST_HEADER =
-  "Codaph memory distilled from prior captured agent sessions on this project. " +
-  "Use it to avoid re-exploring — but verify against the current code before relying on specifics; " +
-  "it may be stale and does not necessarily reflect the latest state.";
+  "Project knowledge from past sessions on THIS codebase — apply it directly to skip rediscovering what is already known. " +
+  "Items aim to be specific and actionable. Only if a specific conflicts with what you see in the current code, trust the code.";
 
 // Generic, durable-facts query for the SessionStart project digest. Asks for
 // the things a developer needs to NOT rediscover: layout, conventions, decisions.
@@ -31,6 +33,17 @@ export const PROJECT_OVERVIEW_QUERY =
   "important conventions, and notable decisions. Do NOT narrate what past sessions did " +
   "(no 'the user explored…', 'the agent listed…'); state knowledge, not activity. " +
   "Prefer durable pointers over volatile detail.";
+
+// Retrieval for actionable lessons/gotchas. The whole value of a captured lesson
+// is its OPERATIVE SPECIFICS (exact paths, required file contents, commands,
+// flags, env vars, error strings) — reflection's prose summary tends to abstract
+// those away ("create the file with the required content"), so we query for the
+// verbatim specifics directly and demand imperative phrasing so the model acts.
+export const GOTCHAS_QUERY =
+  "List the concrete, actionable lessons and gotchas for working in THIS project that a developer would otherwise rediscover the hard way. " +
+  "For each, give the exact trigger and the exact fix, INCLUDING the precise specifics verbatim: file paths, required file contents, commands, flags, env vars, and error strings. " +
+  "Phrase each as an imperative directive (e.g. 'To make X pass, create file Y containing Z, then run W'). " +
+  "Do NOT generalize or omit the specific values — the exact values are the whole point. Do NOT narrate what past sessions did; state the actionable rule.";
 
 // ---------------------------------------------------------------------------
 // Pure helpers
@@ -107,6 +120,50 @@ export function isActivityNarration(text: string): boolean {
   return NARRATION_LEADING_VERB.test(t);
 }
 
+// Raw event-stream lines that leak into a retrieved context block from Mubit's
+// structured format — captured agent activity, not distilled knowledge:
+//   "item.completed [actor:anil]: …", "prompt.submitted [actor:anil]: …",
+//   "[Working Memory] ingest.text.abc = {…json…}", "tool:Read {…}".
+// They are verbatim session traces (often duplicated) that prevent zero
+// re-exploration yet ride in cache every turn — pure net-negative tax. The
+// reflected LESSON is what we want to keep; these traces bury it, so strip them.
+const EVENT_TRACE_PREFIX = /^(item|prompt|thread|tool|session|run|ingest)[.:]/i;
+const ACTOR_EVENT_MARKER = /\[actor:[^\]]*\]\s*:/i;
+
+/**
+ * True when a line is a raw captured-activity trace or a working-memory / JSON
+ * event dump (as opposed to a durable fact or a distilled lesson).
+ */
+export function isStructuredTrace(text: string): boolean {
+  const t = text.trim();
+  if (t.length === 0) {
+    return false;
+  }
+  if (/^\[(working memory|actor:|trace)/i.test(t)) {
+    return true; // "[Working Memory] …", "[actor:…] …"
+  }
+  if (ACTOR_EVENT_MARKER.test(t)) {
+    return true; // "item.completed [actor:anil]: …"
+  }
+  if (EVENT_TRACE_PREFIX.test(t)) {
+    return true; // "ingest.text… = {…}", "tool:Read …", "prompt.submitted…"
+  }
+  // A raw JSON object dump, or a "key = {"…"}" working-memory assignment.
+  if (/^\{.*\}$/.test(t) || /=\s*\{\s*"/.test(t)) {
+    return true;
+  }
+  // Captured tool-result echoes and Claude Code system-reminder text — verbatim
+  // session artifacts, not knowledge (e.g. "File created successfully at …",
+  // "(file state is current in your context — no need to Read it back)").
+  if (/^(file (created|updated|written|saved|modified)|the file .+ has been)/i.test(t)) {
+    return true;
+  }
+  if (/file state is current in your context|no need to read it back|<?system-reminder/i.test(t)) {
+    return true;
+  }
+  return false;
+}
+
 /**
  * Distil a retrieved Mubit context block down to durable, injectable facts:
  * drop (a) "(source: …, score: …)" citation noise, (b) activity-narration
@@ -133,7 +190,7 @@ export function distillFactsBlock(text: string): string {
     }
     const bullet = trimmed.match(/^([-*]|\d+[.)])\s+(.*)$/);
     const content = (bullet ? bullet[2] : trimmed).replace(/\s*\(source:[^)]*\)\s*$/i, "").trim();
-    if (content.length === 0 || isActivityNarration(content)) {
+    if (content.length === 0 || isActivityNarration(content) || isStructuredTrace(content)) {
       continue;
     }
     parsed.push({ kind: "content", text: bullet ? `- ${content}` : content });
@@ -414,9 +471,23 @@ export async function buildSessionStartContext(
       : null;
   }
 
-  // startup | clear (and any unknown source): full digest.
-  const overviewBudget = Math.max(200, Math.floor(budget * 0.6));
-  const [contextBlock, snapshot, strategies] = await Promise.all([
+  // startup | clear (and any unknown source): lead with actionable, specific
+  // lessons (the part that actually saves tokens), then the project map, then
+  // where work left off. The gotchas query synthesizes a directive answer with
+  // verbatim specifics; the overview is distilled durable facts.
+  const gotchasBudget = Math.max(200, Math.floor(budget * 0.5));
+  const overviewBudget = Math.max(200, Math.floor(budget * 0.4));
+  const [gotchas, contextBlock, snapshot] = await Promise.all([
+    safe(
+      memory.queryWithContextFallback({
+        runId: projectRunId,
+        query: GOTCHAS_QUERY,
+        limit: 8,
+        contextMaxTokenBudget: gotchasBudget,
+        includeLinkedRuns: true,
+        rankBy: "relevance",
+      }),
+    ),
     safe(
       memory.getContextBlock({
         runId: projectRunId,
@@ -427,21 +498,20 @@ export async function buildSessionStartContext(
       }),
     ),
     safe(memory.inspectContextSnapshot({ runId: projectRunId })),
-    safe(memory.surfaceStrategies({ runId: projectRunId, maxStrategies: 3 })),
   ]);
 
   const parts: InjectionPart[] = [];
+  const lessons = extractPromptAnswer(gotchas);
+  if (lessons && !isWeakAnswer(lessons)) {
+    parts.push({ heading: "Lessons & gotchas — apply these directly", body: lessons });
+  }
   const overview = extractContextBlockText(contextBlock);
   if (overview) {
-    parts.push({ heading: "Project overview (where things live)", body: overview });
+    parts.push({ heading: "Project map (where things live)", body: overview });
   }
   const recent = extractSnapshotText(snapshot);
   if (recent) {
     parts.push({ heading: "Where recent work left off", body: recent });
-  }
-  const lessons = extractStrategyLines(strategies, 3);
-  if (lessons.length > 0) {
-    parts.push({ heading: "Lessons & gotchas", body: lessons.join("\n") });
   }
 
   return formatInjection(parts, budget);
