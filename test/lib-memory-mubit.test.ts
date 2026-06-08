@@ -1230,4 +1230,52 @@ describe("memory-mubit", () => {
 
     expect(remembers.map((entry) => entry.lane)).toEqual(["reasoning", "tool", "summary", "event"]);
   });
+
+  it("archive/dereference map to control.archive/dereference with the expected payloads", async () => {
+    const archived: Array<Record<string, unknown>> = [];
+    const dereferenced: Array<Record<string, unknown>> = [];
+    const engine = new MubitMemoryEngine({
+      client: {
+        control: {
+          archive: async (payload?: Record<string, unknown>) => {
+            archived.push(payload ?? {});
+            return { reference_id: "ref-1" };
+          },
+          dereference: async (payload?: Record<string, unknown>) => {
+            dereferenced.push(payload ?? {});
+            return { content: "the exact file summary" };
+          },
+        },
+      },
+    });
+
+    const archiveResult = await engine.archive({
+      runId: "codaph:repo-abc",
+      content: "summary of src/foo.ts",
+      artifactKind: "file_summary",
+      labels: ["src/foo.ts", "sha:abc123"],
+      upsertKey: "src/foo.ts@abc123",
+    });
+    expect(archiveResult.reference_id).toBe("ref-1");
+    expect(archived).toHaveLength(1);
+    expect(archived[0]).toMatchObject({
+      run_id: "codaph:repo-abc",
+      content: "summary of src/foo.ts",
+      artifact_kind: "file_summary",
+      labels: ["src/foo.ts", "sha:abc123"],
+      upsert_key: "src/foo.ts@abc123",
+    });
+
+    const deref = await engine.dereference({ referenceId: "ref-1", runId: "codaph:repo-abc" });
+    expect(deref.content).toBe("the exact file summary");
+    expect(dereferenced[0]).toMatchObject({ reference_id: "ref-1", run_id: "codaph:repo-abc" });
+  });
+
+  it("archive/dereference fail open when the SDK lacks those control methods", async () => {
+    const engine = new MubitMemoryEngine({ client: { control: {} } });
+    const archiveResult = await engine.archive({ runId: "r", content: "c" });
+    expect(archiveResult.unsupported).toBe(true);
+    const deref = await engine.dereference({ referenceId: "ref-x" });
+    expect(deref.unsupported).toBe(true);
+  });
 });

@@ -32,12 +32,19 @@ export interface InjectionSettings {
   timeoutMs?: number | null;
   sessionStartEnabled?: boolean | null;
   sessionStartMaxTokens?: number | null;
+  // Include the "where things live" project overview in the SessionStart digest.
+  // Default OFF: the overview is lead-shaped (names paths → the agent reads MORE)
+  // and benchmarked net-negative; the recovery/lessons digest is the safe default.
+  sessionStartIncludeOverview?: boolean | null;
   userPromptEnabled?: boolean | null;
   userPromptMaxTokens?: number | null;
   userPromptMinLength?: number | null;
   preToolUseMode?: PreToolUseInjectionMode | null;
   preToolUseMaxTokens?: number | null;
   preToolUseMaxDenials?: number | null;
+  // Confidence thresholds in [0,1] for the PreToolUse gate (augment vs deny).
+  preToolUseMinConfidenceToAugment?: number | null;
+  preToolUseMinConfidenceToDeny?: number | null;
 }
 
 export interface ProjectSettings {
@@ -86,6 +93,10 @@ function asInteger(value: unknown): number | null {
     return null;
   }
   return Math.trunc(value);
+}
+
+function asFiniteNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
 function normalizeAgentProviders(value: unknown): AgentProviderId[] | null {
@@ -143,12 +154,15 @@ function normalizeInjectionSettings(value: unknown): InjectionSettings | null {
     timeoutMs: asInteger(record.timeoutMs),
     sessionStartEnabled: asBoolean(record.sessionStartEnabled),
     sessionStartMaxTokens: asInteger(record.sessionStartMaxTokens),
+    sessionStartIncludeOverview: asBoolean(record.sessionStartIncludeOverview),
     userPromptEnabled: asBoolean(record.userPromptEnabled),
     userPromptMaxTokens: asInteger(record.userPromptMaxTokens),
     userPromptMinLength: asInteger(record.userPromptMinLength),
     preToolUseMode: normalizePreToolUseMode(record.preToolUseMode),
     preToolUseMaxTokens: asInteger(record.preToolUseMaxTokens),
     preToolUseMaxDenials: asInteger(record.preToolUseMaxDenials),
+    preToolUseMinConfidenceToAugment: asFiniteNumber(record.preToolUseMinConfidenceToAugment),
+    preToolUseMinConfidenceToDeny: asFiniteNumber(record.preToolUseMinConfidenceToDeny),
   };
 }
 

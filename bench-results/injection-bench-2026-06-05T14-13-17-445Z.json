@@ -1,0 +1,241 @@
+{
+  "model": "claude-sonnet-4-6",
+  "reps": 2,
+  "arms": [
+    "off",
+    "pretool-shortcircuit"
+  ],
+  "rows": [
+    {
+      "task": "circuit-threshold",
+      "arm": "pretool-shortcircuit",
+      "rep": 1,
+      "sessionId": "1463568e-bb97-469b-b9cd-d67286c64856",
+      "ok": true,
+      "error": null,
+      "billedUsd": 0.1806585,
+      "codaphUsd": 0.3927915,
+      "usage": {
+        "input": 14,
+        "cacheCreate": 87094,
+        "cacheRead": 148140,
+        "output": 1447,
+        "messages": 8
+      },
+      "numTurns": 6,
+      "durationMs": 35243,
+      "injected": true
+    },
+    {
+      "task": "circuit-threshold",
+      "arm": "off",
+      "rep": 1,
+      "sessionId": "9ae001de-5477-44ab-a864-8c06763bc989",
+      "ok": true,
+      "error": null,
+      "billedUsd": 0.043777949999999996,
+      "codaphUsd": 0.06629954999999998,
+      "usage": {
+        "input": 11,
+        "cacheCreate": 2501,
+        "cacheRead": 137976,
+        "output": 1033,
+        "messages": 5
+      },
+      "numTurns": 3,
+      "durationMs": 15713,
+      "injected": false
+    },
+    {
+      "task": "circuit-threshold",
+      "arm": "off",
+      "rep": 2,
+      "sessionId": "42f20b7e-dee3-492f-93fa-5719c7754134",
+      "ok": true,
+      "error": null,
+      "billedUsd": 0.03967395,
+      "codaphUsd": 0.06273555,
+      "usage": {
+        "input": 11,
+        "cacheCreate": 1573,
+        "cacheRead": 137596,
+        "output": 1035,
+        "messages": 5
+      },
+      "numTurns": 3,
+      "durationMs": 14872,
+      "injected": false
+    },
+    {
+      "task": "circuit-threshold",
+      "arm": "pretool-shortcircuit",
+      "rep": 2,
+      "sessionId": "ab59c595-81ea-457c-be8f-71893a308937",
+      "ok": true,
+      "error": null,
+      "billedUsd": 0.08048385,
+      "codaphUsd": 0.10300545,
+      "usage": {
+        "input": 14,
+        "cacheCreate": 3887,
+        "cacheRead": 226374,
+        "output": 1365,
+        "messages": 8
+      },
+      "numTurns": 6,
+      "durationMs": 35010,
+      "injected": true
+    },
+    {
+      "task": "dedup-index",
+      "arm": "off",
+      "rep": 1,
+      "sessionId": "9c26258a-6d67-45e1-9396-c50e3f803d64",
+      "ok": true,
+      "error": null,
+      "billedUsd": 0.07533735,
+      "codaphUsd": 0.15630015,
+      "usage": {
+        "input": 10,
+        "cacheCreate": 31573,
+        "cacheRead": 83438,
+        "output": 856,
+        "messages": 4
+      },
+      "numTurns": 2,
+      "durationMs": 13030,
+      "injected": false
+    },
+    {
+      "task": "dedup-index",
+      "arm": "pretool-shortcircuit",
+      "rep": 1,
+      "sessionId": "c9ccebbe-4e4f-4a30-a0e4-122f98877374",
+      "ok": true,
+      "error": null,
+      "billedUsd": 0.0753429,
+      "codaphUsd": 0.1366491,
+      "usage": {
+        "input": 13,
+        "cacheCreate": 12968,
+        "cacheRead": 194967,
+        "output": 1966,
+        "messages": 7
+      },
+      "numTurns": 4,
+      "durationMs": 30673,
+      "injected": true
+    },
+    {
+      "task": "dedup-index",
+      "arm": "pretool-shortcircuit",
+      "rep": 2,
+      "sessionId": "0257d77b-e86c-4bc0-a8dc-cb6f1a53a762",
+      "ok": true,
+      "error": null,
+      "billedUsd": 0.0473199,
+      "codaphUsd": 0.1054005,
+      "usage": {
+        "input": 13,
+        "cacheCreate": 3972,
+        "cacheRead": 192205,
+        "output": 2187,
+        "messages": 7
+      },
+      "numTurns": 4,
+      "durationMs": 31951,
+      "injected": false
+    },
+    {
+      "task": "dedup-index",
+      "arm": "off",
+      "rep": 2,
+      "sessionId": "38b25626-e048-4876-a169-7eb97627828a",
+      "ok": true,
+      "error": null,
+      "billedUsd": 0.05258565,
+      "codaphUsd": 0.07503705,
+      "usage": {
+        "input": 12,
+        "cacheCreate": 1819,
+        "cacheRead": 166016,
+        "output": 1225,
+        "messages": 6
+      },
+      "numTurns": 4,
+      "durationMs": 19756,
+      "injected": false
+    }
+  ],
+  "summary": {
+    "baseline": "off",
+    "arms": [
+      {
+        "arm": "off",
+        "runs": 4,
+        "meanBilledUsd": 0.052843724999999994,
+        "meanTokens": 141671.25,
+        "meanCacheRead": 131256.5,
+        "meanOutput": 1037.25,
+        "meanTurns": 3,
+        "meanDurationMs": 15842.75,
+        "injectedRate": 0,
+        "savedTokens": 0,
+        "savedTokensPct": 0,
+        "savedPerSession": 0,
+        "savedPct": 0
+      },
+      {
+        "arm": "pretool-shortcircuit",
+        "runs": 4,
+        "meanBilledUsd": 0.09595128749999998,
+        "meanTokens": 219156.5,
+        "meanCacheRead": 190421.5,
+        "meanOutput": 1741.25,
+        "meanTurns": 5,
+        "meanDurationMs": 33219.25,
+        "injectedRate": 0.75,
+        "savedTokens": -77485.25,
+        "savedTokensPct": -0.5469370108614133,
+        "savedPerSession": -0.04310756249999999,
+        "savedPct": -0.8157555603811047
+      }
+    ],
+    "perTask": [
+      {
+        "task": "circuit-threshold",
+        "offTok": 140868,
+        "byArm": {
+          "off": {
+            "tokens": 140868,
+            "tokDelta": 0,
+            "cost": 0.04172595
+          },
+          "pretool-shortcircuit": {
+            "tokens": 234167.5,
+            "tokDelta": -93299.5,
+            "cost": 0.13057117499999998
+          }
+        }
+      },
+      {
+        "task": "dedup-index",
+        "offTok": 142474.5,
+        "byArm": {
+          "off": {
+            "tokens": 142474.5,
+            "tokDelta": 0,
+            "cost": 0.0639615
+          },
+          "pretool-shortcircuit": {
+            "tokens": 204145.5,
+            "tokDelta": -61671,
+            "cost": 0.0613314
+          }
+        }
+      }
+    ],
+    "okRuns": 8,
+    "totalRuns": 8
+  }
+}

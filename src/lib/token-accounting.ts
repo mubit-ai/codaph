@@ -150,6 +150,188 @@ export function parseTranscriptUsage(content: string): TranscriptUsage {
   return { totals, byModel, lastTimestamp, gitBranch, cwd, sessionId };
 }
 
+// Which agent produced a transcript — selects the right usage parser. Their
+// on-disk formats and token-usage shapes differ, but all normalise to the same
+// TranscriptUsage so downstream cohort/cost code is provider-agnostic.
+export type TranscriptProvider = "claude" | "codex" | "gemini";
+
+// --- Codex (OpenAI) transcripts ---------------------------------------------
+//
+// Codex persists sessions as JSONL rollouts under ~/.codex/sessions/**. Token
+// usage rides on `event_msg` lines whose payload.type is "token_count":
+// payload.info carries a CUMULATIVE `total_token_usage` shaped
+//   { input_tokens, cached_input_tokens, output_tokens, reasoning_output_tokens, total_tokens }
+// where input_tokens INCLUDES the cached subset and output_tokens INCLUDES
+// reasoning (verified on real rollouts: input + output == total). We take the
+// final cumulative total as the session total and map it onto TokenUsage:
+//   cacheRead   = cached_input_tokens     (discounted, reused prompt)
+//   input       = input_tokens − cached   (fresh, full-price prompt)
+//   output      = output_tokens           (incl. reasoning)
+//   cacheCreate = 0                       (OpenAI bills no separate cache-write line)
+export function parseCodexTranscriptUsage(content: string): TranscriptUsage {
+  const totals = emptyUsage();
+  const byModel: Record<string, TokenUsage> = {};
+  let lastTimestamp: string | null = null;
+  let cwd: string | null = null;
+  let sessionId: string | null = null;
+  let model: string | null = null;
+  let cumulative: { input: number; cached: number; output: number } | null = null;
+  let turns = 0;
+
+  for (const rawLine of content.split("\n")) {
+    const line = rawLine.trim();
+    if (line.length === 0) {
+      continue;
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const obj = asRecord(parsed);
+    if (!obj) {
+      continue;
+    }
+    const ts = asNonEmptyString(obj.timestamp);
+    if (ts && (lastTimestamp === null || ts > lastTimestamp)) {
+      lastTimestamp = ts;
+    }
+    const payload = asRecord(obj.payload);
+    // cwd + model live on turn_context payloads; id on session_meta. Best-effort.
+    cwd = asNonEmptyString(payload?.cwd) ?? cwd;
+    model = asNonEmptyString(payload?.model) ?? model;
+    sessionId = asNonEmptyString(payload?.id) ?? asNonEmptyString(payload?.session_id) ?? sessionId;
+
+    if (obj.type === "event_msg" && payload?.type === "token_count") {
+      const info = asRecord(payload.info);
+      const total = asRecord(info?.total_token_usage);
+      if (total) {
+        cumulative = {
+          input: toFiniteNumber(total.input_tokens),
+          cached: toFiniteNumber(total.cached_input_tokens),
+          output: toFiniteNumber(total.output_tokens),
+        };
+      }
+      if (asRecord(info?.last_token_usage)) {
+        turns += 1;
+      }
+    }
+  }
+
+  if (cumulative) {
+    totals.cacheRead = cumulative.cached;
+    totals.input = Math.max(0, cumulative.input - cumulative.cached);
+    totals.output = cumulative.output;
+    totals.cacheCreate = 0;
+    totals.messages = turns;
+    byModel[model ?? "unknown"] = { ...totals };
+  }
+
+  return { totals, byModel, lastTimestamp, gitBranch: null, cwd, sessionId };
+}
+
+// --- Gemini CLI transcripts -------------------------------------------------
+//
+// Gemini logs (JSON or JSONL under ~/.gemini) attach a `usageMetadata` (or
+// snake_case `usage_metadata`) object to each model response, shaped
+//   { promptTokenCount, candidatesTokenCount, cachedContentTokenCount,
+//     thoughtsTokenCount, totalTokenCount }
+// PER response (not cumulative), so we sum across every occurrence found by
+// walking the parsed structure. Mapping mirrors the Codex one:
+//   cacheRead = cachedContentTokenCount
+//   input     = promptTokenCount − cached
+//   output    = candidatesTokenCount + thoughtsTokenCount  (reasoning billed as output)
+// Best-effort: no on-disk sample was available to verify, so it reads only the
+// fields it knows and skips anything malformed.
+function collectGeminiUsage(node: unknown, into: TokenUsage): void {
+  if (Array.isArray(node)) {
+    for (const child of node) {
+      collectGeminiUsage(child, into);
+    }
+    return;
+  }
+  const rec = asRecord(node);
+  if (!rec) {
+    return;
+  }
+  const usage = asRecord(rec.usageMetadata) ?? asRecord(rec.usage_metadata);
+  if (usage) {
+    const prompt = toFiniteNumber(usage.promptTokenCount ?? usage.prompt_token_count);
+    const cached = toFiniteNumber(usage.cachedContentTokenCount ?? usage.cached_content_token_count);
+    const candidates = toFiniteNumber(usage.candidatesTokenCount ?? usage.candidates_token_count);
+    const thoughts = toFiniteNumber(usage.thoughtsTokenCount ?? usage.thoughts_token_count);
+    into.cacheRead += cached;
+    into.input += Math.max(0, prompt - cached);
+    into.output += candidates + thoughts;
+    into.messages += 1;
+  }
+  for (const value of Object.values(rec)) {
+    if (typeof value === "object" && value !== null) {
+      collectGeminiUsage(value, into);
+    }
+  }
+}
+
+export function parseGeminiTranscriptUsage(content: string): TranscriptUsage {
+  const totals = emptyUsage();
+  const byModel: Record<string, TokenUsage> = {};
+  let lastTimestamp: string | null = null;
+  let cwd: string | null = null;
+  let sessionId: string | null = null;
+  let model: string | null = null;
+
+  // Gemini logs are sometimes one JSON document, sometimes JSONL. Try the whole
+  // thing first; fall back to per-line parsing.
+  const nodes: unknown[] = [];
+  try {
+    nodes.push(JSON.parse(content));
+  } catch {
+    for (const rawLine of content.split("\n")) {
+      const line = rawLine.trim();
+      if (line.length === 0) {
+        continue;
+      }
+      try {
+        nodes.push(JSON.parse(line));
+      } catch {
+        // skip malformed line
+      }
+    }
+  }
+
+  for (const node of nodes) {
+    collectGeminiUsage(node, totals);
+    const rec = asRecord(node);
+    if (rec) {
+      cwd = asNonEmptyString(rec.cwd) ?? asNonEmptyString(rec.projectRoot) ?? cwd;
+      sessionId = asNonEmptyString(rec.sessionId) ?? asNonEmptyString(rec.session_id) ?? sessionId;
+      model = asNonEmptyString(rec.model) ?? model;
+      const ts = asNonEmptyString(rec.timestamp) ?? asNonEmptyString(rec.ts);
+      if (ts && (lastTimestamp === null || ts > lastTimestamp)) {
+        lastTimestamp = ts;
+      }
+    }
+  }
+
+  if (totals.messages > 0) {
+    byModel[model ?? "unknown"] = { ...totals };
+  }
+  return { totals, byModel, lastTimestamp, gitBranch: null, cwd, sessionId };
+}
+
+/** Parse a transcript's token usage using the parser for its producing agent. */
+export function parseTranscriptUsageForProvider(content: string, provider: TranscriptProvider): TranscriptUsage {
+  switch (provider) {
+    case "codex":
+      return parseCodexTranscriptUsage(content);
+    case "gemini":
+      return parseGeminiTranscriptUsage(content);
+    default:
+      return parseTranscriptUsage(content);
+  }
+}
+
 /** Resolve the price for a model id: exact match, then case-insensitive substring. */
 export function resolveModelPrice(model: string, table: PriceTable = DEFAULT_PRICE_TABLE): ModelPrice | null {
   if (table[model]) {

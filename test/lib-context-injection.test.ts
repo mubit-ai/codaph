@@ -12,6 +12,8 @@ import {
   estimateTokens,
   extractContextBlockText,
   isActivityNarration,
+  isBarePathBullet,
+  isCoveredByClaudeMd,
   extractPromptAnswer,
   extractSnapshotText,
   extractStrategyLines,
@@ -131,6 +133,38 @@ describe("pure helpers", () => {
     expect(extractStrategyLines({})).toEqual([]);
   });
 
+  it("confidence-gates strategy lines by supporting_lesson_count when minSupport > 0", () => {
+    const strategies = {
+      strategies: [
+        { description: "reinforced", supporting_lesson_count: 3 },
+        { description: "one-off", supporting_lesson_count: 1 },
+        { description: "no-support" },
+        { description: "camel", supportingLessonCount: 2 },
+      ],
+    };
+    expect(extractStrategyLines(strategies, 5, 2)).toEqual(["- reinforced", "- camel"]);
+    // minSupport 0 (default) keeps all.
+    expect(extractStrategyLines(strategies, 5)).toHaveLength(4);
+  });
+
+  it("isBarePathBullet flags lead-only paths but keeps paths with a claim", () => {
+    expect(isBarePathBullet("src/foo.ts")).toBe(true);
+    expect(isBarePathBullet("src/lib/bar.ts:")).toBe(true);
+    expect(isBarePathBullet("package.json")).toBe(true);
+    expect(isBarePathBullet("src/foo.ts owns the fail-open circuit")).toBe(false);
+    expect(isBarePathBullet("Redaction lives in src/lib/security.ts")).toBe(false);
+    expect(isBarePathBullet("It uses sha256 hashing.")).toBe(false);
+  });
+
+  it("isCoveredByClaudeMd suppresses bullets the agent already has", () => {
+    const claudeMd = "The ingest pipeline writes to a local JSONL mirror and Mubit cloud memory.";
+    expect(isCoveredByClaudeMd("The ingest pipeline writes to the JSONL mirror and Mubit memory.", claudeMd)).toBe(true);
+    expect(isCoveredByClaudeMd("Authentication uses bcrypt password hashing rounds.", claudeMd)).toBe(false);
+    expect(isCoveredByClaudeMd("anything", null)).toBe(false);
+    // Too few significant terms → never considered covered (avoids over-suppression).
+    expect(isCoveredByClaudeMd("the mirror", claudeMd)).toBe(false);
+  });
+
   it("identifies weak answers and extracts prompt answers", () => {
     expect(isWeakAnswer("I do not know.")).toBe(true);
     expect(isWeakAnswer("")).toBe(true);
@@ -164,6 +198,33 @@ describe("pure helpers", () => {
     const parsed = JSON.parse(buildHookOutput("SessionStart", "ctx"));
     expect(parsed).toEqual({ hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: "ctx" } });
   });
+
+  it("emits per-agent context-injection shapes (claude/codex identical, gemini omits hookEventName)", () => {
+    const claude = JSON.parse(buildHookOutput("SessionStart", "ctx", "claude"));
+    const codex = JSON.parse(buildHookOutput("SessionStart", "ctx", "codex"));
+    expect(codex).toEqual(claude); // Codex shares Claude's contract
+    expect(claude.hookSpecificOutput.hookEventName).toBe("SessionStart");
+
+    const gemini = JSON.parse(buildHookOutput("SessionStart", "ctx", "gemini"));
+    expect(gemini).toEqual({ hookSpecificOutput: { additionalContext: "ctx" } });
+    expect(gemini.hookSpecificOutput.hookEventName).toBeUndefined();
+  });
+
+  it("emits per-agent pre-tool shapes (gemini uses top-level decision/reason)", () => {
+    const deny = { kind: "deny" as const, text: "auth in src/auth" };
+    const claudeDeny = JSON.parse(buildPreToolHookOutput(deny, "claude"));
+    expect(claudeDeny.hookSpecificOutput.permissionDecision).toBe("deny");
+    expect(JSON.parse(buildPreToolHookOutput(deny, "codex"))).toEqual(claudeDeny);
+
+    const geminiDeny = JSON.parse(buildPreToolHookOutput(deny, "gemini"));
+    expect(geminiDeny.decision).toBe("deny");
+    expect(geminiDeny.reason).toContain("auth in src/auth");
+    expect(geminiDeny.hookSpecificOutput).toBeUndefined();
+
+    const geminiAug = JSON.parse(buildPreToolHookOutput({ kind: "augment", text: "hint" }, "gemini"));
+    expect(geminiAug.hookSpecificOutput.additionalContext).toContain("hint");
+    expect(geminiAug.hookSpecificOutput.hookEventName).toBeUndefined();
+  });
 });
 
 describe("buildSessionStartContext", () => {
@@ -173,7 +234,10 @@ describe("buildSessionStartContext", () => {
   });
 
   it("returns null when sessionStart is disabled", async () => {
-    const config: ResolvedInjectionConfig = { ...ENABLED, sessionStart: { enabled: false, maxTokens: 1500 } };
+    const config: ResolvedInjectionConfig = {
+      ...ENABLED,
+      sessionStart: { enabled: false, maxTokens: 1500, includeOverview: false },
+    };
     const out = await buildSessionStartContext(makeMemory(), "run:proj", "startup", config);
     expect(out).toBeNull();
   });
@@ -187,28 +251,60 @@ describe("buildSessionStartContext", () => {
     expect(out).toContain("Was wiring the SessionEnd hook.");
   });
 
-  it("on startup composes overview + snapshot + lessons", async () => {
+  it("by DEFAULT injects NOTHING on a fresh startup (do-no-harm; live A/B showed a blind digest is net-negative)", async () => {
     const memory = makeMemory({
-      getContextBlock: async () => ({ context_block: "Auth lives in src/auth; CLI in src/index.ts." }),
-      inspectContextSnapshot: async () => ({ snapshot_summary: "Refactoring sync." }),
-      surfaceStrategies: async () => ({ strategies: [{ description: "Mubit writes are fail-open." }] }),
+      // Nothing should even be queried on a default fresh start.
+      getContextBlock: async () => {
+        throw new Error("must not query on default startup");
+      },
+      inspectContextSnapshot: async () => {
+        throw new Error("must not query on default startup");
+      },
+      surfaceStrategies: async () => {
+        throw new Error("must not query on default startup");
+      },
     });
-    const out = await buildSessionStartContext(memory, "run:proj", "startup", ENABLED);
+    expect(await buildSessionStartContext(memory, "run:proj", "startup", ENABLED)).toBeNull();
+  });
+
+  it("with includeOverview on, composes overview (pruning bare paths + CLAUDE.md-covered) + snapshot + lessons", async () => {
+    const config: ResolvedInjectionConfig = {
+      ...ENABLED,
+      sessionStart: { ...ENABLED.sessionStart, includeOverview: true },
+    };
+    const memory = makeMemory({
+      getContextBlock: async () => ({
+        context_block: [
+          "- Auth lives in src/auth and is verified at startup.",
+          "- src/index.ts", // bare path lead → dropped
+          "- The ingest pipeline writes to the JSONL mirror and Mubit memory.", // covered by CLAUDE.md → dropped
+        ].join("\n"),
+      }),
+      inspectContextSnapshot: async () => ({ snapshot_summary: "Refactoring sync." }),
+      surfaceStrategies: async () => ({ strategies: [{ description: "Mubit writes are fail-open.", supporting_lesson_count: 4 }] }),
+    });
+    const claudeMd = "The ingest pipeline writes to a local JSONL mirror and Mubit cloud memory.";
+    const out = await buildSessionStartContext(memory, "run:proj", "startup", config, claudeMd);
     expect(out).toContain("Project overview");
     expect(out).toContain("Auth lives in src/auth");
+    expect(out).not.toContain("- src/index.ts"); // bare-path lead pruned
+    expect(out).not.toContain("ingest pipeline writes"); // CLAUDE.md-covered pruned
     expect(out).toContain("Where recent work left off");
-    expect(out).toContain("Lessons & gotchas");
     expect(out).toContain("Mubit writes are fail-open");
   });
 
-  it("is fail-open: a rejecting Mubit call does not throw and other parts still render", async () => {
+  it("is fail-open: a rejecting overview query does not throw and other parts still render", async () => {
+    const config: ResolvedInjectionConfig = {
+      ...ENABLED,
+      sessionStart: { ...ENABLED.sessionStart, includeOverview: true },
+    };
     const memory = makeMemory({
       getContextBlock: async () => {
         throw new Error("network down");
       },
       inspectContextSnapshot: async () => ({ snapshot_summary: "Still have a snapshot." }),
     });
-    const out = await buildSessionStartContext(memory, "run:proj", "startup", ENABLED);
+    const out = await buildSessionStartContext(memory, "run:proj", "startup", config);
     expect(out).toContain("Still have a snapshot.");
     expect(out).not.toContain("Project overview");
   });
@@ -276,15 +372,57 @@ describe("PreToolUse helpers", () => {
   });
 
   it("short-circuits search tools once, then falls back to augment (loop guard + cap)", () => {
-    const base = { mode: "shortcircuit" as const, answer: "auth in src/auth", maxDenials: 2 };
-    // fresh grep → deny
+    // High confidence + fresh target + shortcircuit are required to deny.
+    const base = {
+      mode: "shortcircuit" as const,
+      answer: "auth in src/auth",
+      confidence: 0.9,
+      fileFresh: true,
+      minConfidenceToAugment: 0.6,
+      minConfidenceToDeny: 0.8,
+      maxDenials: 2,
+    };
+    // fresh, confident grep → deny
     expect(decidePreToolAction({ ...base, toolName: "Grep", alreadyDenied: false, denialCount: 0 }).kind).toBe("deny");
     // same signature already denied → augment (don't loop)
     expect(decidePreToolAction({ ...base, toolName: "Grep", alreadyDenied: true, denialCount: 1 }).kind).toBe("augment");
     // denial cap reached → augment
     expect(decidePreToolAction({ ...base, toolName: "Glob", alreadyDenied: false, denialCount: 2 }).kind).toBe("augment");
-    // Read is never denied even in shortcircuit mode
-    expect(decidePreToolAction({ ...base, toolName: "Read", alreadyDenied: false, denialCount: 0 }).kind).toBe("augment");
+    // Read is left ALONE in shortcircuit (live A/B proved deny AND augment on
+    // reads both backfire) — neither denied nor augmented, even when fresh+confident.
+    expect(decidePreToolAction({ ...base, toolName: "Read", alreadyDenied: false, denialCount: 0 }).kind).toBe("allow");
+  });
+
+  it("deny is fenced by confidence, freshness, and regret-backoff", () => {
+    const base = {
+      mode: "shortcircuit" as const,
+      toolName: "Grep",
+      answer: "auth in src/auth",
+      minConfidenceToAugment: 0.6,
+      minConfidenceToDeny: 0.8,
+      alreadyDenied: false,
+      denialCount: 0,
+      maxDenials: 8,
+    };
+    // not fresh → augment, not deny
+    expect(decidePreToolAction({ ...base, confidence: 0.9, fileFresh: false }).kind).toBe("augment");
+    // freshness unknown (null, the Phase 2.2 default) → augment, not deny
+    expect(decidePreToolAction({ ...base, confidence: 0.9, fileFresh: null }).kind).toBe("augment");
+    // confidence below deny threshold → augment
+    expect(decidePreToolAction({ ...base, confidence: 0.7, fileFresh: true }).kind).toBe("augment");
+    // confidence unknown → can't deny
+    expect(decidePreToolAction({ ...base, confidence: null, fileFresh: true }).kind).toBe("augment");
+    // all gates pass → deny
+    expect(decidePreToolAction({ ...base, confidence: 0.85, fileFresh: true }).kind).toBe("deny");
+    // a prior regret backs off deny even when all else passes
+    expect(decidePreToolAction({ ...base, confidence: 0.85, fileFresh: true, denyBackoff: true }).kind).toBe("augment");
+  });
+
+  it("confidence gate drops a known-low-confidence answer entirely (augment mode)", () => {
+    const base = { mode: "augment" as const, toolName: "Grep", answer: "maybe src/auth", minConfidenceToAugment: 0.6, alreadyDenied: false, denialCount: 0, maxDenials: 8 };
+    expect(decidePreToolAction({ ...base, confidence: 0.4 }).kind).toBe("allow"); // dropped
+    expect(decidePreToolAction({ ...base, confidence: 0.8 }).kind).toBe("augment");
+    expect(decidePreToolAction({ ...base, confidence: null }).kind).toBe("augment"); // unknown → fall back to augment
   });
 
   it("renders hook output per decision kind", () => {
@@ -300,9 +438,19 @@ describe("PreToolUse helpers", () => {
     expect(deny.hookSpecificOutput.permissionDecisionReason).toContain("re-issue");
   });
 
-  it("fetchToolMemoryAnswer returns a clamped answer, null on weak/error", async () => {
-    const ok = makeMemory({ queryWithContextFallback: async () => ({ final_answer: "lives in src/auth/index.ts" }) });
-    expect(await fetchToolMemoryAnswer(ok, "run:proj", "where is auth?", 400)).toContain("src/auth");
+  it("fetchToolMemoryAnswer returns {answer, confidence}, null on weak/error", async () => {
+    const ok = makeMemory({
+      queryWithContextFallback: async () => ({ final_answer: "lives in src/auth/index.ts", confidence: 0.82 }),
+    });
+    const got = await fetchToolMemoryAnswer(ok, "run:proj", "where is auth?", 400);
+    expect(got?.answer).toContain("src/auth");
+    expect(got?.confidence).toBeCloseTo(0.82, 6);
+
+    // No top-level confidence → mean of evidence scores.
+    const viaEvidence = makeMemory({
+      queryWithContextFallback: async () => ({ final_answer: "in src/x", evidence: [{ score: 0.4 }, { score: 0.6 }] }),
+    });
+    expect((await fetchToolMemoryAnswer(viaEvidence, "run:proj", "where?", 400))?.confidence).toBeCloseTo(0.5, 6);
 
     const weak = makeMemory({ queryWithContextFallback: async () => ({ final_answer: "unknown" }) });
     expect(await fetchToolMemoryAnswer(weak, "run:proj", "where?", 400)).toBeNull();

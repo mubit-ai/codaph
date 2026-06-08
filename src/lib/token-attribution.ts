@@ -240,3 +240,110 @@ export function attributeContextCost(content: string, priceTable: PriceTable = D
     unpriced: price === null,
   };
 }
+
+// ---------------------------------------------------------------------------
+// Cross-session aggregation
+// ---------------------------------------------------------------------------
+//
+// A single session's attribution shows what cost THIS run. Aggregating across
+// many sessions answers the question that actually drives optimisation: which
+// (tool, target) pairs are read OVER AND OVER, paying the compounding tax every
+// time? Those recurring offloadable targets — a config file every session reads,
+// a wide grep everyone runs — are the prime candidates to cache a summary for
+// (Phase 2.3 offloading), because a cached summary amortises across every future
+// session that would otherwise re-read the bulk.
+
+export interface AggregateTargetDriver {
+  toolName: string;
+  target: string | null; // file path / pattern / command
+  sessions: number; // distinct sessions this (tool,target) appeared in
+  occurrences: number; // total tool calls across all sessions
+  resultTokens: number; // summed result tokens
+  totalUsd: number; // summed compounding tax (write + re-read) across sessions
+  offloadable: boolean; // true if the tool's result is exploration a summary could replace
+}
+
+export interface AggregateAttribution {
+  sessions: number; // number of session attributions aggregated
+  assistantTurns: number; // summed across sessions
+  toolResults: number; // summed across sessions
+  totalResultTokens: number; // summed across sessions
+  attributableUsd: number; // summed compounding tax across sessions
+  offloadableUsd: number; // summed offloadable tax across sessions
+  cacheReadUsdActual: number; // summed actual cache-read cost (grounding)
+  cacheWriteUsdActual: number; // summed actual cache-write cost
+  unpriced: boolean; // true when any aggregated session was unpriced
+  targets: AggregateTargetDriver[]; // recurring (tool,target) pairs, sorted desc by totalUsd
+}
+
+// Group key for a (tool, target) pair. NUL-separated so a tool name and target
+// can't collide across the boundary.
+function targetKey(toolName: string, target: string | null): string {
+  return `${toolName.toLowerCase()} ${target ?? ""}`;
+}
+
+/**
+ * Aggregate per-session attributions into cross-session totals and a ranking of
+ * the recurring (tool, target) pairs that drive the most compounding tax. The
+ * ranking is the offload work-list: high `totalUsd` + high `sessions` = a target
+ * whose summary, cached once, pays back on every future session.
+ */
+export function aggregateAttributions(attributions: ContextAttribution[]): AggregateAttribution {
+  const agg: AggregateAttribution = {
+    sessions: attributions.length,
+    assistantTurns: 0,
+    toolResults: 0,
+    totalResultTokens: 0,
+    attributableUsd: 0,
+    offloadableUsd: 0,
+    cacheReadUsdActual: 0,
+    cacheWriteUsdActual: 0,
+    unpriced: false,
+    targets: [],
+  };
+
+  const byTarget = new Map<string, AggregateTargetDriver>();
+  for (const a of attributions) {
+    agg.assistantTurns += a.assistantTurns;
+    agg.toolResults += a.toolResults;
+    agg.totalResultTokens += a.totalResultTokens;
+    agg.attributableUsd += a.attributableUsd;
+    agg.offloadableUsd += a.offloadableUsd;
+    agg.cacheReadUsdActual += a.cacheReadUsdActual;
+    agg.cacheWriteUsdActual += a.cacheWriteUsdActual;
+    if (a.unpriced) {
+      agg.unpriced = true;
+    }
+    // Count each (tool,target) at most once toward `sessions` per attribution.
+    const seenThisSession = new Set<string>();
+    for (const d of a.drivers) {
+      const key = targetKey(d.toolName, d.target);
+      let entry = byTarget.get(key);
+      if (!entry) {
+        entry = {
+          toolName: d.toolName,
+          target: d.target,
+          sessions: 0,
+          occurrences: 0,
+          resultTokens: 0,
+          totalUsd: 0,
+          offloadable: d.offloadable,
+        };
+        byTarget.set(key, entry);
+      }
+      entry.occurrences += 1;
+      entry.resultTokens += d.resultTokens;
+      entry.totalUsd += d.totalUsd;
+      entry.offloadable = entry.offloadable || d.offloadable;
+      if (!seenThisSession.has(key)) {
+        seenThisSession.add(key);
+        entry.sessions += 1;
+      }
+    }
+  }
+
+  agg.targets = [...byTarget.values()].sort(
+    (x, y) => y.totalUsd - x.totalUsd || y.sessions - x.sessions || y.resultTokens - x.resultTokens,
+  );
+  return agg;
+}

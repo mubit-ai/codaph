@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   attributeContextCost,
+  aggregateAttributions,
   toolResultContentToText,
   toolTarget,
 } from "../src/lib/token-attribution";
+import type { ContextAttribution, ContextCostDriver } from "../src/lib/token-attribution";
 import type { PriceTable } from "../src/lib/token-accounting";
 
 // Deterministic prices: cache-write 10/M, cache-read 1/M (others 0). "test"
@@ -121,5 +123,95 @@ describe("attributeContextCost", () => {
     const a = attributeContextCost(t, PRICE);
     expect(a?.unpriced).toBe(true);
     expect(a?.cacheReadUsdActual).toBe(0);
+  });
+});
+
+// --- aggregation helpers -----------------------------------------------------
+
+function driver(p: { toolName: string; target: string | null; resultTokens?: number; totalUsd?: number; offloadable?: boolean }): ContextCostDriver {
+  return {
+    toolName: p.toolName,
+    target: p.target,
+    toolUseId: "id",
+    turnIssued: 1,
+    resultTokens: p.resultTokens ?? 0,
+    rereadTurns: 0,
+    cacheWriteUsd: 0,
+    cacheReadUsd: 0,
+    totalUsd: p.totalUsd ?? 0,
+    offloadable: p.offloadable ?? false,
+  };
+}
+
+function attribution(drivers: ContextCostDriver[], extra: Partial<ContextAttribution> = {}): ContextAttribution {
+  return {
+    model: "test-model",
+    assistantTurns: extra.assistantTurns ?? 1,
+    toolResults: drivers.length,
+    totalResultTokens: drivers.reduce((s, d) => s + d.resultTokens, 0),
+    attributableUsd: drivers.reduce((s, d) => s + d.totalUsd, 0),
+    offloadableUsd: drivers.reduce((s, d) => s + (d.offloadable ? d.totalUsd : 0), 0),
+    cacheReadUsdActual: extra.cacheReadUsdActual ?? 0,
+    cacheWriteUsdActual: extra.cacheWriteUsdActual ?? 0,
+    drivers,
+    unpriced: extra.unpriced ?? false,
+  };
+}
+
+describe("aggregateAttributions", () => {
+  it("returns empty totals for no sessions", () => {
+    const agg = aggregateAttributions([]);
+    expect(agg.sessions).toBe(0);
+    expect(agg.targets).toEqual([]);
+    expect(agg.attributableUsd).toBe(0);
+    expect(agg.unpriced).toBe(false);
+  });
+
+  it("ranks recurring (tool,target) pairs by total tax and counts sessions vs occurrences", () => {
+    const sessionA = attribution(
+      [
+        driver({ toolName: "Read", target: "src/config.ts", resultTokens: 100, totalUsd: 0.001, offloadable: true }),
+        driver({ toolName: "Read", target: "src/config.ts", resultTokens: 50, totalUsd: 0.0005, offloadable: true }),
+        driver({ toolName: "Edit", target: "src/x.ts", resultTokens: 5, totalUsd: 0.00001, offloadable: false }),
+      ],
+      { assistantTurns: 4, cacheReadUsdActual: 0.01, cacheWriteUsdActual: 0.002 },
+    );
+    const sessionB = attribution(
+      [
+        driver({ toolName: "Read", target: "src/config.ts", resultTokens: 80, totalUsd: 0.0008, offloadable: true }),
+        driver({ toolName: "Grep", target: "foo", resultTokens: 200, totalUsd: 0.002, offloadable: true }),
+      ],
+      { assistantTurns: 3, cacheReadUsdActual: 0.02, cacheWriteUsdActual: 0.003 },
+    );
+
+    const agg = aggregateAttributions([sessionA, sessionB]);
+
+    expect(agg.sessions).toBe(2);
+    expect(agg.assistantTurns).toBe(7);
+    expect(agg.toolResults).toBe(5);
+    expect(agg.cacheReadUsdActual).toBeCloseTo(0.03, 12);
+    expect(agg.cacheWriteUsdActual).toBeCloseTo(0.005, 12);
+
+    // config.ts appeared in 2 sessions, 3 calls total, with the most tax → ranks first.
+    const config = agg.targets[0];
+    expect(config?.toolName).toBe("Read");
+    expect(config?.target).toBe("src/config.ts");
+    expect(config?.sessions).toBe(2);
+    expect(config?.occurrences).toBe(3);
+    expect(config?.resultTokens).toBe(230);
+    expect(config?.totalUsd).toBeCloseTo(0.0023, 12);
+    expect(config?.offloadable).toBe(true);
+
+    // grep (0.002) ranks above the non-offloadable edit (0.00001).
+    expect(agg.targets[1]?.toolName).toBe("Grep");
+    expect(agg.targets[2]?.toolName).toBe("Edit");
+    expect(agg.targets[2]?.offloadable).toBe(false);
+  });
+
+  it("propagates unpriced when any session is unpriced", () => {
+    const priced = attribution([driver({ toolName: "Read", target: "a", totalUsd: 0.1, offloadable: true })]);
+    const unpriced = attribution([driver({ toolName: "Read", target: "b" })], { unpriced: true });
+    expect(aggregateAttributions([priced, unpriced]).unpriced).toBe(true);
+    expect(aggregateAttributions([priced]).unpriced).toBe(false);
   });
 });

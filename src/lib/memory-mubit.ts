@@ -93,6 +93,27 @@ export interface MubitMemoryHealthOptions {
   agentId?: string;
 }
 
+// Store a compact, exact artifact (e.g. a file summary) for bit-exact retrieval
+// by reference — the basis for offloading large exploration so its bulk never
+// re-enters the agent's context. `upsertKey` (path+contentHash) makes re-archiving
+// an unchanged file idempotent and a changed file a fresh entry.
+export interface MubitArchiveOptions {
+  runId: string;
+  content: string;
+  artifactKind?: string;
+  labels?: string[];
+  upsertKey?: string;
+  metadata?: Record<string, unknown>;
+  userId?: string;
+  agentId?: string;
+}
+
+export interface MubitDereferenceOptions {
+  referenceId: string;
+  runId?: string;
+  userId?: string;
+}
+
 export interface MubitDiagnoseOptions {
   runId: string;
   errorText: string;
@@ -220,6 +241,8 @@ interface MubitClientLike {
     recordStepOutcome?(payload?: Record<string, unknown>): Promise<unknown>;
     createHandoff?(payload?: Record<string, unknown>): Promise<unknown>;
     submitFeedback?(payload?: Record<string, unknown>): Promise<unknown>;
+    archive?(payload?: Record<string, unknown>): Promise<unknown>;
+    dereference?(payload?: Record<string, unknown>): Promise<unknown>;
   };
 }
 
@@ -1826,6 +1849,50 @@ export class MubitMemoryEngine implements MemoryEngine {
       payload.agent_id = options.agentId;
     }
     return await this.callControlMethod("checkpoint", payload);
+  }
+
+  // Archive a compact artifact (e.g. a file summary) for bit-exact retrieval, so
+  // its bulk can be kept out of the agent's main context and re-fetched only on
+  // demand. Fails open via callControlMethod when the SDK lacks control.archive.
+  async archive(options: MubitArchiveOptions): Promise<Record<string, unknown>> {
+    const payload: Record<string, unknown> = {
+      run_id: options.runId,
+      content: options.content,
+    };
+    if (options.artifactKind) {
+      payload.artifact_kind = options.artifactKind;
+    }
+    if (options.labels && options.labels.length > 0) {
+      payload.labels = options.labels;
+    }
+    if (options.upsertKey) {
+      payload.upsert_key = options.upsertKey;
+    }
+    if (options.metadata && Object.keys(options.metadata).length > 0) {
+      payload.metadata_json = toJson(options.metadata);
+    }
+    if (options.userId) {
+      payload.user_id = options.userId;
+    }
+    if (options.agentId) {
+      payload.agent_id = options.agentId;
+    }
+    return await this.callControlMethod("archive", payload);
+  }
+
+  // Retrieve an archived artifact's exact content by reference id (no semantic
+  // search, no drift). Fails open when the SDK lacks control.dereference.
+  async dereference(options: MubitDereferenceOptions): Promise<Record<string, unknown>> {
+    const payload: Record<string, unknown> = {
+      reference_id: options.referenceId,
+    };
+    if (options.runId) {
+      payload.run_id = options.runId;
+    }
+    if (options.userId) {
+      payload.user_id = options.userId;
+    }
+    return await this.callControlMethod("dereference", payload);
   }
 
   async inspectMemoryHealth(options: MubitMemoryHealthOptions): Promise<Record<string, unknown>> {

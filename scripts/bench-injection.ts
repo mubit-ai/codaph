@@ -1,26 +1,30 @@
 #!/usr/bin/env bun
 //
-// Rough A/B bench: "Codaph + Mubit memory injection ON" vs "OFF".
+// A/B bench for Codaph + Mubit memory injection, isolated PER PHASE.
 //
-// Runs the SAME exploration tasks twice — once with the SessionStart memory
-// digest injected (CODAPH_INJECT=1), once with injection killed
-// (CODAPH_INJECT=0) — against the real `claude` CLI in this repo, then compares
-// the ACTUAL billed cost/tokens per task. Pairing by task removes the confound
-// that plagues `codaph tokens --compare` (which averages over whatever unrelated
-// sessions happen to exist).
+// Runs the SAME exploration tasks across several arms — each arm enables exactly
+// ONE injection phase — against the real `claude` CLI in this repo, then compares
+// the ACTUAL billed cost/tokens per task vs the OFF baseline. Pairing by task
+// removes the confound that plagues `codaph tokens --compare` (which averages
+// over whatever unrelated sessions happen to exist).
+//
+// Arms (select a subset with BENCH_ARMS=off,session-only,...):
+//   off                   injection disabled (baseline)
+//   session-only          SessionStart digest only          (CODAPH_INJECT_PHASES=session)
+//   prompt-only           UserPromptSubmit retrieval only   (CODAPH_INJECT_PHASES=prompt)
+//   pretool-augment       PreToolUse augment only           (CODAPH_INJECT_PHASES=pretool-augment)
+//   pretool-shortcircuit  PreToolUse shortcircuit only       (CODAPH_INJECT_PHASES=pretool-shortcircuit)
 //
 // Why this is honest about its limits:
 //   - Agent runs are nondeterministic; with few reps the numbers are directional.
-//   - Injection's net effect (digest tokens added vs exploration tokens avoided)
-//     is captured directly in the ON arm's cost — no hand-waving.
-//   - It benchmarks ONLY what's configured ON for this project (SessionStart
-//     digest; UserPrompt/PreToolUse are off here).
+//   - Each arm's net effect (injected tokens added vs exploration avoided) is
+//     captured directly in its billed cost — no hand-waving.
 //
 // Run:  bun scripts/bench-injection.ts
-// Tune: BENCH_MODEL, BENCH_REPS, BENCH_TIMEOUT_MS env vars.
+// Tune: BENCH_MODEL, BENCH_REPS, BENCH_TIMEOUT_MS, BENCH_TASKS, BENCH_ARMS.
 
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync, copyFileSync, rmSync, readdirSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, copyFileSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -50,14 +54,47 @@ const SETTINGS_PATH = join(REPO, ".claude", "settings.json");
 const SETTINGS_BACKUP = join(REPO, ".claude", "settings.json.bench-backup");
 const RESULTS_DIR = join(REPO, "bench-results");
 // Codaph project settings hold injection.timeoutMs (default 2500ms) — too tight
-// for the ~3.5s Mubit digest query, so the SessionStart hook silently no-ops.
-// Raise it for the bench so injection actually fires, then restore.
+// for the ~3.5s Mubit digest query, so the hook silently no-ops. Raise it for
+// the bench so injection actually fires, then restore.
 const CODAPH_SETTINGS_PATH = join(homedir(), ".codaph", "settings.json");
 const CODAPH_SETTINGS_BACKUP = join(homedir(), ".codaph", "settings.json.bench-backup");
 const INJECT_TIMEOUT_MS = Number(process.env.BENCH_INJECT_TIMEOUT_MS ?? "8000");
 
+// ---------------------------------------------------------------------------
+// Arms — each isolates one injection phase via CODAPH_INJECT_PHASES.
+// ---------------------------------------------------------------------------
+
+type Arm = "off" | "session-only" | "prompt-only" | "pretool-augment" | "pretool-shortcircuit";
+
+interface ArmSpec {
+  id: Arm;
+  label: string; // short column label
+  env: Record<string, string>; // per-arm env overlay for the claude child
+}
+
+const ALL_ARMS: ArmSpec[] = [
+  { id: "off", label: "OFF", env: { CODAPH_INJECT: "0" } },
+  { id: "session-only", label: "SESSION", env: { CODAPH_INJECT_PHASES: "session" } },
+  { id: "prompt-only", label: "PROMPT", env: { CODAPH_INJECT_PHASES: "prompt" } },
+  { id: "pretool-augment", label: "PT-AUG", env: { CODAPH_INJECT_PHASES: "pretool-augment" } },
+  { id: "pretool-shortcircuit", label: "PT-SC", env: { CODAPH_INJECT_PHASES: "pretool-shortcircuit" } },
+];
+
+// Default arm set: off baseline + the three augment-safe phases. The riskier
+// pretool-shortcircuit is opt-in (BENCH_ARMS=...,pretool-shortcircuit) — per the
+// staged "augment before deny" plan, you graduate to it once augment proves out.
+const DEFAULT_ARM_IDS: Arm[] = ["off", "session-only", "prompt-only", "pretool-augment"];
+const ARM_FILTER = (process.env.BENCH_ARMS ?? "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+const ARMS: ArmSpec[] = ARM_FILTER.length
+  ? ALL_ARMS.filter((a) => ARM_FILTER.includes(a.id))
+  : ALL_ARMS.filter((a) => DEFAULT_ARM_IDS.includes(a.id));
+const BASELINE: Arm = "off";
+
 // Exploration questions about THIS codebase — the kind of "where does X live /
-// how does Y work" a digest can plausibly answer without re-reading the tree.
+// how does Y work" that injection can plausibly answer without re-reading the tree.
 const ALL_TASKS: { id: string; prompt: string }[] = [
   {
     // Resumption — the digest's "where work left off / next actions" sweet spot.
@@ -85,21 +122,18 @@ const ALL_TASKS: { id: string; prompt: string }[] = [
   },
   {
     // Control: fully covered by CLAUDE.md, ~1 turn. Tests injection OVERHEAD when
-    // it can't help (does adding the digest cost more than it saves here?).
+    // it can't help (does adding context cost more than it saves here?).
     id: "arch-overview",
     prompt:
       "Give a 3-bullet overview of Codaph's architecture: the dual store, the ingest flow, and identity resolution. Cite the key files.",
   },
 ];
 
-// Optional smoke filter: BENCH_TASKS=dual-store,identity restricts the run.
 const TASK_FILTER = (process.env.BENCH_TASKS ?? "")
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean);
 const TASKS = TASK_FILTER.length ? ALL_TASKS.filter((t) => TASK_FILTER.includes(t.id)) : ALL_TASKS;
-
-type Arm = "off" | "on";
 
 interface RunResult {
   task: string;
@@ -113,15 +147,14 @@ interface RunResult {
   usage: TokenUsage; // summed across all assistant turns
   numTurns: number;
   durationMs: number;
-  injected: boolean; // did the SessionStart digest actually land in the transcript?
+  injected: boolean; // did any Codaph injection land in the transcript?
 }
 
 // ---------------------------------------------------------------------------
-// Hooks isolation — swap .claude/settings.json to a minimal config for the run
-// so we don't fire the per-session Stop->agent-complete sync (autoReflect would
-// pollute Mubit with 20 reflections) or the per-tool-call PreToolUse spawn. Keep
-// SessionStart (the thing we toggle) and SessionEnd (records to the mirror so
-// `codaph tokens --compare` also reflects this bench). Restored in finally.
+// Hooks isolation — swap .claude/settings.json to a config that installs all the
+// injection hooks (so any arm's phase can fire) plus SessionEnd (records token
+// usage to the mirror), but NOT the per-session agent-complete sync (autoReflect
+// would pollute Mubit). Restored in finally.
 // ---------------------------------------------------------------------------
 
 function extractFirstCommand(hooks: any, event: string): string | null {
@@ -135,20 +168,22 @@ function extractFirstCommand(hooks: any, event: string): string | null {
   return null;
 }
 
+function hookCommand(original: any, event: string, codaphHook: string): string {
+  return extractFirstCommand(original.hooks, event) ?? `bun run --cwd '${REPO}' cli hooks run ${codaphHook} --quiet`;
+}
+
 function installBenchSettings(): void {
   const original = JSON.parse(readFileSync(SETTINGS_PATH, "utf8"));
   copyFileSync(SETTINGS_PATH, SETTINGS_BACKUP);
-  const sessionStart =
-    extractFirstCommand(original.hooks, "SessionStart") ??
-    `bun run --cwd '${REPO}' cli hooks run session-start --quiet`;
-  const sessionEnd =
-    extractFirstCommand(original.hooks, "SessionEnd") ??
-    `bun run --cwd '${REPO}' cli hooks run session-end --quiet`;
   const minimal = {
     ...original,
     hooks: {
-      SessionStart: [{ hooks: [{ type: "command", command: sessionStart }] }],
-      SessionEnd: [{ hooks: [{ type: "command", command: sessionEnd }] }],
+      SessionStart: [{ hooks: [{ type: "command", command: hookCommand(original, "SessionStart", "session-start") }] }],
+      UserPromptSubmit: [
+        { hooks: [{ type: "command", command: hookCommand(original, "UserPromptSubmit", "user-prompt-submit") }] },
+      ],
+      PreToolUse: [{ hooks: [{ type: "command", command: hookCommand(original, "PreToolUse", "pre-tool-use") }] }],
+      SessionEnd: [{ hooks: [{ type: "command", command: hookCommand(original, "SessionEnd", "session-end") }] }],
     },
   };
   writeFileSync(SETTINGS_PATH, `${JSON.stringify(minimal, null, 2)}\n`);
@@ -158,6 +193,8 @@ function installBenchSettings(): void {
     copyFileSync(CODAPH_SETTINGS_PATH, CODAPH_SETTINGS_BACKUP);
     const codaph = JSON.parse(readFileSync(CODAPH_SETTINGS_PATH, "utf8"));
     const proj = (codaph.projects ??= {})[REPO] ?? (codaph.projects[REPO] = {});
+    // enabled here is a baseline; the per-arm CODAPH_INJECT_PHASES env decides
+    // which phases actually run. timeoutMs is raised so queries don't time out.
     proj.injection = { ...(proj.injection ?? {}), enabled: true, timeoutMs: INJECT_TIMEOUT_MS };
     writeFileSync(CODAPH_SETTINGS_PATH, `${JSON.stringify(codaph, null, 2)}\n`);
   }
@@ -178,7 +215,7 @@ function restoreSettings(): void {
 // Run one claude session
 // ---------------------------------------------------------------------------
 
-function runClaude(prompt: string, arm: Arm): Promise<{ json: any | null; error: string | null }> {
+function runClaude(prompt: string, spec: ArmSpec): Promise<{ json: any | null; error: string | null }> {
   return new Promise((resolve) => {
     const args = [
       "-p",
@@ -192,11 +229,15 @@ function runClaude(prompt: string, arm: Arm): Promise<{ json: any | null; error:
       "--allowedTools",
       ...ALLOWED_TOOLS,
     ];
-    const child = spawn("claude", args, {
-      cwd: REPO,
-      env: { ...process.env, CODAPH_INJECT: arm === "on" ? "1" : "0" },
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    // Clear both injection env vars first, then apply this arm's overlay, so an
+    // arm never inherits another arm's CODAPH_INJECT* from the parent env.
+    const env: Record<string, string | undefined> = {
+      ...process.env,
+      CODAPH_INJECT: undefined,
+      CODAPH_INJECT_PHASES: undefined,
+      ...spec.env,
+    };
+    const child = spawn("claude", args, { cwd: REPO, env, stdio: ["ignore", "pipe", "pipe"] });
     let out = "";
     let err = "";
     let killed = false;
@@ -222,26 +263,32 @@ function runClaude(prompt: string, arm: Arm): Promise<{ json: any | null; error:
   });
 }
 
-// Read the session transcript and sum token usage across every assistant turn,
-// then price it with codaph's table. Also confirm the digest actually injected.
+// Markers any injection phase leaves in the transcript (SessionStart/UserPrompt
+// digests, PreToolUse augment hints, PreToolUse deny reasons).
+const INJECT_MARKERS = [
+  "# Codaph project memory",
+  INJECTION_TRUST_HEADER.slice(0, 40),
+  "Codaph memory (hint, verify)",
+  "Codaph memory (verify before relying)",
+];
+
 function analyzeTranscript(sessionId: string): { usage: TokenUsage; codaphUsd: number; injected: boolean } {
   const path = join(TRANSCRIPT_DIR, `${sessionId}.jsonl`);
   if (!existsSync(path)) return { usage: emptyUsage(), codaphUsd: 0, injected: false };
   const content = readFileSync(path, "utf8");
   const parsed = parseTranscriptUsage(content);
   const cost = estimateTranscriptCost(parsed, DEFAULT_PRICE_TABLE);
-  const injected =
-    content.includes("# Codaph project memory") || content.includes(INJECTION_TRUST_HEADER.slice(0, 40));
+  const injected = INJECT_MARKERS.some((m) => content.includes(m));
   return { usage: parsed.totals, codaphUsd: cost.totalUsd, injected };
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-async function runOne(task: { id: string; prompt: string }, arm: Arm, rep: number): Promise<RunResult> {
-  const { json, error } = await runClaude(task.prompt, arm);
+async function runOne(task: { id: string; prompt: string }, spec: ArmSpec, rep: number): Promise<RunResult> {
+  const { json, error } = await runClaude(task.prompt, spec);
   const base: RunResult = {
     task: task.id,
-    arm,
+    arm: spec.id,
     rep,
     sessionId: json?.session_id ?? null,
     ok: false,
@@ -257,8 +304,7 @@ async function runOne(task: { id: string; prompt: string }, arm: Arm, rep: numbe
     base.error = error ?? json?.subtype ?? "claude reported an error";
     return base;
   }
-  // Transcript is flushed at session end; give the SessionEnd hook a beat.
-  await sleep(750);
+  await sleep(750); // transcript flushed at session end; give SessionEnd a beat
   const analysis = analyzeTranscript(json.session_id);
   return {
     ...base,
@@ -269,7 +315,7 @@ async function runOne(task: { id: string; prompt: string }, arm: Arm, rep: numbe
     usage: analysis.usage,
     numTurns: typeof json.num_turns === "number" ? json.num_turns : 0,
     durationMs: typeof json.duration_ms === "number" ? json.duration_ms : 0,
-    injected: arm === "on" ? analysis.injected : false,
+    injected: spec.id === BASELINE ? false : analysis.injected,
   };
 }
 
@@ -287,82 +333,111 @@ function pct(n: number): string {
   return `${(n * 100).toFixed(1)}%`;
 }
 
+interface ArmStats {
+  arm: Arm;
+  runs: number;
+  meanBilledUsd: number;
+  meanTokens: number;
+  meanCacheRead: number;
+  meanOutput: number;
+  meanTurns: number;
+  meanDurationMs: number;
+  injectedRate: number;
+  // vs the OFF baseline (positive = injection saved):
+  savedTokens: number;
+  savedTokensPct: number;
+  savedPerSession: number;
+  savedPct: number;
+}
+
 function summarize(rows: RunResult[]) {
   const ok = rows.filter((r) => r.ok);
   const byArm = (arm: Arm) => ok.filter((r) => r.arm === arm);
-  const armStats = (arm: Arm) => {
+  const rawStats = (arm: Arm) => {
     const rs = byArm(arm);
-    const usage = rs.reduce((acc, r) => addUsage(acc, r.usage), emptyUsage());
     return {
       runs: rs.length,
       meanBilledUsd: mean(rs.map((r) => r.billedUsd)),
-      meanCodaphUsd: mean(rs.map((r) => r.codaphUsd)),
       meanTokens: mean(rs.map((r) => totalTokens(r.usage))),
       meanCacheRead: mean(rs.map((r) => r.usage.cacheRead)),
       meanOutput: mean(rs.map((r) => r.usage.output)),
       meanTurns: mean(rs.map((r) => r.numTurns)),
       meanDurationMs: mean(rs.map((r) => r.durationMs)),
       injectedRate: rs.length ? rs.filter((r) => r.injected).length / rs.length : 0,
-      usage,
     };
   };
-  const off = armStats("off");
-  const on = armStats("on");
-  const savedPerSession = off.meanBilledUsd - on.meanBilledUsd;
-  const savedPct = off.meanBilledUsd > 0 ? savedPerSession / off.meanBilledUsd : 0;
-  const savedTokens = off.meanTokens - on.meanTokens;
-  const savedTokensPct = off.meanTokens > 0 ? savedTokens / off.meanTokens : 0;
 
-  // Per-task paired deltas (mean over reps within each arm).
-  const perTask = TASKS.map((t) => {
-    const ofR = ok.filter((r) => r.task === t.id && r.arm === "off");
-    const onR = ok.filter((r) => r.task === t.id && r.arm === "on");
-    const offTok = mean(ofR.map((r) => totalTokens(r.usage)));
-    const onTok = mean(onR.map((r) => totalTokens(r.usage)));
-    const offCost = mean(ofR.map((r) => r.billedUsd));
-    const onCost = mean(onR.map((r) => r.billedUsd));
-    return { task: t.id, offTok, onTok, tokDelta: offTok - onTok, offCost, onCost, costDelta: offCost - onCost };
+  const baseline = rawStats(BASELINE);
+  const arms: ArmStats[] = ARMS.map((spec) => {
+    const s = rawStats(spec.id);
+    const savedTokens = baseline.meanTokens - s.meanTokens;
+    const savedPerSession = baseline.meanBilledUsd - s.meanBilledUsd;
+    return {
+      arm: spec.id,
+      ...s,
+      savedTokens,
+      savedTokensPct: baseline.meanTokens > 0 ? savedTokens / baseline.meanTokens : 0,
+      savedPerSession,
+      savedPct: baseline.meanBilledUsd > 0 ? savedPerSession / baseline.meanBilledUsd : 0,
+    };
   });
 
-  return { off, on, savedPerSession, savedPct, savedTokens, savedTokensPct, perTask, okRuns: ok.length, totalRuns: rows.length };
+  // Per-task, per-arm mean tokens + delta vs OFF (the robust paired signal).
+  const perTask = TASKS.map((t) => {
+    const offTok = mean(ok.filter((r) => r.task === t.id && r.arm === BASELINE).map((r) => totalTokens(r.usage)));
+    const byArm: Record<string, { tokens: number; tokDelta: number; cost: number }> = {};
+    for (const spec of ARMS) {
+      const rs = ok.filter((r) => r.task === t.id && r.arm === spec.id);
+      const tokens = mean(rs.map((r) => totalTokens(r.usage)));
+      byArm[spec.id] = { tokens, tokDelta: offTok - tokens, cost: mean(rs.map((r) => r.billedUsd)) };
+    }
+    return { task: t.id, offTok, byArm };
+  });
+
+  return { baseline: BASELINE, arms, perTask, okRuns: ok.length, totalRuns: rows.length };
 }
 
 function printReport(rows: RunResult[]) {
   const s = summarize(rows);
-  const line = "─".repeat(78);
+  const line = "─".repeat(82);
   console.log(`\n${line}`);
-  console.log(`  CODAPH + MUBIT INJECTION BENCH — ${MODEL}`);
-  console.log(`  ${s.okRuns}/${s.totalRuns} runs ok · ${REPS} rep(s)/arm · injected on ${pct(s.on.injectedRate)} of ON runs`);
+  console.log(`  CODAPH + MUBIT INJECTION BENCH (per-phase) — ${MODEL}`);
+  console.log(`  ${s.okRuns}/${s.totalRuns} runs ok · ${REPS} rep(s)/arm · arms: ${ARMS.map((a) => a.id).join(", ")}`);
   console.log(line);
 
   const k = (n: number) => Math.round(n).toLocaleString();
-  console.log(`\n  Per-task (mean over reps) — tokens are the robust signal, $ is cache-order-sensitive:`);
-  console.log(
-    `  ${"task".padEnd(18)}${"OFF tok".padStart(10)}${"ON tok".padStart(10)}${"Δtok".padStart(10)}${"OFF $".padStart(10)}${"ON $".padStart(10)}`,
-  );
+
+  console.log(`\n  Per-task Δtokens vs OFF (positive = the phase SAVED tokens):`);
+  const head = `  ${"task".padEnd(18)}${"OFF tok".padStart(10)}` + ARMS.filter((a) => a.id !== BASELINE).map((a) => a.label.padStart(11)).join("");
+  console.log(head);
   for (const t of s.perTask) {
-    console.log(
-      `  ${t.task.padEnd(18)}${k(t.offTok).padStart(10)}${k(t.onTok).padStart(10)}${k(t.tokDelta).padStart(10)}${usd(t.offCost).padStart(10)}${usd(t.onCost).padStart(10)}`,
-    );
+    const cells = ARMS.filter((a) => a.id !== BASELINE)
+      .map((a) => {
+        const d = t.byArm[a.id]?.tokDelta ?? 0;
+        return `${(d >= 0 ? "+" : "") + k(d)}`.padStart(11);
+      })
+      .join("");
+    console.log(`  ${t.task.padEnd(18)}${k(t.offTok).padStart(10)}${cells}`);
   }
 
   console.log(`\n  Aggregate (mean per session):`);
-  const tbl = (label: string, a: any) =>
+  for (const a of s.arms) {
+    const tag =
+      a.arm === BASELINE
+        ? "baseline"
+        : `${a.savedTokens >= 0 ? "saved" : "ADDED"} ${k(Math.abs(a.savedTokens))} tok (${pct(a.savedTokensPct)})`;
     console.log(
-      `  ${label.padEnd(4)} tokens ${k(a.meanTokens).padStart(9)} · cache-read ${k(a.meanCacheRead).padStart(9)} · output ${k(a.meanOutput).padStart(6)} · turns ${a.meanTurns.toFixed(1)} · billed ${usd(a.meanBilledUsd).padStart(9)} · ${(a.meanDurationMs / 1000).toFixed(0)}s`,
+      `  ${a.arm.padEnd(20)} tokens ${k(a.meanTokens).padStart(9)} · turns ${a.meanTurns.toFixed(1)} · billed ${usd(a.meanBilledUsd).padStart(9)} · inj ${pct(a.injectedRate).padStart(6)} · ${tag}`,
     );
-  tbl("OFF", s.off);
-  tbl("ON", s.on);
+  }
 
-  console.log(`\n  HEADLINE`);
-  console.log(`  Tokens saved / session : ${k(s.savedTokens)}  (${pct(s.savedTokensPct)})   ← robust`);
-  console.log(`  Billed $ saved / session : ${usd(s.savedPerSession)}  (${pct(s.savedPct)})   ← money, but noisy at this N`);
-  console.log(`  Extrapolated /100 sessions : ${usd(s.savedPerSession * 100)}`);
-  if (s.savedTokens < 0) {
-    console.log(`  ⚠ NEGATIVE on tokens: the injected digest added more context than it saved here.`);
+  console.log(`\n  HEADLINE (vs OFF, tokens = robust signal):`);
+  for (const a of s.arms.filter((x) => x.arm !== BASELINE)) {
+    const flag = a.savedTokens < 0 ? "  ⚠ NET-NEGATIVE" : "";
+    console.log(`  ${a.arm.padEnd(20)} ${k(a.savedTokens).padStart(9)} tok/session  (${pct(a.savedTokensPct)})${flag}`);
   }
   console.log(
-    `\n  Caveats: nondeterministic agent runs, N=${REPS}/arm, single project, read-only tasks (Read/Grep/Glob),\n  SessionStart-digest-only (UserPrompt/PreToolUse off), digest is narration-heavy. Directional, not precise.`,
+    `\n  Caveats: nondeterministic agent runs, N=${REPS}/arm, single project, read-only tasks (Read/Grep/Glob).\n  Directional, not precise — confirm a win agrees across the aggregate AND resume-focus before shipping.`,
   );
   console.log(`${line}\n`);
 }
@@ -375,8 +450,10 @@ async function main() {
   if (!existsSync(TRANSCRIPT_DIR)) mkdirSync(TRANSCRIPT_DIR, { recursive: true });
   mkdirSync(RESULTS_DIR, { recursive: true });
 
-  const total = TASKS.length * REPS * 2;
-  console.log(`Running ${total} claude sessions (${MODEL}) — ${TASKS.length} tasks × ${REPS} reps × 2 arms`);
+  const total = TASKS.length * REPS * ARMS.length;
+  console.log(
+    `Running ${total} claude sessions (${MODEL}) — ${TASKS.length} tasks × ${REPS} reps × ${ARMS.length} arms (${ARMS.map((a) => a.id).join(", ")})`,
+  );
 
   installBenchSettings();
   const cleanup = () => restoreSettings();
@@ -395,18 +472,19 @@ async function main() {
     for (let ti = 0; ti < TASKS.length; ti++) {
       const task = TASKS[ti]!;
       for (let rep = 1; rep <= REPS; rep++) {
-        // Counterbalance: alternate which arm runs first so neither systematically
-        // inherits the other's warm Anthropic prompt-cache (cache-read is ~12.5x
-        // cheaper than cache-write, which would otherwise fake a cost gain).
-        const order: Arm[] = (ti + rep) % 2 === 0 ? ["off", "on"] : ["on", "off"];
-        for (const arm of order) {
+        // Rotate arm order per (task,rep) so no arm systematically inherits
+        // another's warm Anthropic prompt-cache (cache-read is ~12.5x cheaper
+        // than cache-write, which would otherwise fake a cost gain).
+        const shift = (ti + rep) % ARMS.length;
+        const order = [...ARMS.slice(shift), ...ARMS.slice(0, shift)];
+        for (const spec of order) {
           n++;
-          const r = await runOne(task, arm, rep);
+          const r = await runOne(task, spec, rep);
           rows.push(r);
           const tag = r.ok
-            ? `${usd(r.billedUsd)} · ${Math.round(totalTokens(r.usage)).toLocaleString()} tok · ${r.numTurns} turns${arm === "on" ? (r.injected ? " · injected" : " · NO-INJECT?!") : ""}`
+            ? `${usd(r.billedUsd)} · ${Math.round(totalTokens(r.usage)).toLocaleString()} tok · ${r.numTurns} turns${spec.id !== BASELINE ? (r.injected ? " · injected" : " · NO-INJECT?!") : ""}`
             : `ERROR: ${r.error}`;
-          console.log(`[${n}/${total}] ${task.id.padEnd(18)} ${arm.toUpperCase().padEnd(3)} rep${rep}  ${tag}`);
+          console.log(`[${n}/${total}] ${task.id.padEnd(18)} ${spec.label.padEnd(8)} rep${rep}  ${tag}`);
         }
       }
     }
@@ -417,7 +495,7 @@ async function main() {
   const summary = summarize(rows);
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const outPath = join(RESULTS_DIR, `injection-bench-${stamp}.json`);
-  writeFileSync(outPath, JSON.stringify({ model: MODEL, reps: REPS, rows, summary }, null, 2));
+  writeFileSync(outPath, JSON.stringify({ model: MODEL, reps: REPS, arms: ARMS.map((a) => a.id), rows, summary }, null, 2));
   printReport(rows);
   console.log(`Raw results → ${outPath}`);
 }

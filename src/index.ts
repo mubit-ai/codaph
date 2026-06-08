@@ -47,9 +47,19 @@ import {
   extractContextBlockText,
   fetchToolMemoryAnswer,
   toolSignature,
+  type AgentHookFormat,
 } from "./lib/context-injection";
 import { resolveInjectionConfig } from "./lib/injection-config";
-import { attributeContextCost, type ContextAttribution } from "./lib/token-attribution";
+import { fileFreshness, isFresh } from "./lib/file-freshness";
+import { getStoredSummary, putStoredSummary } from "./lib/summary-store";
+import { summarizeFileForOffload } from "./lib/file-summary";
+import { CODAPH_MANAGED_AGENTS } from "./lib/claude-agents";
+import {
+  attributeContextCost,
+  aggregateAttributions,
+  type ContextAttribution,
+  type AggregateAttribution,
+} from "./lib/token-attribution";
 import { formatMubitEmptyReasonLine } from "./lib/mubit-display";
 import { loadProjectEnv } from "./lib/project-env";
 import { resolveMubitCommandRunId as resolveMubitCommandRunIdFromScope } from "./lib/mubit-run-resolution";
@@ -133,6 +143,10 @@ import {
   getSyncLockPath,
   installAgentCompleteHookBestEffort,
   installClaudeCodeHooksBestEffort,
+  installClaudeCodeAgentsBestEffort,
+  installCodexHooksBestEffort,
+  installGeminiHooksBestEffort,
+  type InstallClaudeHooksResult,
   installProviderAgentCompleteHookBestEffort,
   type ClaudeHookSpec,
   installGitPostCommitHook,
@@ -3564,6 +3578,9 @@ interface InjectionSessionState {
   injectedTokens?: number;
   deniedSignatures?: string[];
   denialCount?: number;
+  // How many times the agent re-issued a tool we had denied (= our memory was
+  // insufficient). Non-zero backs off further denies for the rest of the session.
+  regretCount?: number;
   updatedAt?: string;
 }
 
@@ -3600,6 +3617,16 @@ function recordSessionInjection(cwd: string, sessionId: string, injectedTokens: 
   });
 }
 
+// Best-effort read of the project's CLAUDE.md (used to suppress overview bullets
+// the agent already has). Returns null when absent/unreadable.
+function readClaudeMd(cwd: string): string | null {
+  try {
+    return readFileSync(resolve(cwd, "CLAUDE.md"), "utf8");
+  } catch {
+    return null;
+  }
+}
+
 // Injection hooks (SessionStart / UserPromptSubmit / PreToolUse). Builds the
 // memory context to inject and writes ONLY the hook JSON to stdout (Claude
 // parses stdout). Always fail-open: disabled, unconfigured, timed-out, or
@@ -3622,8 +3649,11 @@ async function runContextInjectionHook(
 
       if (hookName === "session-start") {
         hookEventName = "SessionStart";
+        // CLAUDE.md is only used to suppress overview bullets it already covers,
+        // so read it only when the (opt-in) overview is enabled.
+        const claudeMd = config.sessionStart.includeOverview ? readClaudeMd(cwd) : null;
         additionalContext = await withTimeout(
-          buildSessionStartContext(engine, projectRunId, hookSourceFromPayload(payload), config),
+          buildSessionStartContext(engine, projectRunId, hookSourceFromPayload(payload), config, claudeMd),
           config.timeoutMs,
           "Codaph SessionStart injection",
         ).catch(() => null);
@@ -3637,7 +3667,7 @@ async function runContextInjectionHook(
         ).catch(() => null);
       }
 
-      output = buildHookOutput(hookEventName, additionalContext);
+      output = buildHookOutput(hookEventName, additionalContext, hookFormatForProvider(providerFromHookContext(flags, payload)));
       if (additionalContext && sessionId) {
         recordSessionInjection(cwd, sessionId, estimateTokens(additionalContext));
       }
@@ -3677,38 +3707,113 @@ async function runPreToolUseHook(options: {
       const query = buildToolMemoryQuery(toolName, toolInput);
       if (query) {
         const projectRunId = resolveMubitCommandRunId(flags, cwd, settings, { preferProject: true });
-        // PreToolUse blocks every matched tool call, so use a tighter timeout.
-        const answer = await withTimeout(
-          fetchToolMemoryAnswer(engine, projectRunId, query, config.preToolUse.maxTokens),
-          Math.min(config.timeoutMs, 2000),
-          "Codaph PreToolUse memory",
-        ).catch(() => null);
+        const mirrorRoot = resolve(cwd, ".codaph");
+
+        const isRead = toolName.toLowerCase() === "read";
+        const filePath =
+          isRead && typeof toolInput.file_path === "string"
+            ? toolInput.file_path
+            : isRead && typeof toolInput.path === "string"
+              ? (toolInput.path as string)
+              : null;
+
+        let answerText: string | null = null;
+        let confidence: number | null = null;
+        let fileFresh: boolean | null = null;
+
+        if (isRead) {
+          // Reads are left ALONE except in explicit augment mode, where we attach
+          // a DETERMINISTIC structural summary (exact, always fresh) as a hint
+          // while the read proceeds. Two live A/B benchmarks proved that denying
+          // or injecting on Reads in shortcircuit mode is net-negative (the agent
+          // re-reads anyway), so Reads never deny and don't inject by default.
+          if (filePath && mode === "augment") {
+            const current = fileFreshness(filePath);
+            if (current.exists) {
+              const cached = getStoredSummary(mirrorRoot, filePath);
+              if (cached && cached.confidence === 1 && isFresh(cached, current)) {
+                answerText = cached.summary;
+                confidence = 1;
+                fileFresh = true;
+              } else {
+                try {
+                  const content = readFileSync(filePath, "utf8");
+                  if (Math.ceil(content.length / 4) > config.preToolUse.maxTokens * 2) {
+                    const summary = summarizeFileForOffload(filePath, content, config.preToolUse.maxTokens);
+                    answerText = summary;
+                    confidence = 1;
+                    fileFresh = true;
+                    putStoredSummary(mirrorRoot, {
+                      path: filePath,
+                      contentHash: current.contentHash,
+                      mtimeMs: current.mtimeMs,
+                      summary,
+                      confidence: 1,
+                    });
+                  }
+                } catch {
+                  // unreadable → leave answer null → allow the read
+                }
+              }
+            }
+          }
+          // shortcircuit/off, or non-augment: answerText stays null → allow.
+        } else {
+          // grep/glob: query Mubit; its low-confidence answers stay augment-only
+          // (no stable file-freshness key, so deny never fires for searches).
+          const memoryAnswer = await withTimeout(
+            fetchToolMemoryAnswer(engine, projectRunId, query, config.preToolUse.maxTokens),
+            Math.min(config.timeoutMs, 2000),
+            "Codaph PreToolUse memory",
+          ).catch(() => null);
+          if (memoryAnswer) {
+            answerText = memoryAnswer.answer;
+            confidence = memoryAnswer.confidence;
+          }
+          fileFresh = null;
+        }
 
         const sessionId = sessionIdFromHookPayload(payload);
         const state = sessionId ? readInjectionSessionState(cwd, sessionId) : {};
         const signature = toolSignature(toolName, toolInput);
         const alreadyDenied = (state.deniedSignatures ?? []).includes(signature);
         const denialCount = state.denialCount ?? 0;
+        // The agent re-issuing a tool we denied means our memory wasn't enough:
+        // record regret and back off denies for the rest of this session.
+        const regretted = alreadyDenied;
+        const regretCount = (state.regretCount ?? 0) + (regretted ? 1 : 0);
 
         const decision = decidePreToolAction({
           mode,
           toolName,
-          answer,
+          answer: answerText,
+          confidence,
+          fileFresh,
+          minConfidenceToAugment: config.preToolUse.minConfidenceToAugment,
+          minConfidenceToDeny: config.preToolUse.minConfidenceToDeny,
           alreadyDenied,
           denialCount,
           maxDenials: config.preToolUse.maxDenials,
+          denyBackoff: regretCount > 0,
         });
-        output = buildPreToolHookOutput(decision);
+        output = buildPreToolHookOutput(decision, hookFormatForProvider(providerFromHookContext(flags, payload)));
 
-        if (sessionId && decision.text && (decision.kind === "augment" || decision.kind === "deny")) {
-          writeInjectionSessionState(cwd, sessionId, {
-            ...state,
-            active: true,
-            injectedTokens: (state.injectedTokens ?? 0) + estimateTokens(decision.text),
-            deniedSignatures:
-              decision.kind === "deny" ? [...(state.deniedSignatures ?? []), signature] : state.deniedSignatures,
-            denialCount: decision.kind === "deny" ? denialCount + 1 : denialCount,
-          });
+        if (sessionId) {
+          const injectedDelta =
+            decision.text && (decision.kind === "augment" || decision.kind === "deny")
+              ? estimateTokens(decision.text)
+              : 0;
+          if (injectedDelta > 0 || regretted || decision.kind === "deny") {
+            writeInjectionSessionState(cwd, sessionId, {
+              ...state,
+              active: true,
+              injectedTokens: (state.injectedTokens ?? 0) + injectedDelta,
+              deniedSignatures:
+                decision.kind === "deny" ? [...(state.deniedSignatures ?? []), signature] : state.deniedSignatures,
+              denialCount: decision.kind === "deny" ? denialCount + 1 : denialCount,
+              regretCount,
+            });
+          }
         }
       }
     }
@@ -3728,6 +3833,18 @@ function providerFromHookContext(flags: Flags, payload: Record<string, unknown> 
   }
   const payloadProvider = typeof payload?.provider === "string" ? payload.provider.trim() : "";
   return isAgentProviderId(payloadProvider) ? payloadProvider : null;
+}
+
+// Which agent's hook stdout contract to emit. Claude is the default; Codex shares
+// Claude's shape; Gemini differs (see docs/injection-surfaces.md).
+function hookFormatForProvider(provider: AgentProviderId | null): AgentHookFormat {
+  if (provider === "codex") {
+    return "codex";
+  }
+  if (provider === "gemini-cli") {
+    return "gemini";
+  }
+  return "claude";
 }
 
 async function runAgentCompleteMubitAutomation(options: {
@@ -3832,11 +3949,41 @@ function claudeManagedHookSpecs(options: { injection: boolean }): ClaudeHookSpec
   return specs;
 }
 
+// Codex shares Claude's hook events + stdout contract; commands carry
+// --provider codex so the dispatcher selects the matching output format.
+function codexManagedHookSpecs(options: { injection: boolean }): ClaudeHookSpec[] {
+  const cmd = (name: ManagedHookName): string => `codaph hooks run ${name} --provider codex --quiet`;
+  const specs: ClaudeHookSpec[] = [];
+  if (options.injection) {
+    specs.push({ event: "SessionStart", matcher: "startup|resume|clear", command: cmd("session-start") });
+    specs.push({ event: "UserPromptSubmit", matcher: "*", command: cmd("user-prompt-submit") });
+    specs.push({ event: "PreToolUse", matcher: "*", command: cmd("pre-tool-use") });
+  }
+  return specs;
+}
+
+// Gemini uses BeforeAgent (per-prompt) and BeforeTool (pre-tool) event names and
+// a slightly different stdout contract; commands carry --provider gemini-cli.
+function geminiManagedHookSpecs(options: { injection: boolean }): ClaudeHookSpec[] {
+  const cmd = (name: ManagedHookName): string => `codaph hooks run ${name} --provider gemini-cli --quiet`;
+  const specs: ClaudeHookSpec[] = [];
+  if (options.injection) {
+    specs.push({ event: "SessionStart", matcher: "*", command: cmd("session-start") });
+    specs.push({ event: "BeforeAgent", matcher: "*", command: cmd("user-prompt-submit") });
+    specs.push({ event: "BeforeTool", matcher: "*", command: cmd("pre-tool-use") });
+  }
+  return specs;
+}
+
 async function hooksInstall(rest: string[]): Promise<void> {
   const { positionals, flags } = parseArgs(rest);
-  const target = positionals[0] ?? "claude-code";
-  if (target !== "claude-code" && target !== "claude") {
-    throw new Error(`Unsupported hooks install target: ${target}. Supported: claude-code`);
+  const rawTarget = positionals[0] ?? "claude-code";
+  // Normalise aliases to the canonical provider id.
+  const target =
+    rawTarget === "claude" ? "claude-code" : rawTarget === "gemini" ? "gemini-cli" : rawTarget;
+  const supported = new Set(["claude-code", "codex", "gemini-cli"]);
+  if (!supported.has(target)) {
+    throw new Error(`Unsupported hooks install target: ${rawTarget}. Supported: claude-code, codex, gemini-cli.`);
   }
   const cwd = resolve(getStringFlag(flags, "cwd") ?? process.cwd());
   const repoRoot = resolveGitRepoRootOrCwd(cwd);
@@ -3847,10 +3994,29 @@ async function hooksInstall(rest: string[]): Promise<void> {
   const enableInjection = getBooleanFlag(flags, "injection", false);
   const wantInjection = enableInjection || getProjectSettings(settings, cwd).injection?.enabled === true;
 
-  const result = await installClaudeCodeHooksBestEffort(repoRoot, claudeManagedHookSpecs({ injection: wantInjection }));
+  const plan: Record<string, { label: string; settingsHint: string; run: () => Promise<InstallClaudeHooksResult> }> = {
+    "claude-code": {
+      label: "Claude Code",
+      settingsHint: ".claude/settings.json",
+      run: () => installClaudeCodeHooksBestEffort(repoRoot, claudeManagedHookSpecs({ injection: wantInjection })),
+    },
+    codex: {
+      label: "Codex",
+      settingsHint: ".codex/hooks.json",
+      run: () => installCodexHooksBestEffort(repoRoot, codexManagedHookSpecs({ injection: wantInjection })),
+    },
+    "gemini-cli": {
+      label: "Gemini CLI",
+      settingsHint: ".gemini/settings.json",
+      run: () => installGeminiHooksBestEffort(repoRoot, geminiManagedHookSpecs({ injection: wantInjection })),
+    },
+  };
+  const chosen = plan[target]!;
+
+  const result = await chosen.run();
   if (!result.ok) {
-    console.warn(result.warning ?? "Failed to update Claude Code settings.");
-    console.log("Add these hooks to .claude/settings.json manually:");
+    console.warn(result.warning ?? `Failed to update ${chosen.label} settings.`);
+    console.log(`Add these hooks to ${chosen.settingsHint} manually:`);
     for (const snippet of result.manualSnippets) {
       console.log(`  ${snippet}`);
     }
@@ -3864,11 +4030,31 @@ async function hooksInstall(rest: string[]): Promise<void> {
   }
 
   if (result.installedEvents.length === 0) {
-    console.log(`Claude Code hooks already present in ${result.installedPath}.`);
+    console.log(`${chosen.label} hooks already present in ${result.installedPath}.`);
   } else {
-    console.log(`Installed Claude Code hooks (${result.installedEvents.join(", ")}) in ${result.installedPath}.`);
+    console.log(`Installed ${chosen.label} hooks (${result.installedEvents.join(", ")}) in ${result.installedPath}.`);
   }
-  console.log("Run a Claude Code session, then `codaph tokens` to see token usage and cost.");
+
+  // Claude Code: also install the exploration-offload subagent. Delegating
+  // search/orientation to it keeps large file & search output out of the main
+  // context (the token-reduction lever that benchmarked safe, unlike intercepting
+  // the main agent's own reads). Best-effort and non-destructive.
+  if (target === "claude-code") {
+    const agents = await installClaudeCodeAgentsBestEffort(repoRoot, CODAPH_MANAGED_AGENTS);
+    if (agents.ok) {
+      if (agents.installed.length > 0) {
+        console.log(`Installed subagent(s) (${agents.installed.join(", ")}) in ${agents.dir}.`);
+        console.log("Delegate search/exploration to @codaph-explorer to keep file bulk out of the main context.");
+        console.log("For memory-backed answers, also run `codaph mcp setup claude` so the subagent can query Mubit.");
+      } else {
+        console.log(`Subagent(s) already present in ${agents.dir}.`);
+      }
+    } else if (agents.warning) {
+      console.warn(agents.warning);
+    }
+  }
+
+  console.log("Run a session, then `codaph tokens` to see token usage and cost.");
 }
 
 async function hooksRun(rest: string[]): Promise<void> {
@@ -4677,6 +4863,41 @@ function printAttribution(a: ContextAttribution, opts: { session: string | null;
   }
 }
 
+// `codaph tokens attribution --aggregate` — roll up attribution across many
+// sessions and rank the recurring (tool, target) pairs that drive the most
+// compounding tax. The top offloadable rows are the work-list for caching a
+// summary once (Phase 2.3): high $ × many sessions = a target whose summary
+// amortises across every future session that would otherwise re-read the bulk.
+function printAggregateAttribution(a: AggregateAttribution, opts: { limit: number; sinceIso: string | null }): void {
+  console.log(`Aggregate context-cost attribution${opts.sinceIso ? ` since ${opts.sinceIso}` : ""}`);
+  console.log(
+    `${a.sessions} session(s)${a.unpriced ? " (some unpriced — USD partial)" : ""}  ·  ${a.assistantTurns} assistant turns  ·  ` +
+      `${a.toolResults} tool results (${formatTokenInt(a.totalResultTokens)} tok)`,
+  );
+  console.log(`Actual cache cost: read ${formatUsd(a.cacheReadUsdActual)}  write ${formatUsd(a.cacheWriteUsdActual)}`);
+  const cacheTotal = a.cacheReadUsdActual + a.cacheWriteUsdActual;
+  const offloadPct = cacheTotal > 0 ? Math.min(100, Math.round((a.offloadableUsd / cacheTotal) * 100)) : 0;
+  console.log(
+    `Tool results drive ~${formatUsd(a.attributableUsd)} of context tax across these sessions; ~${formatUsd(a.offloadableUsd)} ` +
+      `is offloadable (~${offloadPct}% of cache cost).`,
+  );
+
+  const offloadable = a.targets.filter((t) => t.offloadable);
+  const shown = offloadable.slice(0, opts.limit);
+  if (shown.length > 0) {
+    console.log(`\nTop ${shown.length} recurring offloadable targets (cache a summary once → pays back every session):`);
+    for (const t of shown) {
+      const target = t.target ? `  ${t.target}` : "";
+      console.log(`  ⤴ ${formatUsd(t.totalUsd).padStart(8)}  ${t.toolName}${target}`);
+      console.log(
+        `      ${formatTokenInt(t.resultTokens)} tok · ${t.sessions} session(s) · ${t.occurrences} call(s)`,
+      );
+    }
+  } else {
+    console.log("\nNo recurring offloadable targets found across these sessions.");
+  }
+}
+
 // `codaph tokens attribution` — attribute a session's compounding cache-read
 // cost to the tool results that drive it, and estimate the quality-safe share
 // that subagent offloading could remove. Reads the latest session transcript by
@@ -4688,6 +4909,61 @@ async function tokensAttribution(flags: Flags): Promise<void> {
   const limitRaw = Number.parseInt(getStringFlag(flags, "limit") ?? "12", 10);
   const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? limitRaw : 12;
   const sessionFilter = getStringFlag(flags, "session");
+
+  // --aggregate: roll attribution up across every recorded session (optionally
+  // --since <date>) and rank the recurring offloadable targets worth caching.
+  if (getBooleanFlag(flags, "aggregate", false)) {
+    const sinceIso = resolveSinceIso(getStringFlag(flags, "since"));
+    const repoId = resolveRepoIdForProject(flags, cwd, settings);
+    const query = new QueryService(resolve(cwd, ".codaph"));
+    const events = await query.getTimeline({ repoId });
+    const records = events
+      .filter((event) => event.eventType === SESSION_TOKENS_EVENT_TYPE)
+      .filter((event) => !sinceIso || event.ts >= sinceIso)
+      .map((event) => parseSessionTokensPayload(event.payload))
+      .filter((record): record is SessionTokensPayload => record !== null)
+      .filter((record) => !sessionFilter || record.session_id === sessionFilter);
+
+    const attributions: ContextAttribution[] = [];
+    let missing = 0;
+    for (const record of latestSessionTokenRecords(records)) {
+      if (!record.transcript_path) {
+        missing += 1;
+        continue;
+      }
+      let content: string;
+      try {
+        content = readFileSync(record.transcript_path, "utf8");
+      } catch {
+        missing += 1;
+        continue;
+      }
+      const attribution = attributeContextCost(content, priceTable);
+      if (attribution) {
+        attributions.push(attribution);
+      }
+    }
+
+    if (attributions.length === 0) {
+      console.log(
+        sinceIso
+          ? `No readable session transcripts since ${sinceIso}.`
+          : "No readable session transcripts yet. Install the SessionEnd hook and run some Claude Code sessions.",
+      );
+      return;
+    }
+
+    const aggregate = aggregateAttributions(attributions);
+    if (flags.json === true) {
+      console.log(JSON.stringify({ since: sinceIso, missingTranscripts: missing, aggregate }, null, 2));
+      return;
+    }
+    printAggregateAttribution(aggregate, { limit, sinceIso });
+    if (missing > 0) {
+      console.log(`\n(${missing} session(s) skipped — transcript missing or unreadable.)`);
+    }
+    return;
+  }
 
   let transcriptPath = getStringFlag(flags, "transcript") ? resolve(getStringFlag(flags, "transcript") as string) : null;
   let sessionLabel = sessionFilter ?? null;
@@ -4847,7 +5123,7 @@ async function injectCommand(rest: string[]): Promise<void> {
 
   console.log(`\n=== SessionStart (source=${source}) ===`);
   const digest = await withTimeout(
-    buildSessionStartContext(engine, projectRunId, source, config),
+    buildSessionStartContext(engine, projectRunId, source, config, config.sessionStart.includeOverview ? readClaudeMd(cwd) : null),
     timeoutMs,
     "inject preview SessionStart",
   ).catch((error) => {

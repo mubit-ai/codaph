@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { normalizeAgentProviderList, type AgentProviderId } from "./lib/agent-providers";
 import { resolveGitHooksDir } from "./lib/git-paths";
+import { CODAPH_AGENT_MARKER, type ClaudeAgentSpec } from "./lib/claude-agents";
 import {
   readMubitRemoteSyncState,
   writeMubitRemoteSyncState,
@@ -497,20 +498,22 @@ export interface InstallClaudeHooksResult {
   manualSnippets: string[];
 }
 
-// Idempotently insert one or more hook entries into .claude/settings.json,
-// preserving any existing hooks (including the user's own). An entry is skipped
-// if its exact command already exists under that event.
-export async function installClaudeCodeHooksBestEffort(
-  repoRoot: string,
+// Idempotently insert hook entries into any JSON settings file's `hooks` object
+// (Claude `.claude/settings.json`, Gemini `.gemini/settings.json`, Codex
+// `.codex/hooks.json` — they share the {event: [{matcher, hooks:[{type,command}]}]}
+// shape per docs/injection-surfaces.md), preserving existing hooks (including the
+// user's own). An entry is skipped if its exact command already exists.
+export async function installJsonHookFileBestEffort(
+  settingsPath: string,
   specs: ClaudeHookSpec[],
+  label = "settings",
 ): Promise<InstallClaudeHooksResult> {
-  const settingsPath = join(repoRoot, ".claude", "settings.json");
   const manualSnippets = specs.map((spec) => spec.command);
   const existing = await readJsonObjectOrDefault(settingsPath);
   if (!existing.ok) {
     return {
       ok: false,
-      warning: `Claude Code settings update failed: ${existing.reason}`,
+      warning: `${label} update failed: ${existing.reason}`,
       installedEvents: [],
       manualSnippets,
     };
@@ -541,9 +544,84 @@ export async function installClaudeCodeHooksBestEffort(
   } catch (error) {
     return {
       ok: false,
-      warning: `unable to update Claude Code settings: ${error instanceof Error ? error.message : String(error)}`,
+      warning: `unable to update ${label}: ${error instanceof Error ? error.message : String(error)}`,
       installedEvents: [],
       manualSnippets,
+    };
+  }
+}
+
+// Idempotently insert hook entries into .claude/settings.json.
+export async function installClaudeCodeHooksBestEffort(
+  repoRoot: string,
+  specs: ClaudeHookSpec[],
+): Promise<InstallClaudeHooksResult> {
+  return installJsonHookFileBestEffort(join(repoRoot, ".claude", "settings.json"), specs, "Claude Code settings");
+}
+
+// Gemini reads hooks from .gemini/settings.json (same entry shape; the stdout
+// contract differs and is handled by the gemini hook-output format).
+export async function installGeminiHooksBestEffort(
+  repoRoot: string,
+  specs: ClaudeHookSpec[],
+): Promise<InstallClaudeHooksResult> {
+  return installJsonHookFileBestEffort(join(repoRoot, ".gemini", "settings.json"), specs, "Gemini CLI settings");
+}
+
+// Codex reads lifecycle hooks from .codex/hooks.json (same entry shape; the
+// stdout contract matches Claude's).
+export async function installCodexHooksBestEffort(
+  repoRoot: string,
+  specs: ClaudeHookSpec[],
+): Promise<InstallClaudeHooksResult> {
+  return installJsonHookFileBestEffort(join(repoRoot, ".codex", "hooks.json"), specs, "Codex hooks.json");
+}
+
+export interface InstallClaudeAgentsResult {
+  ok: boolean;
+  dir: string;
+  installed: string[]; // newly written / updated
+  skipped: string[]; // already up to date OR user-customized (left alone)
+  warning?: string;
+}
+
+// Install codaph-managed Claude Code subagent definitions into .claude/agents/.
+// Idempotent and non-destructive: writes a file only when it's absent or still
+// codaph-managed (carries CODAPH_AGENT_MARKER) and changed — a user's hand-edited
+// agent of the same name is left untouched. This is how codaph ships the
+// exploration-offload subagent that keeps file/search bulk out of the main
+// context (the token-reduction lever).
+export async function installClaudeCodeAgentsBestEffort(
+  repoRoot: string,
+  agents: ClaudeAgentSpec[],
+): Promise<InstallClaudeAgentsResult> {
+  const dir = join(repoRoot, ".claude", "agents");
+  const installed: string[] = [];
+  const skipped: string[] = [];
+  try {
+    await mkdir(dir, { recursive: true });
+    for (const agent of agents) {
+      const path = join(dir, `${agent.name}.md`);
+      const existing = await readTextFile(path);
+      if (existing != null && !existing.includes(CODAPH_AGENT_MARKER)) {
+        skipped.push(agent.name); // user-owned file — never clobber
+        continue;
+      }
+      if (existing === agent.content) {
+        skipped.push(agent.name); // already current
+        continue;
+      }
+      await writeFile(path, agent.content, "utf8");
+      installed.push(agent.name);
+    }
+    return { ok: true, dir, installed, skipped };
+  } catch (error) {
+    return {
+      ok: false,
+      dir,
+      installed,
+      skipped,
+      warning: `unable to install Claude Code subagents: ${error instanceof Error ? error.message : String(error)}`,
     };
   }
 }

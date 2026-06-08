@@ -3,6 +3,9 @@ import {
   DEFAULT_PRICE_TABLE,
   estimateTranscriptCost,
   parseTranscriptUsage,
+  parseCodexTranscriptUsage,
+  parseGeminiTranscriptUsage,
+  parseTranscriptUsageForProvider,
   resolveModelPrice,
   totalTokens,
 } from "../src/lib/token-accounting";
@@ -112,5 +115,76 @@ describe("estimateTranscriptCost", () => {
     expect(cost.byModelUsd["mystery-model"]).toBe(0);
     expect(cost.unpricedModels).toEqual(["mystery-model"]);
     expect(cost.totalUsd).toBeCloseTo(DEFAULT_PRICE_TABLE.opus.input, 6);
+  });
+});
+
+describe("parseCodexTranscriptUsage", () => {
+  it("takes the final cumulative total and splits cached from fresh input", () => {
+    const lines = [
+      JSON.stringify({ timestamp: "2026-05-19T10:05:08.077Z", type: "turn_context", payload: { cwd: "/repo", model: "gpt-5.5" } }),
+      // first token_count: cumulative so far
+      JSON.stringify({
+        timestamp: "2026-05-19T10:05:10Z",
+        type: "event_msg",
+        payload: { type: "token_count", info: { total_token_usage: { input_tokens: 1000, cached_input_tokens: 600, output_tokens: 100, reasoning_output_tokens: 30, total_tokens: 1100 }, last_token_usage: { input_tokens: 1000, cached_input_tokens: 600, output_tokens: 100 } } },
+      }),
+      // later token_count: cumulative grows — this final one is the session total
+      JSON.stringify({
+        timestamp: "2026-05-19T10:06:00Z",
+        type: "event_msg",
+        payload: { type: "token_count", info: { total_token_usage: { input_tokens: 5000, cached_input_tokens: 4000, output_tokens: 400, reasoning_output_tokens: 120, total_tokens: 5400 }, last_token_usage: { input_tokens: 4000, cached_input_tokens: 3400, output_tokens: 300 } } },
+      }),
+      // token_count with null info is ignored (no usage yet)
+      JSON.stringify({ timestamp: "2026-05-19T10:04:00Z", type: "event_msg", payload: { type: "token_count", info: null } }),
+    ];
+    const usage = parseCodexTranscriptUsage(lines.join("\n"));
+    expect(usage.totals.cacheRead).toBe(4000); // cached_input_tokens
+    expect(usage.totals.input).toBe(1000); // 5000 - 4000 fresh input
+    expect(usage.totals.output).toBe(400); // includes reasoning already
+    expect(usage.totals.cacheCreate).toBe(0);
+    expect(usage.totals.messages).toBe(2); // two token_count events with last_token_usage
+    expect(usage.cwd).toBe("/repo");
+    expect(usage.byModel["gpt-5.5"]?.cacheRead).toBe(4000);
+    expect(usage.lastTimestamp).toBe("2026-05-19T10:06:00Z");
+  });
+
+  it("returns empty usage for a transcript with no token_count info", () => {
+    const usage = parseCodexTranscriptUsage('{"type":"event_msg","payload":{"type":"token_count","info":null}}');
+    expect(totalTokens(usage.totals)).toBe(0);
+    expect(usage.byModel).toEqual({});
+  });
+});
+
+describe("parseGeminiTranscriptUsage", () => {
+  it("sums per-response usageMetadata across a JSONL log", () => {
+    const lines = [
+      JSON.stringify({ timestamp: "2026-05-01T00:00:00Z", model: "gemini-2.5-pro", role: "model", usageMetadata: { promptTokenCount: 1000, cachedContentTokenCount: 200, candidatesTokenCount: 50, thoughtsTokenCount: 10 } }),
+      JSON.stringify({ timestamp: "2026-05-01T00:01:00Z", role: "model", usageMetadata: { promptTokenCount: 2000, cachedContentTokenCount: 1500, candidatesTokenCount: 80, thoughtsTokenCount: 20 } }),
+    ];
+    const usage = parseGeminiTranscriptUsage(lines.join("\n"));
+    expect(usage.totals.cacheRead).toBe(1700); // 200 + 1500
+    expect(usage.totals.input).toBe(1300); // (1000-200) + (2000-1500)
+    expect(usage.totals.output).toBe(160); // 50+10 + 80+20
+    expect(usage.totals.messages).toBe(2);
+    expect(usage.byModel["gemini-2.5-pro"]?.cacheRead).toBe(1700);
+  });
+
+  it("walks a single nested JSON document and finds snake_case usage", () => {
+    const doc = JSON.stringify({ messages: [{ role: "model", response: { usage_metadata: { promptTokenCount: 500, cachedContentTokenCount: 0, candidatesTokenCount: 25 } } }] });
+    const usage = parseGeminiTranscriptUsage(doc);
+    expect(usage.totals.input).toBe(500);
+    expect(usage.totals.output).toBe(25);
+    expect(usage.totals.messages).toBe(1);
+  });
+});
+
+describe("parseTranscriptUsageForProvider", () => {
+  it("dispatches to the right parser per provider", () => {
+    const claude = JSON.stringify({ type: "assistant", message: { model: "claude-sonnet-4-6", usage: { input_tokens: 5, output_tokens: 7 } } });
+    expect(parseTranscriptUsageForProvider(claude, "claude").totals.input).toBe(5);
+    const codex = JSON.stringify({ type: "event_msg", payload: { type: "token_count", info: { total_token_usage: { input_tokens: 10, cached_input_tokens: 4, output_tokens: 3 }, last_token_usage: {} } } });
+    expect(parseTranscriptUsageForProvider(codex, "codex").totals.cacheRead).toBe(4);
+    const gemini = JSON.stringify({ usageMetadata: { promptTokenCount: 9, candidatesTokenCount: 2 } });
+    expect(parseTranscriptUsageForProvider(gemini, "gemini").totals.input).toBe(9);
   });
 });

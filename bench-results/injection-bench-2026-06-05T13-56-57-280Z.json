@@ -1,0 +1,347 @@
+{
+  "model": "claude-sonnet-4-6",
+  "reps": 2,
+  "arms": [
+    "off",
+    "session-only",
+    "pretool-shortcircuit"
+  ],
+  "rows": [
+    {
+      "task": "circuit-threshold",
+      "arm": "session-only",
+      "rep": 1,
+      "sessionId": "bda02cdd-feea-4d64-be8a-099fe62e7487",
+      "ok": true,
+      "error": null,
+      "billedUsd": 0.14019720000000002,
+      "codaphUsd": 0.3532977,
+      "usage": {
+        "input": 11,
+        "cacheCreate": 85266,
+        "cacheRead": 56124,
+        "output": 1112,
+        "messages": 5
+      },
+      "numTurns": 3,
+      "durationMs": 17955,
+      "injected": true
+    },
+    {
+      "task": "circuit-threshold",
+      "arm": "pretool-shortcircuit",
+      "rep": 1,
+      "sessionId": "dedc10de-2451-4106-97c3-bf458a9976cd",
+      "ok": true,
+      "error": null,
+      "billedUsd": 0.0988944,
+      "codaphUsd": 0.25502189999999997,
+      "usage": {
+        "input": 13,
+        "cacheCreate": 46112,
+        "cacheRead": 171743,
+        "output": 2036,
+        "messages": 7
+      },
+      "numTurns": 3,
+      "durationMs": 35302,
+      "injected": false
+    },
+    {
+      "task": "circuit-threshold",
+      "arm": "off",
+      "rep": 1,
+      "sessionId": "a74a8724-adf6-4656-8f30-b58ee6c06300",
+      "ok": true,
+      "error": null,
+      "billedUsd": 0.04260465,
+      "codaphUsd": 0.06512385,
+      "usage": {
+        "input": 11,
+        "cacheCreate": 2401,
+        "cacheRead": 137707,
+        "output": 985,
+        "messages": 5
+      },
+      "numTurns": 3,
+      "durationMs": 13787,
+      "injected": false
+    },
+    {
+      "task": "circuit-threshold",
+      "arm": "pretool-shortcircuit",
+      "rep": 2,
+      "sessionId": "b1f1e413-3ff1-44ee-85db-fa4e592c7c0a",
+      "ok": true,
+      "error": null,
+      "billedUsd": 0.06401505,
+      "codaphUsd": 0.15585645,
+      "usage": {
+        "input": 13,
+        "cacheCreate": 19767,
+        "cacheRead": 197754,
+        "output": 1491,
+        "messages": 7
+      },
+      "numTurns": 3,
+      "durationMs": 29955,
+      "injected": false
+    },
+    {
+      "task": "circuit-threshold",
+      "arm": "off",
+      "rep": 2,
+      "sessionId": "93fce0b3-357d-4839-a6b7-60056ca3c285",
+      "ok": true,
+      "error": null,
+      "billedUsd": 0.040357199999999996,
+      "codaphUsd": 0.0632664,
+      "usage": {
+        "input": 11,
+        "cacheCreate": 1898,
+        "cacheRead": 137103,
+        "output": 999,
+        "messages": 5
+      },
+      "numTurns": 3,
+      "durationMs": 13680,
+      "injected": false
+    },
+    {
+      "task": "circuit-threshold",
+      "arm": "session-only",
+      "rep": 2,
+      "sessionId": "934f9598-5029-4314-965b-6e38d98caedc",
+      "ok": true,
+      "error": null,
+      "billedUsd": 0.07484684999999999,
+      "codaphUsd": 0.15944714999999998,
+      "usage": {
+        "input": 11,
+        "cacheCreate": 29007,
+        "cacheRead": 112493,
+        "output": 1126,
+        "messages": 5
+      },
+      "numTurns": 3,
+      "durationMs": 16487,
+      "injected": true
+    },
+    {
+      "task": "dedup-index",
+      "arm": "pretool-shortcircuit",
+      "rep": 1,
+      "sessionId": "058b4400-8566-4f32-92e1-48807e77a9af",
+      "ok": true,
+      "error": null,
+      "billedUsd": 0.07355085,
+      "codaphUsd": 0.15545865,
+      "usage": {
+        "input": 11,
+        "cacheCreate": 27415,
+        "cacheRead": 111848,
+        "output": 1271,
+        "messages": 5
+      },
+      "numTurns": 3,
+      "durationMs": 36882,
+      "injected": false
+    },
+    {
+      "task": "dedup-index",
+      "arm": "off",
+      "rep": 1,
+      "sessionId": "32e9f0b6-9ad5-4165-a3f7-9d8aa4083686",
+      "ok": true,
+      "error": null,
+      "billedUsd": 0.0431955,
+      "codaphUsd": 0.0654345,
+      "usage": {
+        "input": 11,
+        "cacheCreate": 1580,
+        "cacheRead": 137805,
+        "output": 1209,
+        "messages": 5
+      },
+      "numTurns": 3,
+      "durationMs": 17252,
+      "injected": false
+    },
+    {
+      "task": "dedup-index",
+      "arm": "session-only",
+      "rep": 1,
+      "sessionId": "cdfd022b-f20b-4312-9973-8783d442f5e5",
+      "ok": true,
+      "error": null,
+      "billedUsd": 0.09186720000000001,
+      "codaphUsd": 0.23833845,
+      "usage": {
+        "input": 16,
+        "cacheCreate": 39865,
+        "cacheRead": 188389,
+        "output": 2152,
+        "messages": 8
+      },
+      "numTurns": 5,
+      "durationMs": 25633,
+      "injected": true
+    },
+    {
+      "task": "dedup-index",
+      "arm": "off",
+      "rep": 2,
+      "sessionId": "908f4084-1721-4a7b-b146-50d6b6f63256",
+      "ok": true,
+      "error": null,
+      "billedUsd": 0.045805799999999994,
+      "codaphUsd": 0.06807479999999999,
+      "usage": {
+        "input": 11,
+        "cacheCreate": 1784,
+        "cacheRead": 137806,
+        "output": 1334,
+        "messages": 5
+      },
+      "numTurns": 3,
+      "durationMs": 20259,
+      "injected": false
+    },
+    {
+      "task": "dedup-index",
+      "arm": "session-only",
+      "rep": 2,
+      "sessionId": "45d46f24-e987-4e01-a3c8-5cdcde246771",
+      "ok": true,
+      "error": null,
+      "billedUsd": 0.045230099999999995,
+      "codaphUsd": 0.0670791,
+      "usage": {
+        "input": 11,
+        "cacheCreate": 1940,
+        "cacheRead": 137087,
+        "output": 1243,
+        "messages": 5
+      },
+      "numTurns": 3,
+      "durationMs": 21159,
+      "injected": false
+    },
+    {
+      "task": "dedup-index",
+      "arm": "pretool-shortcircuit",
+      "rep": 2,
+      "sessionId": "8de6279e-dffe-4722-8e2a-da91dad3ffb2",
+      "ok": true,
+      "error": null,
+      "billedUsd": 0.04667925,
+      "codaphUsd": 0.06753825,
+      "usage": {
+        "input": 10,
+        "cacheCreate": 5455,
+        "cacheRead": 109340,
+        "output": 950,
+        "messages": 4
+      },
+      "numTurns": 2,
+      "durationMs": 22052,
+      "injected": false
+    }
+  ],
+  "summary": {
+    "baseline": "off",
+    "arms": [
+      {
+        "arm": "off",
+        "runs": 4,
+        "meanBilledUsd": 0.0429907875,
+        "meanTokens": 140663.75,
+        "meanCacheRead": 137605.25,
+        "meanOutput": 1131.75,
+        "meanTurns": 3,
+        "meanDurationMs": 16244.5,
+        "injectedRate": 0,
+        "savedTokens": 0,
+        "savedTokensPct": 0,
+        "savedPerSession": 0,
+        "savedPct": 0
+      },
+      {
+        "arm": "session-only",
+        "runs": 4,
+        "meanBilledUsd": 0.0880353375,
+        "meanTokens": 163963.25,
+        "meanCacheRead": 123523.25,
+        "meanOutput": 1408.25,
+        "meanTurns": 3.5,
+        "meanDurationMs": 20308.5,
+        "injectedRate": 0.75,
+        "savedTokens": -23299.5,
+        "savedTokensPct": -0.1656396903964241,
+        "savedPerSession": -0.04504455,
+        "savedPct": -1.0477721535107958
+      },
+      {
+        "arm": "pretool-shortcircuit",
+        "runs": 4,
+        "meanBilledUsd": 0.0707848875,
+        "meanTokens": 173807.25,
+        "meanCacheRead": 147671.25,
+        "meanOutput": 1437,
+        "meanTurns": 2.75,
+        "meanDurationMs": 31047.75,
+        "injectedRate": 0,
+        "savedTokens": -33143.5,
+        "savedTokensPct": -0.23562218410926766,
+        "savedPerSession": -0.027794100000000002,
+        "savedPct": -0.6465129302411592
+      }
+    ],
+    "perTask": [
+      {
+        "task": "circuit-threshold",
+        "offTok": 140557.5,
+        "byArm": {
+          "off": {
+            "tokens": 140557.5,
+            "tokDelta": 0,
+            "cost": 0.041480925
+          },
+          "session-only": {
+            "tokens": 142575,
+            "tokDelta": -2017.5,
+            "cost": 0.10752202500000001
+          },
+          "pretool-shortcircuit": {
+            "tokens": 219464.5,
+            "tokDelta": -78907,
+            "cost": 0.081454725
+          }
+        }
+      },
+      {
+        "task": "dedup-index",
+        "offTok": 140770,
+        "byArm": {
+          "off": {
+            "tokens": 140770,
+            "tokDelta": 0,
+            "cost": 0.044500649999999996
+          },
+          "session-only": {
+            "tokens": 185351.5,
+            "tokDelta": -44581.5,
+            "cost": 0.06854865
+          },
+          "pretool-shortcircuit": {
+            "tokens": 128150,
+            "tokDelta": 12620,
+            "cost": 0.06011505
+          }
+        }
+      }
+    ],
+    "okRuns": 12,
+    "totalRuns": 12
+  }
+}
